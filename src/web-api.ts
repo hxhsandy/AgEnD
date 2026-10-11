@@ -1,4 +1,5 @@
 import { binaryProbe } from "./binary-probe.js";
+import type { CachedImage } from "./web-images.js";
 import type { SettingsExecution } from "./settings-transaction.js";
 import type { PaneContextSource } from "./pane-context-cache.js";
 import { settingsRequestExecution, settingsWrite, isSettingsReplay } from "./settings-request-capability.js";
@@ -195,6 +196,12 @@ export interface WebApiContext {
   readonly webChatHistory?: WebChatHistory;
   /** Uploads and the files the dashboard may fetch back (web track C2); absent: no file routes. */
   readonly webFiles?: WebFileLedger;
+  /** #1630: a cached avatar (an own bot's, or the picture uploaded in View) — never a fetch; null when there is none. */
+  webImage?(kind: "bot" | "avatar", key: string): CachedImage | null;
+  /** #1630: one Discord server emoji of the fleet's bots, from the host cache (fetched once); null for any other id. */
+  webEmoji?(id: string): Promise<CachedImage | null>;
+  /** #1630: the custom emoji of the servers the fleet's Discord bots are in. */
+  webEmojiList?(): Promise<Array<{ id: string; name: string; animated: boolean }>>;
   /** Absent means SSE_HEARTBEAT_MS; a test shortens it. */
   readonly sseHeartbeatMs?: number;
   startInstance(name: string, config: unknown, topicMode: boolean): Promise<void>;
@@ -255,6 +262,17 @@ function json(res: ServerResponse, status: number, data: unknown): void {
   res.setHeader("Content-Type", "application/json");
   res.writeHead(status);
   res.end(JSON.stringify(data));
+}
+
+/**
+ * #1630 (#1635 review): an answer that waited on something (a list, a download) is sent only if the request is still
+ * allowed — the session not revoked meanwhile, a public link's exposure still current. Otherwise 401, and nothing.
+ */
+function stillAuthorized(req: IncomingMessage, res: ServerResponse, url: URL, ctx: WebApiContext): boolean {
+  if (!permitWebContinuation(req, res, ctx)) return false;
+  if (isWebRequestAuthorized(req, url, ctx.webToken, ctx.webSessions, { touch: false })) return true;
+  json(res, 401, { error: WEB_TOKEN_INVALID_MESSAGE });
+  return false;
 }
 
 /**
@@ -479,6 +497,35 @@ export function handleWebRequest(
     res.setHeader("Content-Security-Policy", "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox");
     res.writeHead(200);
     res.end(bytes);
+    return true;
+  }
+
+  // ── #1630: avatars and Discord server emoji, same-origin (the page never loads a platform's CDN; img-src stays 'self') ──
+
+  const imageMatch = path.match(/^\/ui\/img\/(bot|avatar|emoji)\/([^/]+)$/);
+  if (method === "GET" && imageMatch) {
+    const kind = imageMatch[1] as "bot" | "avatar" | "emoji";
+    let key: string;
+    try { key = decodeURIComponent(imageMatch[2]!); } catch { json(res, 404, { error: "No such image" }); return true; }
+    const send = (image: CachedImage | null): void => {
+      if (res.headersSent || res.destroyed) return;
+      if (!stillAuthorized(req, res, url, ctx)) return;
+      if (!image) { json(res, 404, { error: "No such image" }); return; }
+      res.setHeader("Content-Type", image.mime);
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      // A changed avatar is a new URL (?v=); an emoji id is one picture for good.
+      res.setHeader("Cache-Control", "private, max-age=86400");
+      res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
+      res.writeHead(200);
+      res.end(image.bytes);
+    };
+    if (kind === "emoji") { (ctx.webEmoji ? ctx.webEmoji(key) : Promise.resolve(null)).then(send, () => send(null)); return true; }
+    send(ctx.webImage?.(kind, key) ?? null);
+    return true;
+  }
+  if (method === "GET" && path === "/ui/emojis") {
+    const answer = (emojis: Array<{ id: string; name: string; animated: boolean }>) => { if (!res.headersSent && !res.destroyed && stillAuthorized(req, res, url, ctx)) json(res, 200, { emojis }); };
+    (ctx.webEmojiList ? ctx.webEmojiList() : Promise.resolve([])).then(answer, () => answer([]));
     return true;
   }
 
