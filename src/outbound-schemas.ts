@@ -50,7 +50,7 @@ export const EditMessageArgs = z.object({
   ...ChannelAddressFields,
   message_id: NonEmptyString,
   text: NonEmptyString,
-  format: MessageFormat.optional().describe("Currently ignored: an edit is sent without a rendering mode."),
+  format: MessageFormat.optional().describe("Rendering mode, as for reply. Default: 'text'."),
 });
 
 export const DownloadAttachmentArgs = z.object({
