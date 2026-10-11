@@ -3,6 +3,7 @@ import { basename } from "node:path";
 import { agentConflict, draftQuickstart, newConnectionConflict, planQuickstart, validateWizardInput, withExistingAgent, wizardChannels, type WizardPlanInput } from "./quickstart-api.js";
 import type { FleetConfig } from "./types.js";
 import { settingsChangeDiff, type SettingsChangeDiff } from "./settings-change.js";
+import { parseWebSettingsBody } from "./web-settings-patch.js";
 import { SettingsConfirmationError } from "./settings-confirmation.js";
 import { validateFleetConfig, validateClassicBotConfig } from "./config-validator.js";
 import { settingsEffectAuthority, settingsSecretAuthority, type SettingsChangeAuthority } from "./settings-authority.js";
@@ -68,8 +69,24 @@ export function prepareSettingsEffect(method: string, path: string, body: unknow
     if (after.fleet.defaults.locale === null || after.fleet.defaults.locale === "") delete after.fleet.defaults.locale;
   } else if (path === "/api/settings/fleet/web") {
     if (!cfg) throw new SettingsConfirmationError(503, "fleet_unavailable");
-    const patch = record(body); after.fleet.web = { ...cfg.web, ...patch };
-    if (patch.public_link) after.fleet.web.public_link = { ...cfg.web?.public_link, ...patch.public_link };
+    // #1620: read as the handler reads it (one parser): what it would refuse — a read-only web field, a malformed limit —
+    // is refused here, never proposed (#1627 review). null = back to the default.
+    const parsed = parseWebSettingsBody(body);
+    if ("error" in parsed) throw new SettingsConfirmationError(400, "invalid_web_settings");
+    const { session: sessionPatch, terminal: terminalPatch } = parsed;
+    after.fleet.web = { ...cfg.web };
+    if (parsed.echo !== undefined) after.fleet.web.echo_to_channel = parsed.echo;
+    if (parsed.publicLink && Object.keys(parsed.publicLink).length) after.fleet.web.public_link = { ...cfg.web?.public_link, ...parsed.publicLink };
+    if (sessionPatch) {
+      const local: Record<string, any> = { ...cfg.web?.session?.local, ...sessionPatch };
+      for (const k of Object.keys(local)) if (local[k] === null) delete local[k];
+      after.fleet.web.session = { ...cfg.web?.session, local };
+    }
+    if (terminalPatch) {
+      const wt: Record<string, any> = { ...cfg.web_terminal, ...terminalPatch };
+      for (const k of Object.keys(wt)) if (wt[k] === null) delete wt[k];
+      after.fleet.web_terminal = wt;
+    }
   } else if (path === "/api/settings/classic/defaults") {
     after.classic.defaults = { ...(before.classic.defaults ?? {}), ...record(body) };
     for (const key of ["tool_progress", "reply_completion_guard"]) if (after.classic.defaults[key] === null) delete after.classic.defaults[key];

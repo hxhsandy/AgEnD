@@ -3,7 +3,7 @@ import { settingsRequestExecution, settingsWrite } from "./settings-request-capa
 import { noteSettingsWrite, settingsUndo, undoSettingsPaths, type SettingsExecution } from "./settings-transaction.js";
 import { readBoundedWebBody } from "./web-body.js";
 import { gatewayRequestContext } from "./web-request-context.js";
-import { validPublicLinkPatch } from "./public-web-link.js";
+import { parseWebSettingsBody } from "./web-settings-patch.js";
 import { permitWebContinuation } from "./web-continuation.js";
 import { redactInlineSecrets, restoreRedactedSecrets } from "./settings-redaction.js";
 /**
@@ -645,28 +645,56 @@ export function handleSettingsRequest(
 
   // One hot web toggle; an unrelated Settings edit never materializes defaults.
   if (method === "PUT" && path === "/api/settings/fleet/web") {
+    // #1620: never over the temporary public link — refused before the body is read (the confirmation gate refuses it
+    // first; this is the second wall, for any path that reaches the handler without it).
+    if (gatewayRequestContext(req)) { json(res, 403, { error: "web_settings_not_over_public_link" }); return true; }
     if (!cfg) { json(res, 503, { error: "fleet not loaded" }); return true; }
     readBody(req, 4096).then(buf => {
       if (!permitWebContinuation(req, res, ctx)) return;
       let body: unknown;
       try { body = JSON.parse(buf.toString("utf-8")); } catch { return json(res, 400, { error: "invalid JSON" }); }
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).some(key => key !== "echo_to_channel" && key !== "public_link")) return json(res, 400, { error: "unknown web field" });
-      const patch = body as { echo_to_channel?: unknown; public_link?: unknown };
-      if (patch.echo_to_channel !== undefined && typeof patch.echo_to_channel !== "boolean") return json(res, 400, { error: "echo_to_channel must be a boolean" });
-      if (patch.public_link !== undefined && !validPublicLinkPatch(patch.public_link)) return json(res, 400, { error: "invalid public_link settings" });
+      const parsed = parseWebSettingsBody(body);
+      if ("error" in parsed) return json(res, 400, { error: parsed.error });
+      const { session: sessionPatch, terminal: terminalPatch } = parsed;
       const changes: RawConfigPatch[] = [];
       const web = { ...cfg.web };
-      if (typeof patch.echo_to_channel === "boolean") { web.echo_to_channel = patch.echo_to_channel; changes.push({ path: ["web", "echo_to_channel"], value: patch.echo_to_channel }); }
-      if (validPublicLinkPatch(patch.public_link)) {
-        if (Object.keys(patch.public_link).length) web.public_link = { ...web.public_link, ...patch.public_link };
-        for (const [key, value] of Object.entries(patch.public_link)) changes.push({ path: ["web", "public_link", key], value });
+      let webTerminal = cfg.web_terminal;
+      if (parsed.echo !== undefined) { web.echo_to_channel = parsed.echo; changes.push({ path: ["web", "echo_to_channel"], value: parsed.echo }); }
+      if (parsed.publicLink) {
+        if (Object.keys(parsed.publicLink).length) web.public_link = { ...web.public_link, ...parsed.publicLink };
+        for (const [key, value] of Object.entries(parsed.publicLink)) changes.push({ path: ["web", "public_link", key], value });
+      }
+      if (sessionPatch) {
+        const local: Record<string, number> = { ...web.session?.local };
+        for (const [key, value] of Object.entries(sessionPatch)) {
+          if (value === null) { delete local[key]; changes.push({ path: ["web", "session", "local", key], value: undefined, remove: true }); }
+          else { local[key] = value; changes.push({ path: ["web", "session", "local", key], value }); }
+        }
+        web.session = { ...web.session, local };
+      }
+      if (terminalPatch) {
+        const wt: Record<string, unknown> = { ...cfg.web_terminal };
+        for (const [key, value] of Object.entries(terminalPatch)) {
+          if (value === null) { delete wt[key]; changes.push({ path: ["web_terminal", key], value: undefined, remove: true }); }
+          else { wt[key] = value; changes.push({ path: ["web_terminal", key], value }); }
+        }
+        webTerminal = wt as typeof cfg.web_terminal;
       }
       if (!changes.length) return json(res, 200, { ok: true });
       const before = validateFleetConfig(cfg);
-      const after = validateFleetConfig({ ...cfg, web });
+      const after = validateFleetConfig({ ...cfg, web, web_terminal: webTerminal });
       if (rejectIfWorse(res, before, after)) return;
-      settingsWrite(req, () => { cfg.web = web; ctx.saveFleetConfig(changes); });
+      const previous = { web: cfg.web, hadWeb: "web" in cfg, terminal: cfg.web_terminal, hadTerminal: "web_terminal" in cfg };
+      try {
+        settingsWrite(req, () => { cfg.web = web; if (terminalPatch) cfg.web_terminal = webTerminal; ctx.saveFleetConfig(changes); });
+      } catch (err) {
+        // #1627 review: the save refused (fleet.yaml unchanged): memory goes back to what the file still says — a session
+        // limit or the browser terminal must never be live while the file (and the next start) says otherwise.
+        if (previous.hadWeb) cfg.web = previous.web; else delete (cfg as { web?: unknown }).web;
+        if (previous.hadTerminal) cfg.web_terminal = previous.terminal; else delete (cfg as { web_terminal?: unknown }).web_terminal;
+        ctx.logger.warn({ err }, "settings: web save refused");
+        return json(res, 500, { ok: false, error: (err as Error).message });
+      }
       json(res, 200, { ok: true, warnings: saveWarnings(before, after) });
     }).catch(() => json(res, 400, { error: "bad request" }));
     return true;
