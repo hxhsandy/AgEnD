@@ -13,7 +13,7 @@ import { t } from "/assets/app-i18n.js";
 import { appStore, useStore } from "/assets/app-store.js";
 import { useLease } from "/assets/app-ctx.js";
 import { DevicePrefs, PanelHeader, PendingChanges, setTitle } from "/assets/app-shell.js";
-import { navigate, setLeaveGuard } from "/assets/app-nav.js";
+import { navigate, navStore, setLeaveGuard } from "/assets/app-nav.js";
 import { chatPath, settingsPath, SETTINGS_SECTIONS } from "/assets/app-route.js";
 import { Dialog } from "/assets/ui-dialog.js";
 import { Empty, ErrorState, Skeleton } from "/assets/ui-states.js";
@@ -269,9 +269,25 @@ export function DeviceSection() {
     let last = null;
     try { last = localStorage.getItem("agend_last_instance"); } catch { /* none */ }
     navigate(last ? chatPath(last) : "/ui");
-    // The tour points at the chat's own controls: start it once the chat has drawn (bounded wait).
+    // This replay belongs to the navigation it just made — that one, by its sequence number, not by URL (A → B → A, or
+    // the same path again, is a new navigation). It did not happen (a leave guard said no) or it is not the chat:
+    // nothing. Left meanwhile (another page, another navigation): nothing (#1609 review).
+    const nav = navStore.get();
+    if (!nav.route || nav.route.panel !== "chat") return;
+    const mine = nav.seq;
+    const current = () => navStore.get().seq === mine;
+    // The tour points at the chat's own controls: start it once the CHAT has drawn — its Send button, not #main (the
+    // shell's landmark is on every page, Settings included) — waiting at most ~3 s (#1608 review); a chat that has not
+    // drawn by then (its module failed, an unknown instance) gets no tour. The focus goes to the composer first: the
+    // tour returns it there when it ends, not to this button, which is gone.
     let tries = 0;
-    const go = () => { if (document.getElementById("main") || ++tries > 30) startTour(); else setTimeout(go, 100); };
+    const go = () => {
+      if (!current()) return;
+      if (!document.getElementById("sendBtn")) { if (++tries <= 30) setTimeout(go, 100); return; }
+      const here = document.getElementById("msgIn") || document.getElementById("main");
+      if (here && typeof here.focus === "function") here.focus();
+      if (current()) startTour();
+    };
     setTimeout(go, 0);
   };
   return html`<section class="card s-device"><h3>${tn("sec_device")}</h3>

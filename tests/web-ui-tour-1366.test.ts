@@ -175,12 +175,73 @@ describe("the first sign-in tour (#1366)", () => {
     expect(btn.textContent).toMatch(/Tour/);
     p.shell.openDrawer();
     (p.doc.getElementById("sbOpen") as any).focus();
+    // #1608 review: it waits for the CHAT (its Send button), not the shell's #main that every page has.
+    const send = p.doc.getElementById("sendBtn") as any;
+    send.remove();
     btn.click();
     await settle(); await settle();
+    expect(!!p.card(), "not before the chat has drawn").toBe(false);
+    p.doc.body.append(send);
+    await new Promise(r => setTimeout(r, 150)); await settle();
     expect(p.shell.shellStore.get().drawer).toBe(false);
     expect(p.text()).toMatch(/Pick an instance/);
     expect(p.doc.activeElement?.textContent).toBe("Next");
     expect((globalThis as any).location.pathname, "replayed on the chat it points at").toBe("/ui");
+    // Ended: the focus goes back to the composer — a place that is still there (not Settings' gone button).
+    p.click(p.button("Skip"));
+    expect(p.doc.activeElement?.id).toBe("msgIn");
+  });
+
+  // #1609 review: the replay belongs to the chat navigation it made — not after a timeout, not on another page, not on a
+  // later navigation to the same chat.
+  async function replayHarness() {
+    const p = await load({ storage: { [TOUR_KEY]: "1" }, narrow: false, install: false });
+    // @ts-expect-error — a JS module of the app, with no types
+    const panel = await import("../src/ui/panel-chat.js");
+    panel.boot({ stream: { on() {} }, boot: undefined, deps: { fetch: () => new Promise(() => {}) } });
+    const preact = await import("/assets/preact.module.js");
+    // @ts-expect-error — a JS module of the app, with no types
+    const settings = await import("../src/ui/panel-settings.js");
+    const nav = await import("/assets/app-nav.js");
+    nav.startRouter((globalThis as any).window);
+    const host = p.doc.createElement("div"); p.doc.body.append(host);
+    preact.render(preact.h(settings.DeviceSection, {}), host);
+    await settle();
+    const send = p.doc.getElementById("sendBtn") as any;
+    send.remove();                                            // the chat has not drawn yet
+    (host.querySelector("#tourBtn") as any).click();
+    await settle();
+    return { p, nav, send };
+  }
+  it("#1609: a chat that never draws (its module failed, an unknown instance) gets no tour — the wait ends, it does not fall through", async () => {
+    const { p } = await replayHarness();
+    await new Promise(r => setTimeout(r, 3600)); await settle();
+    expect(!!p.card()).toBe(false);
+  });
+  it("#1609: left for another page while it waited — the old replay does nothing there", async () => {
+    const { p, nav, send } = await replayHarness();
+    nav.navigate("/ui/fleet");
+    (p.doc.getElementById("sbOpen") as any).focus();          // where the person is on that page
+    p.doc.body.append(send);                                  // (an element with that id shows up later, anywhere)
+    await new Promise(r => setTimeout(r, 400)); await settle();
+    expect(!!p.card()).toBe(false);
+    expect(p.doc.activeElement?.id, "nor does it move the focus there").toBe("sbOpen");
+  });
+  it("#1609: away and back to the same chat (a new navigation, the same URL) — the old replay does nothing", async () => {
+    const { p, nav, send } = await replayHarness();
+    nav.navigate("/ui/fleet");
+    nav.navigate("/ui");
+    p.doc.body.append(send);
+    await new Promise(r => setTimeout(r, 400)); await settle();
+    expect(!!p.card()).toBe(false);
+  });
+  it("#1609 control: the same chat drawing within the wait gets the tour, and Skip returns to the composer", async () => {
+    const { p, send } = await replayHarness();
+    p.doc.body.append(send);
+    await new Promise(r => setTimeout(r, 300)); await settle();
+    expect(!!p.card()).toBe(true);
+    p.click(p.button("Skip"));
+    expect(p.doc.activeElement?.id).toBe("msgIn");
   });
 
   it("on a phone it outlines what is on screen: ☰ for the instance list, the tab's badge for 'needs you' (#1408 step 5)", async () => {
