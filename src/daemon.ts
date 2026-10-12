@@ -4767,6 +4767,20 @@ export class Daemon extends EventEmitter {
       this.pauseRequested = false;
       return;
     }
+    // #1717: an idle pause is AgEnD-initiated and silent — it must not kill
+    // the user's running background work the way an explicit stop may. Defer
+    // this cycle while the backend reports background work; the next idle
+    // tick retries once the task ends. A pane-capture failure proceeds (the
+    // quit-menu handler below stays the backstop), never wedges unpaused.
+    if (this.backend?.backgroundWorkRunning && this.tmux) {
+      try {
+        if (this.backend.backgroundWorkRunning(await this.tmux.capturePane())) {
+          this.logger.info("Deferring auto-pause: background work is still running");
+          this.pauseRequested = false;
+          return;
+        }
+      } catch { /* capture failed — pause as before */ }
+    }
 
     this.pauseWakeState = "pausing";
     this.healthCheckPaused = true;
