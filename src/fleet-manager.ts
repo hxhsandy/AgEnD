@@ -16806,6 +16806,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
 
     this.instanceWorldBinding.delete(ch.instanceName);
     // #1716: say so in the reply when background work was ended with the stop.
+    // Null-safe: a foreign stopInstance stub may resolve nothing at all.
     const stopOutcome = await this.stopInstance(ch.instanceName).catch(err => {
       this.logger.warn({ err, instanceName: ch.instanceName }, "Failed to stop classic instance");
       return { backgroundWorkEnded: false };
@@ -16814,7 +16815,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     this.reregisterClassicChannels();
     this.logger.info({ channelId, adapterId, instanceName: ch.instanceName }, "Classic channel stopped");
     return t("classic.stopped")
-      + (stopOutcome.backgroundWorkEnded ? `\n${t("classic.stopped_bg_work")}` : "");
+      + (stopOutcome?.backgroundWorkEnded ? `\n${t("classic.stopped_bg_work")}` : "");
   }
 
   /**
