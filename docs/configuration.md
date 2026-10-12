@@ -596,8 +596,13 @@ backend/profile bindings of running or paused instances. Active Kiro `work` and
 binding uses the default row. Sources used only by stopped or crashed instances
 are filtered out.
 
-Claude Code profiles do not have rows of their own yet; the Claude row still reads
-the default login.
+Claude Code profiles get rows of their own too: `Claude (work)` reads the `work`
+profile's own login (on macOS, its Keychain item), never the default one. When the
+usage API cannot answer, a row falls back only to the rate limits that its own
+instances' statuslines wrote. A profile that is not logged in shows "Not logged in"
+with `/login claude-code <profile>` and the exact line that signs it in on the host,
+and never another account's numbers. A fleet
+without Claude profiles shows the one `Claude` row exactly as before.
 
 An active Kiro profile without a readable login retains a signed-out hint.
 Visibility also depends on the provider: Codex rows without OAuth usage

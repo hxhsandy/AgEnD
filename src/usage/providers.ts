@@ -20,18 +20,22 @@
  */
 import { readFile, writeFile, access, constants } from "node:fs/promises";
 import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
+import { execFile } from "node:child_process";
 import { getAgendHome } from "../paths.js";
 import { loadFleetConfig } from "../config.js";
 import { classicProfile, profileName, readClassicBindings, type ClassicBinding } from "../classic-bindings.js";
 import {
+  CHAT_PROFILE_LOGIN_BACKENDS,
   credentialHomeSpec,
+  credentialProfileLoginCommand,
   credentialProfileStoreHome,
   instanceCredentialProfile,
   listConfiguredProfiles,
 } from "../backend/credential-profile.js";
+import { claudeKeychainService } from "../backend/claude-code.js";
 import { readKiroAuthTokens, type KiroStoredToken } from "../backend/kiro-auth-store.js";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { getProviderRateLimit } from "./provider-alerts.js";
 import { MUSE_USAGE_STALE_MS, readMuseUsageSnapshot } from "../muse-usage-relay.js";
 import {
@@ -297,43 +301,160 @@ export function statuslineUsage(
   };
 }
 
+type ClaudeOAuthFile = { accessToken?: string; expiresAt?: number; subscriptionType?: string; rateLimitTier?: string };
+
+/** `claudeAiOauth` of a credentials document (the `.credentials.json` file, or the same JSON in a Keychain item). */
+function claudeOAuthOf(json: string): ClaudeOAuthFile | null {
+  try {
+    const value = (JSON.parse(json) as { claudeAiOauth?: unknown } | null)?.claudeAiOauth;
+    return value && typeof value === "object" ? value as ClaudeOAuthFile : null;
+  } catch {
+    return null;
+  }
+}
+async function readClaudeCredentialsFile(dir: string): Promise<ClaudeOAuthFile | null> {
+  try { return claudeOAuthOf(await readFile(join(dir, ".credentials.json"), "utf8")); } catch { return null; }
+}
+
+/** `security find-generic-password -w`: the item's secret, or null (no such item, locked, not macOS). */
+type KeychainRead = (service: string, account: string) => Promise<string | null>;
+const readKeychainItem: KeychainRead = (service, account) => new Promise(done => {
+  execFile("security", ["find-generic-password", "-a", account, "-w", "-s", service], { timeout: 5_000 }, (err, stdout) => {
+    done(err ? null : String(stdout).trim() || null);
+  });
+});
+const defaultKeychain = () => ({ platform: process.platform, read: readKeychainItem, username: () => userInfo().username });
+let claudeKeychain: { platform: NodeJS.Platform; read: KeychainRead; username: () => string } = defaultKeychain();
+/** Test seam (#1699): the platform, the Keychain read and the OS user name; null restores all three. */
+export function setClaudeKeychainForTests(seam: Partial<typeof claudeKeychain> | null): void {
+  claudeKeychain = seam ? { ...claudeKeychain, ...seam } : defaultKeychain();
+}
+
+/**
+ * The account claude files its Keychain item under (2.1.296, as Prism read it from the official darwin bundle, #1713
+ * review): `$USER`, else the OS user name; one that cannot be read or is not `[a-zA-Z0-9._-]+` is "claude-code-user".
+ */
+function claudeKeychainAccount(): string {
+  let name: string | undefined;
+  try { name = process.env.USER || claudeKeychain.username(); } catch { name = undefined; }
+  return name && /^[a-zA-Z0-9._-]+$/.test(name) ? name : "claude-code-user";
+}
+
+/**
+ * A credential profile's own Claude login (#1699) — and nothing else: on macOS the Keychain item claude keeps for
+ * exactly this config dir (claudeKeychainService; the account is $USER, as claude names it), else — or when that has
+ * none — the dir's `.credentials.json`. Never the shared login, `CLAUDE_CODE_OAUTH_TOKEN` or a shell rc: those are
+ * another account's, and their numbers on this row would be a lie about this subscription.
+ */
+async function readClaudeProfileLogin(configDir: string): Promise<ClaudeOAuthFile | null> {
+  if (claudeKeychain.platform === "darwin") {
+    // As claude: a credentials document in the Keychain is THE login — one with no OAuth in it (say only MCP
+    // logins) means no OAuth login, and an older `.credentials.json` beside it is not consulted (#1713 review).
+    const secret = await claudeKeychain.read(claudeKeychainService(configDir), claudeKeychainAccount());
+    const document = secret ? credentialsDocument(secret) : null;
+    if (document) return claudeOAuthOf(secret!);
+  }
+  return readClaudeCredentialsFile(configDir);
+}
+
+/** A credentials document (any JSON object), or null — unparseable is no document, as claude reads its storage. */
+function credentialsDocument(json: string): Record<string, unknown> | null {
+  try { const v: unknown = JSON.parse(json); return v && typeof v === "object" ? v as Record<string, unknown> : null; } catch { return null; }
+}
+
+/**
+ * Whether a token the profile's own login does not control can reach claude in a profile's pane: AgEnD sets only
+ * `CLAUDE_CONFIG_DIR` for a profile, so `CLAUDE_CODE_OAUTH_TOKEN` from the fleet's environment, or set in a shell rc
+ * the pane's shell reads, still signs it in — and outranks the stored login (#1713 review).
+ */
+function envTokenReachesClaude(): boolean {
+  return !!process.env.CLAUDE_CODE_OAUTH_TOKEN?.trim() || shellRcSetsClaudeToken((path) => readFileSync(path, "utf-8"));
+}
+
+/**
+ * Whether a shell rc sets `CLAUDE_CODE_OAUTH_TOKEN` at all — any assignment, export or declaration that is not a
+ * comment, whatever its value: `"$OTHER"` or `${OTHER}` is a token once the pane's shell expands it, so unlike
+ * tokenFromShellRc (which must hand the API a literal bearer) this never discounts one it cannot read (#1713 review).
+ * Files those rcs `source` are not followed.
+ */
+export function shellRcSetsClaudeToken(
+  read: (path: string) => string,
+  home = homedir(),
+  files: readonly string[] = SHELL_RC_FILES,
+): boolean {
+  const sets = [
+    /^[ \t]*(?:(?:export|readonly|local|declare|typeset)(?:[ \t]+-[a-zA-Z]+)*[ \t]+(?:[^#\n]*[ \t])?)?CLAUDE_CODE_OAUTH_TOKEN[ \t]*=/m,
+    /^[ \t]*(?:export|declare[ \t]+-[a-zA-Z]*x[a-zA-Z]*|typeset[ \t]+-[a-zA-Z]*x[a-zA-Z]*)[ \t]+(?:[^#\n]*[ \t])?CLAUDE_CODE_OAUTH_TOKEN\b/m,
+    /^[ \t]*setenv[ \t]+CLAUDE_CODE_OAUTH_TOKEN\b/m,
+  ];
+  for (const file of files) {
+    let content: string;
+    try { content = read(join(home, file)); } catch { continue; }
+    if (sets.some((re) => re.test(content))) return true;
+  }
+  return false;
+}
+
+/** `path` is `dir` or inside it. */
+const isWithin = (path: string, dir: string) => { const p = resolve(path); return p === dir || p.startsWith(dir + sep); };
+
 /**
  * Best-effort OAuth access token for direct Anthropic API calls (the /model
  * catalog probe). Same resolution order as the usage panel: credentials file →
- * CLAUDE_CODE_OAUTH_TOKEN → shell rc. Null when nothing usable exists.
+ * CLAUDE_CODE_OAUTH_TOKEN → shell rc. Null when nothing usable exists. With
+ * `storeHome` (a credential profile's config dir, #1699): that profile's login only.
  */
-export async function getClaudeOAuthToken(): Promise<string | null> {
-  const home = process.env.CLAUDE_HOME || join(homedir(), ".claude");
-  let file: { accessToken?: string; expiresAt?: number } | null;
-  try {
-    file = JSON.parse(await readFile(join(home, ".credentials.json"), "utf8")).claudeAiOauth ?? null;
-  } catch {
-    file = null;
-  }
-  const auth = resolveClaudeAuth(file);
+export async function getClaudeOAuthToken(storeHome?: string): Promise<string | null> {
+  const auth = storeHome !== undefined
+    ? resolveClaudeAuth(await readClaudeProfileLogin(storeHome), {}, () => null)
+    : resolveClaudeAuth(await readClaudeCredentialsFile(process.env.CLAUDE_HOME || join(homedir(), ".claude")));
   return auth && "token" in auth ? auth.token : null;
 }
 
-/** Exported for tests — the statusline/API preference order is the subject. */
-export async function fetchClaudeUsage(): Promise<Omit<ProviderUsage, "id" | "name">> {
-  const home = process.env.CLAUDE_HOME || join(homedir(), ".claude");
-  let file: { accessToken?: string; expiresAt?: number; subscriptionType?: string; rateLimitTier?: string } | null;
-  try {
-    file = JSON.parse(await readFile(join(home, ".credentials.json"), "utf8")).claudeAiOauth ?? null;
-  } catch {
-    file = null;
-  }
+/** Which subscription a Claude row is (#1699): a profile's (with its name), or the shared one beside profiles. */
+export interface ClaudeUsageScope { profile?: string; besideProfiles?: boolean }
+
+/**
+ * Exported for tests — the statusline/API preference order is the subject.
+ *
+ * `storeHome` (#1699): a credential profile's config dir — the row reads that profile's login and only the rate
+ * limits its own instances wrote (their conversations are under its `projects/`); a profile with no login says so,
+ * with the line that signs it in, and never shows the shared account's numbers. Without it: the shared login as
+ * always; beside profiles (`besideProfiles`), its statusline fallback leaves the profiles' instances out.
+ */
+export async function fetchClaudeUsage(storeHome?: string, scope: ClaudeUsageScope = {}): Promise<Omit<ProviderUsage, "id" | "name">> {
+  const profileHome = storeHome !== undefined ? resolve(storeHome) : null;
+  const file = profileHome !== null
+    ? await readClaudeProfileLogin(profileHome)
+    : await readClaudeCredentialsFile(process.env.CLAUDE_HOME || join(homedir(), ".claude"));
 
   // Read before anything else: it costs one stat per instance, needs no token,
   // and it is what keeps the panel useful when the API path cannot run at all.
-  const statusline = readStatuslineRateLimits();
+  // A profile's: only readings written under its own `projects/` — and only when nothing but its own login can
+  // have signed those instances in. Where the conversation is says which config dir, not whose subscription: with
+  // a token in the environment the readings may be another account's, so none is this row's (#1713 review).
+  const profilesRoot = resolve(getAgendHome(), "credential-profiles", "claude-code");
+  const statusline = profileHome !== null
+    ? (envTokenReachesClaude() ? null : readStatuslineRateLimits(undefined, undefined, (path) => path !== null && isWithin(path, join(profileHome, "projects"))))
+    : readStatuslineRateLimits(undefined, undefined, scope.besideProfiles ? (path) => path === null || !isWithin(path, profilesRoot) : undefined);
 
-  const auth = resolveClaudeAuth(file);
+  const auth = profileHome !== null ? resolveClaudeAuth(file, {}, () => null) : resolveClaudeAuth(file);
   if (auth === null) {
     // No token anywhere — but the CLI itself is logged in somehow (including an
     // API key, which the usage endpoint rejects outright), and it wrote its
     // limits down. This is the case the whole statusline source exists for.
     if (statusline) return statuslineUsage(statusline, null);
+    if (profileHome !== null) {
+      // On screen (`ok`, as kiro's signed-out row), with what signs this profile in — never a fallback: from chat
+      // (`/login claude-code <profile>`, #1699 part 2), or the exact line on the host — the same words as the auth alert.
+      const host = (scope.profile && credentialProfileLoginCommand(getAgendHome(), "claude-code", scope.profile))
+        || `CLAUDE_CONFIG_DIR=${JSON.stringify(profileHome)} claude auth login`;
+      if (scope.profile && CHAT_PROFILE_LOGIN_BACKENDS.has("claude-code")) {
+        const chat = `/login claude-code ${scope.profile}`;
+        return { status: "ok", hint: `Not logged in — sign in with \`${chat}\` (or run \`${host}\` on the host).`, hintI18n: i18n("usage.hint.claude_profile_signed_out_chat", chat, host), metrics: [] };
+      }
+      return { status: "ok", hint: `Not logged in — sign in with: ${host}`, hintI18n: i18n("usage.hint.claude_profile_signed_out", host), metrics: [] };
+    }
     const hint = process.env.ANTHROPIC_API_KEY
       ? "API-key login has no subscription usage. Use `claude /login` or set CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)."
       : "Log in with the Claude Code CLI (`claude`).";
@@ -1296,7 +1417,7 @@ export async function fetchKiroUsage(storeHome?: string): Promise<Omit<ProviderU
 
 // ── Registry ─────────────────────────────────────────────────────────────────
 
-type UsageProvider = { id: string; name: string; fetch: (storeHome?: string) => Promise<Omit<ProviderUsage, "id" | "name">> };
+type UsageProvider = { id: string; name: string; fetch: (storeHome?: string, scope?: ClaudeUsageScope) => Promise<Omit<ProviderUsage, "id" | "name">> };
 
 type UsageFleetConfig = Parameters<typeof listConfiguredProfiles>[0];
 
@@ -1401,13 +1522,14 @@ export function providersForConfig(
       rows.push({
         id: provider.id,
         name: provider.id === "codex" ? `${provider.name} (default)` : provider.name,
-        fetch: () => provider.fetch(),
+        // Claude's shared row keeps its statusline fallback to the shared instances (#1699); others ignore the scope.
+        fetch: () => provider.fetch(undefined, { besideProfiles: true }),
       });
     }
     rows.push(...profiles.map(profile => ({
       id: `${provider.id}:${profile}`,
       name: `${provider.name} (${profile})`,
-      fetch: () => provider.fetch(credentialProfileStoreHome(getAgendHome(), backendName, profile)),
+      fetch: () => provider.fetch(credentialProfileStoreHome(getAgendHome(), backendName, profile), { profile }),
     })));
     return rows;
   });
@@ -1429,7 +1551,7 @@ function hasEffectiveSharedBinding(config: UsageFleetConfig, backendName: string
   const instances = config.instances ?? {};
   let sawEffectiveBinding = false;
   for (const instance of Object.values(instances)) {
-    const backend = instance.backend ?? defaults?.backend;
+    const backend = instance.backend ?? defaultBackend(defaults);
     if (backend !== backendName) continue;
     sawEffectiveBinding = true;
     if (!bindingProfile(instance, defaults, backendName)) return true;
@@ -1439,10 +1561,19 @@ function hasEffectiveSharedBinding(config: UsageFleetConfig, backendName: string
   // backend is this provider and no profile was configured.  With no known
   // binding at all, preserve the pre-profile shared-provider behaviour.
   if (!sawEffectiveBinding) {
-    if (defaults?.backend === backendName && !instanceCredentialProfile(undefined, defaults, backendName)) return true;
+    if (defaultBackend(defaults) === backendName && !instanceCredentialProfile(undefined, defaults, backendName)) return true;
     return Object.keys(instances).length === 0;
   }
   return false;
+}
+
+/**
+ * The backend an instance without one runs: the fleet default, else Claude Code — as the fleet launches it
+ * (fleet-manager's bindings). Claude Code is the backend instances most often leave unnamed, so without this a
+ * Claude profile on such an instance had no row of its own (#1699).
+ */
+function defaultBackend(defaults: { backend?: string } | undefined): string {
+  return defaults?.backend ?? "claude-code";
 }
 
 /** Profiles on effective bindings only (not dormant backend_options on another backend). */
@@ -1451,12 +1582,12 @@ function effectiveCredentialProfiles(config: UsageFleetConfig, backendName: stri
   const found = new Set<string>();
   const defaults = config.defaults;
   for (const instance of Object.values(config.instances ?? {})) {
-    const backend = instance.backend ?? defaults?.backend;
+    const backend = instance.backend ?? defaultBackend(defaults);
     if (backend !== backendName) continue;
     const profile = bindingProfile(instance, defaults, backendName);
     if (profile) found.add(profile);
   }
-  if (Object.keys(config.instances ?? {}).length === 0 && defaults?.backend === backendName) {
+  if (Object.keys(config.instances ?? {}).length === 0 && defaultBackend(defaults) === backendName) {
     const profile = instanceCredentialProfile(undefined, defaults, backendName);
     if (profile) found.add(profile);
   }
@@ -1514,6 +1645,7 @@ function bindingProfile(
 function usageBackendForProviderId(id: string): string | null {
   if (id === "kiro") return "kiro-cli";
   if (id === "codex") return "codex";
+  if (id === "claude") return "claude-code";
   return null;
 }
 
