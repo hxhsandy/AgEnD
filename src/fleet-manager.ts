@@ -1155,7 +1155,13 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
   readonly webFiles = new WebFileLedger();
   private webPrefsStore?: WebPrefsStore;
   /** #1665: the web preferences kept on the host (<home>/web-prefs.json), read on first use. */
-  get webPrefs(): WebPrefsStore { return (this.webPrefsStore ??= new WebPrefsStore(this.dataDir)); }
+  get webPrefs(): WebPrefsStore {
+    // #1664: a favorite must be an instance of this fleet now — fleet.yaml's (own keys) or a ClassicBot room's.
+    return (this.webPrefsStore ??= new WebPrefsStore(this.dataDir, {
+      exists: (name) => Object.hasOwn(this.fleetConfig?.instances ?? {}, name)
+        || (this.classicChannels?.getAll() ?? []).some((ch) => ch.instanceName === name),
+    }));
+  }
   /**
    * Read from disk on every access rather than cached at startup: `agend
    * web-token rotate` runs in a separate process, and a cached copy would keep
@@ -9779,7 +9785,9 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     if (execution) await this.lifecycle.remove(name, authorization, execution, transition);
     else await this.lifecycle.remove(name, authorization);
     // A later same-name registration owns its files and caches.
-    if (this.fleetConfig?.instances[name] || this.daemons.has(name)) return;
+    // Own keys only: an instance named "constructor" is removed as any other (its inherited namesake is not a
+    // re-registration) — #1677 review.
+    if (Object.hasOwn(this.fleetConfig?.instances ?? {}, name) || this.daemons.has(name)) return;
 
     execution?.assert();
     // Clean up per-instance tracking maps so they don't grow unbounded
@@ -9791,6 +9799,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     // must not be shown the old one's conversation, and deleted names must not pile up.
     this.webChatHistory.forget(name);
     this.webFiles.forget(name);
+    // #1664: and it is nobody's favorite any more (every device sees that at its next status frame).
+    try { this.webPrefs.forgetInstance(name); } catch (err) { this.logger.warn({ err: (err as Error).message, name }, "Dropping a removed instance from web favorites failed"); }
 
     // Clean up statusline watcher + instance directory
     this.statuslineWatcher.unwatch(name);
@@ -16423,6 +16433,12 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     if (!this.classicChannels) return t("classic.manager_unavailable");
     const ch = this.classicChannels.unregister(channelId, adapterId);
     if (!ch) return t("classic.no_agent");
+    // #1664: the room is gone (not paused or stopped): nobody's favorite any more — unless the name is still an
+    // instance (fleet.yaml's, or another room's), so a later room of the same name does not inherit an old star.
+    if (!Object.hasOwn(this.fleetConfig?.instances ?? {}, ch.instanceName)
+        && !this.classicChannels.getAll().some((c) => c.instanceName === ch.instanceName)) {
+      try { this.webPrefs.forgetInstance(ch.instanceName); } catch (err) { this.logger.warn({ err: (err as Error).message, instanceName: ch.instanceName }, "Dropping a removed room from web favorites failed"); }
+    }
 
     this.instanceWorldBinding.delete(ch.instanceName);
     await this.stopInstance(ch.instanceName).catch(err =>

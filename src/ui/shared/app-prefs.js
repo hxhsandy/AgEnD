@@ -1,7 +1,7 @@
 // #1665: the web preferences that follow the person between devices — kept on the host (/ui/prefs), with this browser's
 // localStorage, under the keys every panel already reads, as the cache. Design: the comment on #1665.
 //
-// - Synced: theme, language, the sidebar (order, folds, filter) and the HTML-preview opt-in. The tour and the first-run
+// - Synced: theme, language, the sidebar (order, folds, filter, favorites — #1664) and the HTML-preview opt-in. The tour and the first-run
 //   card stay on each device, as every layout choice does.
 // - The signed-in page is served with the host's values (<html data-prefs>). This module, imported before any panel
 //   reads its key, copies them into the cache: the host wins once it has a value — and, on a device already in step
@@ -30,6 +30,7 @@ export const SYNCED = {
   "nav.order": { ls: "agend_view_sidebar_order", ...json },
   "nav.collapsed": { ls: "agend_instance_collapsed", ...json },
   "nav.filter": { ls: "agend_instance_filter", ...json },
+  "nav.favorites": { ls: "agend_favorites", ...json },   // #1664
   "preview.optIn": { ls: "agend_html_preview", toLocal: (v) => (v ? "on" : null), fromLocal: (s) => (s === "on" ? true : undefined) },
 };
 const own = (o, k) => !!o && Object.prototype.hasOwnProperty.call(o, k);
@@ -51,6 +52,7 @@ const initial = typeof document !== "undefined" ? pageHost() : null;
 let rev = initial ? initial.rev : null;
 let host = initial ? initial.values : null;
 const pending = new Map();     // key → value chosen here, not sent yet
+const mine = new Map();        // key → value chosen here whose write is not over (pending or out)
 const inflight = new Map();    // key → writes sent and not answered yet
 let flushTimer = null;
 let writes = Promise.resolve();   // one write at a time, in the order they were made
@@ -69,6 +71,19 @@ if (host) {
 /** This page may change the host's preferences: the signed-in app, not over the public link. */
 export function prefsWritable() {
   return !!initial && !(typeof document !== "undefined" && document.body && document.body.dataset.publicLink === "1");
+}
+/**
+ * The value in force for a key, in memory — never only in this browser's storage (a full storage must not bring back
+ * an old value): this page's own choice while its write is not over; else the host's; else, on a device in step with
+ * the host, the default ({ value: undefined }). null: not known here (no host values on this page, or a device not yet
+ * in step) — the caller reads this browser's copy.
+ */
+export function prefInForce(key) {
+  if (!own(SYNCED, key)) return null;
+  if (mine.has(key)) return { value: mine.get(key) };
+  if (host && own(host, key)) return { value: host[key] };
+  if (initial && inStep()) return { value: undefined };
+  return null;
 }
 /** The host's value for a key as this page last saw it (undefined: not set there, or not known). */
 export function hostPref(key) { return host && own(host, key) ? host[key] : undefined; }
@@ -94,6 +109,7 @@ export function savePref(key, value) {
   cache(key, value);
   if (!prefsWritable()) return;
   pending.set(key, value);
+  mine.set(key, value);
   clearTimeout(flushTimer);
   flushTimer = setTimeout(flush, 400);
 }
@@ -118,12 +134,19 @@ function flush() {
   writes = writes.then(async () => {
     let ok = false;
     try { ok = (await post(set, false)).ok; } catch { ok = false; }
-    for (const k of keys) { const n = (inflight.get(k) || 1) - 1; if (n) inflight.set(k, n); else inflight.delete(k); }
-    // Taken: each key whose last write this was, and not changed here again since, now shows the newest host view this
-    // page has — usually its own value; another device's newer one if that arrived while the write was out (held back
-    // then, and an older answer to this write cannot overrule it). Refused or not sent: what the host has is what holds
-    // — read it back, so this page does not show a choice no other device will see.
-    if (ok) align(keys); else await refresh();
+    const released = new Set();
+    for (const k of keys) {
+      const n = (inflight.get(k) || 1) - 1;
+      if (n) inflight.set(k, n); else inflight.delete(k);
+      if (!n && !pending.has(k)) { mine.delete(k); released.add(k); }
+    }
+    // Each key whose last write this was, and not changed here again since, now shows the newest host view this page
+    // has — usually its own value; another device's newer one if that arrived while the write was out (held back then,
+    // and an older answer to this write cannot overrule it); refused or not sent, what the host has (read back first).
+    // Always applied: what the page shows came from this page's own choice, not from the cache, so the cache matching
+    // the host (a storage that refused the choice) says nothing about the screen.
+    if (!ok) await refresh();
+    align(released, { force: true });
   });
   return writes;
 }
@@ -141,33 +164,46 @@ export async function refresh() {
     body = res.ok ? await res.json() : null;
   } catch { body = null; }
   if (!isView(body)) return false;
-  if (take(body)) align(Object.keys(SYNCED));
+  const before = new Map(Object.keys(SYNCED).map((key) => [key, own(host, key) ? SYNCED[key].toLocal(host[key]) : null]));
+  if (take(body)) align(Object.keys(SYNCED), { before });
   return true;
 }
 
-/** Show the host view this page has for these keys — except a key still being changed here (unsent, or out). */
-function align(keys) {
+/**
+ * Show the host view this page has for these keys — except a key still being changed here (unsent, or out). A key is
+ * applied when its host value moved in memory (`before`: the host view before this read), when this browser's copy
+ * differs, or always (`force`: this page's own write just ended). The copy alone never decides: a storage that refused
+ * a write keeps an old copy that may equal the host while the screen shows something else.
+ */
+function align(keys, opts = {}) {
   const changed = new Set();
   for (const key of keys) {
     if (pending.has(key) || inflight.has(key)) continue;
     const k = SYNCED[key];
     const want = own(host, key) ? k.toLocal(host[key]) : null;
-    if (readLocal(k.ls) === want) continue;
-    writeLocal(k.ls, want);
+    const copyDiffers = readLocal(k.ls) !== want;
+    const moved = !!opts.before && opts.before.get(key) !== want;
+    if (!copyDiffers && !moved && !opts.force) continue;
+    if (copyDiffers) writeLocal(k.ls, want);
     changed.add(key);
   }
   if (changed.size) apply(changed);
 }
 
 function apply(changed) {
-  if (changed.has("theme") && typeof globalThis.AgendTheme !== "undefined") globalThis.AgendTheme.set(hostPref("theme") || "system");
+  // Only what differs from what the page shows (a key re-applied after its own write may already be in force).
+  const T = globalThis.AgendTheme;
+  if (changed.has("theme") && typeof T !== "undefined") { const v = hostPref("theme") || "system"; if (typeof T.get !== "function" || T.get() !== v) T.set(v); }
   if (changed.has("lang")) {
     const l = hostPref("lang");
     // None chosen any more: the device's own language, on this page only (no copy is kept for it).
     if (l) { if (l !== lang()) setLang(l); } else if (deviceLanguage() !== lang()) setLang(deviceLanguage(), { store: false });
   }
   const P = globalThis.AgendPreview;
-  if (changed.has("preview.optIn") && P && typeof P.setOptIn === "function") P.setOptIn(hostPref("preview.optIn") === true);
+  if (changed.has("preview.optIn") && P && typeof P.setOptIn === "function") {
+    const on = hostPref("preview.optIn") === true;
+    if (typeof P.optedIn !== "function" || P.optedIn() !== on) P.setOptIn(on);
+  }
   for (const fn of [...listeners]) { try { fn(changed); } catch { /* one listener's error stops no other */ } }
 }
 

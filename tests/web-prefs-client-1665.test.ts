@@ -12,6 +12,8 @@ import { fire, installDom, settle, type MiniPage } from "./helpers/mini-dom.js";
 
 const THEME_JS = readFileSync(join(__dirname, "..", "src", "ui", "shared", "theme.js"), "utf8");
 const prefsAttr = (values: Record<string, unknown>, rev = 1) => JSON.stringify({ rev, values });
+/** AgendTheme as theme.js has it: `get` is what the page shows (the last set). */
+const themeStub = (shown: string, record: (v: string) => void) => { let cur = shown; return { get: () => cur, set: (v: string) => { cur = v; record(v); } }; };
 
 describe("theme.js: the host's theme before the first paint", () => {
   function load(attr: string | null, cached: string | null, opts: { inStep?: boolean; full?: boolean } = {}) {
@@ -108,7 +110,7 @@ describe("the app's modules", () => {
   });
   it("r2: another device's newer value, held back while this page's write was out, is shown once that write ends — even if its answer is older", async () => {
     const theme = vi.fn();
-    (globalThis as any).AgendTheme = { set: theme, get: () => "light" };
+    (globalThis as any).AgendTheme = themeStub("dark", theme);   // the page shows this page's own choice
     const m = await boot({ storage: { agend_prefs_synced: "1" }, host: { theme: "light" }, rev: 1 });
     const write = held();
     intercept = (method) => (method === "POST" ? write.p as Promise<any> : undefined);
@@ -229,6 +231,31 @@ describe("the app's modules", () => {
   it("P2-4: on a device in step with the host, a key the host does not have is the default — the stale copy goes", async () => {
     await boot({ storage: { agend_prefs_synced: "1", agend_instance_collapsed: '["Old"]', agend_html_preview: "on", agend_lang: "zh-TW" }, host: { theme: "dark" } });
     expect([ls("agend_instance_collapsed"), ls("agend_html_preview"), ls("agend_lang"), ls("agend_theme")]).toEqual([null, null, null, "dark"]);
+  });
+  it("#1677 r1: the sidebar starts from the host's values even when this browser's storage refuses to keep them", async () => {
+    pg = installDom({ storage: { agend_prefs_synced: "1", agend_instance_collapsed: '["Old"]', agend_favorites: '["old"]' } });
+    pg.document.documentElement.setAttribute("data-prefs", prefsAttr({ "nav.collapsed": ["Ops"], "nav.favorites": ["alpha"] }));
+    const quota = () => { throw Object.assign(new Error("full"), { name: "QuotaExceededError" }); };
+    Object.assign((globalThis as any).localStorage, { setItem: quota, removeItem: quota });
+    const nav = await import("/assets/instance-nav.js");
+    expect([[...nav.navStore.get().collapsed], nav.navStore.get().favorites, ls("agend_instance_collapsed")]).toEqual([["Ops"], ["alpha"], '["Old"]']);
+  });
+  it("#1677 r1: in step, a key the host does not have is the default in memory even when the stale copy cannot be removed", async () => {
+    pg = installDom({ storage: { agend_prefs_synced: "1", agend_instance_collapsed: '["Old"]' } });
+    pg.document.documentElement.setAttribute("data-prefs", prefsAttr({}));
+    const quota = () => { throw Object.assign(new Error("full"), { name: "QuotaExceededError" }); };
+    Object.assign((globalThis as any).localStorage, { setItem: quota, removeItem: quota });
+    const nav = await import("/assets/instance-nav.js");
+    expect([[...nav.navStore.get().collapsed], ls("agend_instance_collapsed")]).toEqual([[], '["Old"]']);
+  });
+  it("#1677 r1: this page's own change, still being sent, stays when another device's change to another key is taken", async () => {
+    const m = await boot({ storage: { agend_prefs_synced: "1" }, host: {}, rev: 1 });
+    const nav = await import("/assets/instance-nav.js");
+    nav.setNavFilter({ q: "mine" });                         // pending (the 400 ms burst)
+    hostValues = { "nav.collapsed": ["Ops"] }; hostRev = 2;
+    await m.refresh();                                       // another device folded a group: the sidebar re-reads its prefs
+    expect([nav.navStore.get().filter.q, [...nav.navStore.get().collapsed]]).toEqual(["mine", ["Ops"]]);
+    await new Promise((r) => setTimeout(r, 450));           // its write goes out here, not into the next test's fetch
   });
   it("P2-4: not in step yet, this device's own values stay (to be uploaded)", async () => {
     await boot({ storage: { agend_instance_collapsed: '["Mine"]', agend_lang: "zh-TW" }, host: {} });
@@ -366,7 +393,7 @@ describe("the app's modules", () => {
 
   it("every place a synced choice is made sends it: theme and language (Preferences), previews — the tour and the first-run card stay on the device", async () => {
     const themes: string[] = [];
-    (globalThis as any).AgendTheme = { get: () => "system", set: (v: string) => themes.push(v) };
+    (globalThis as any).AgendTheme = themeStub("system", (v) => themes.push(v));
     await boot({ storage: { agend_prefs_synced: "1" }, host: {} });
     const { h, render } = await import("/assets/app-html.js");
     const { DevicePrefs } = await import("/assets/app-shell.js");
@@ -395,7 +422,7 @@ describe("the app's modules", () => {
 
   it("another device's change: the next status frame's prefs_rev re-reads the host and applies it here", async () => {
     const theme = vi.fn();
-    (globalThis as any).AgendTheme = { set: theme, get: () => "system" };
+    (globalThis as any).AgendTheme = themeStub("light", theme);
     const m = await boot({ storage: { agend_prefs_synced: "1" }, host: { theme: "light" }, rev: 4 });
     const store = await import("/assets/app-store.js");
     const seen: string[][] = [];
