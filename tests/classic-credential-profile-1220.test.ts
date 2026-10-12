@@ -202,7 +202,7 @@ describe("a profile edited in classicBot.yaml takes effect through a restart (th
     fm.fleetConfig = { defaults, instances: {} } as any;
     fm.classicChannels = manager();
     runningDaemon(fm, from, defaults);
-    const stop = vi.spyOn(fm, "stopInstance").mockResolvedValue(undefined);
+    const stop = vi.spyOn(fm, "stopInstance").mockResolvedValue({ backgroundWorkEnded: false });
     const start = vi.spyOn(fm as any, "startClassicInstanceUnattended").mockResolvedValue(true);
     vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void) => { fn(); return 0 as any; }) as any);
     writeClassic(to);
@@ -280,7 +280,7 @@ describe("SIGHUP / reconcile applies a profile change too (r1 review)", () => {
     fm.loadConfig(configPath);
     fm.classicChannels = manager();
     runningDaemon(fm, opts.classicFrom, fm.fleetConfig!.defaults as any);
-    const stop = vi.spyOn(fm, "stopInstance").mockResolvedValue(undefined);
+    const stop = vi.spyOn(fm, "stopInstance").mockResolvedValue({ backgroundWorkEnded: false });
     const start = vi.spyOn(fm as any, "startClassicInstanceUnattended").mockResolvedValue(true);
     if (opts.classicTo) {
       writeClassic(opts.classicTo);

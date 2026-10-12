@@ -15,7 +15,7 @@ import type { CliBackend } from "../src/backend/types.js";
 import type { TmuxManager } from "../src/tmux-manager.js";
 import type { Logger } from "../src/logger.js";
 import { Daemon } from "../src/daemon.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const DIR = join(process.cwd(), "tests", "fixtures", "muse-1.4.6");
@@ -128,6 +128,31 @@ describe("#1716: the 'Local work is still active' quit menu", () => {
   });
 });
 
+// --- the report: the kill is never silent ---
+
+describe("#1716: the background-work-ended marker is scoped to its own stop", () => {
+  let mdir: string;
+  beforeEach(() => { mdir = mkdtempSync(join(tmpdir(), "agend-1716-marker-")); });
+  afterEach(() => { rmSync(mdir, { recursive: true, force: true }); });
+
+  it("a fresh marker reports, a stale one never does", async () => {
+    const { writeBackgroundWorkEndedMarker, readBackgroundWorkEndedMarker } =
+      await import("../src/background-work-ended.js");
+    expect(readBackgroundWorkEndedMarker(mdir, Date.now())).toBeNull();
+    const beganAt = Date.now();
+    writeBackgroundWorkEndedMarker(mdir, "stop");
+    expect(readBackgroundWorkEndedMarker(mdir, beganAt)?.reason).toBe("stop");
+    // An earlier stop's marker is not this stop's news.
+    expect(readBackgroundWorkEndedMarker(mdir, beganAt + 10_000)).toBeNull();
+  });
+
+  it("an unreadable marker never reports", async () => {
+    const { readBackgroundWorkEndedMarker } = await import("../src/background-work-ended.js");
+    writeFileSync(join(mdir, "background-work-ended.json"), "not json");
+    expect(readBackgroundWorkEndedMarker(mdir, 0)).toBeNull();
+  });
+});
+
 // --- daemon flows: stubbed backend/tmux, fake timers, no CLI/tmux/fleet ---
 
 const standingIn = <T,>(stub: object): T => stub as unknown as T;
@@ -176,6 +201,28 @@ describe("#1716: the stop flow cancels the menu with Escape — no option chosen
     expect(keys).toEqual(["Escape"]);
     expect(killed[0]).toBe("SIGTERM");
     expect(getPaneStatus.mock.calls.length).toBeLessThan(5);
+    // #1716: the ended background work is recorded for the stop reply.
+    const { readBackgroundWorkEndedMarker } = await import("../src/background-work-ended.js");
+    expect(readBackgroundWorkEndedMarker(dir, 0)?.reason).toBe("stop");
+  });
+
+  it("no menu, no marker: a clean stop reports nothing", async () => {
+    const d = makeDaemon();
+    d["backend"] = standingIn<CliBackend>({ binaryName: "muse", quitBlockedByDialog: (p: string) => museLocalWorkQuitActive(p), getQuitCommand: () => "/quit" });
+    d["tmux"] = standingIn<TmuxManager>({
+      getWindowId: () => "@1",
+      capturePane: vi.fn(async () => pane("echo-idle")),
+      getPaneStatus: vi.fn(async () => ({ alive: false })),
+      sendSpecialKey: vi.fn(async () => true),
+      sendKeys: vi.fn(async () => true),
+      killWindow: vi.fn(async () => {}),
+    });
+    d["checkpointSessionId"] = vi.fn(async () => {});
+    d["sendQuitSequence"] = vi.fn(async () => true);
+    d["killProcessTree"] = vi.fn(async () => {});
+    await d.stop().catch(() => {});
+    const { readBackgroundWorkEndedMarker } = await import("../src/background-work-ended.js");
+    expect(readBackgroundWorkEndedMarker(dir, 0)).toBeNull();
   });
 });
 
@@ -231,5 +278,80 @@ describe("#1717: an idle pause defers while background work runs", () => {
     await vi.advanceTimersByTimeAsync(5_000);
     await pausing;
     expect(quitSent).toEqual([true]);
+  });
+});
+
+describe("#1716: the stop reply and topic notice name the ended background work", () => {
+  let fdir: string;
+  beforeEach(() => { fdir = mkdtempSync(join(tmpdir(), "agend-1716-fleet-")); });
+  afterEach(() => { rmSync(fdir, { recursive: true, force: true }); });
+
+  async function fleetWithMarker(name: string, fresh: boolean) {
+    const { FleetManager } = await import("../src/fleet-manager.js");
+    const { writeBackgroundWorkEndedMarker } = await import("../src/background-work-ended.js");
+    const fleet = new FleetManager(fdir) as any;
+    const instDir = join(fdir, "instances", name);
+    mkdirSync(instDir, { recursive: true });
+    if (!fresh) writeBackgroundWorkEndedMarker(instDir, "stop", Date.now() - 600_000);
+    // Like the daemon's stop flow, the marker lands mid-stop — after the
+    // stop began, so the stop's own scope accepts it.
+    fleet.lifecycle = { stop: vi.fn(async () => {
+      if (fresh) writeBackgroundWorkEndedMarker(instDir, "stop");
+    }) };
+    fleet.notifyInstanceTopic = vi.fn(() => true);
+    return fleet;
+  }
+
+  it("stopInstance posts the topic notice and reports the flag for a fresh marker", async () => {
+    const fleet = await fleetWithMarker("muse-1", true);
+    const outcome = await fleet.stopInstance("muse-1");
+    expect(outcome).toEqual({ backgroundWorkEnded: true });
+    expect(fleet.notifyInstanceTopic).toHaveBeenCalledOnce();
+    const [target, text] = fleet.notifyInstanceTopic.mock.calls[0];
+    expect(target).toBe("muse-1");
+    expect(text).toContain("background work");
+  });
+
+  it("stopInstance stays silent on a stale marker or none at all", async () => {
+    const stale = await fleetWithMarker("muse-1", false);
+    expect(await stale.stopInstance("muse-1")).toEqual({ backgroundWorkEnded: false });
+    expect(stale.notifyInstanceTopic).not.toHaveBeenCalled();
+    const { FleetManager } = await import("../src/fleet-manager.js");
+    const clean = new FleetManager(fdir) as any;
+    const instDir = join(fdir, "instances", "muse-2");
+    mkdirSync(instDir, { recursive: true });
+    clean.lifecycle = { stop: vi.fn(async () => {}) };
+    clean.notifyInstanceTopic = vi.fn(() => true);
+    expect(await clean.stopInstance("muse-2")).toEqual({ backgroundWorkEnded: false });
+    expect(clean.notifyInstanceTopic).not.toHaveBeenCalled();
+  });
+
+  it("the Classic /stop reply appends the sentence when work was ended", async () => {
+    const fleet = await fleetWithMarker("muse-1", true);
+    fleet.fleetConfig = { instances: { "muse-1": {} } };
+    fleet.classicChannels = { unregister: () => ({ instanceName: "muse-1" }), getAll: () => [] };
+    fleet.reregisterClassicChannels = vi.fn();
+    const reply = await fleet.handleClassicStop("chan", "discord");
+    expect(reply).toContain("Agent stopped");
+    expect(reply).toContain("Background work was running and was ended with it");
+  });
+
+  it("the Classic /stop reply is unchanged when nothing was ended", async () => {
+    const fleet = await fleetWithMarker("muse-1", false);
+    fleet.fleetConfig = { instances: { "muse-1": {} } };
+    fleet.classicChannels = { unregister: () => ({ instanceName: "muse-1" }), getAll: () => [] };
+    fleet.reregisterClassicChannels = vi.fn();
+    const reply = await fleet.handleClassicStop("chan", "discord");
+    expect(reply).not.toContain("Background work");
+  });
+
+  it("the fleet restart/update completion names the instances", async () => {
+    const { formatRestartProgressCompletion } = await import("../src/restart-progress.js");
+    const base = { running: 2, total: 2, version: "9.9", pausedNames: [] as string[] };
+    const withNames = formatRestartProgressCompletion("restart",
+      { ...base, backgroundWorkEndedNames: ["muse-1", "muse-2"] }, Date.now() - 1000);
+    expect(withNames).toContain("Background work was running and was ended: muse-1, muse-2");
+    const without = formatRestartProgressCompletion("update", { ...base }, Date.now() - 1000);
+    expect(without).not.toContain("Background work");
   });
 });

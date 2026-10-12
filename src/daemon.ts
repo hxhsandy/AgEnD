@@ -12,6 +12,7 @@ import { rotateLogIfNeededAsync, type Logger } from "./logger.js";
 import { coredumpFilterLaunchPrefix } from "./coredump-filter.js";
 import { mcpServerState } from "./mcp-liveness.js";
 import { clearPausedMarker, writePausedMarker, type PauseReason } from "./pause-marker.js";
+import { writeBackgroundWorkEndedMarker } from "./background-work-ended.js";
 import { TmuxManager, resolveTmuxLogicalSize } from "./tmux-manager.js";
 import { TranscriptMonitor } from "./transcript-monitor.js";
 import { createTranscriptSource, type TranscriptSource } from "./transcript-sources.js";
@@ -4442,6 +4443,10 @@ export class Daemon extends EventEmitter {
     if (!backend.quitBlockedByDialog(pane)) return false;
     this.logger.warn({ reason },
       "The CLI asked to confirm its exit (background work is running) — cancelling that prompt and stopping the process, not answering it");
+    // #1716: the background work is about to be ended — record it where the
+    // stop/restart reply and the instance topic notice can report it, so the
+    // kill is never silent.
+    try { writeBackgroundWorkEndedMarker(this.instanceDir, reason); } catch { /* reporting only */ }
     await this.tmux.sendSpecialKey("Escape").catch(() => false);
     return true;
   }

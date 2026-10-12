@@ -214,6 +214,7 @@ import { presentationState, interactionSummary, sameInteractionOwner } from "./i
 import type { InstanceState, InstanceStateSnapshot, InteractionOwner, InteractionSnapshot } from "./backend/types.js";
 import { readLastInboundAt, type OwnSwitchOutcome } from "./daemon.js";
 import { clearPausedMarker, readPausedAt, readPauseReason, writePausedMarker } from "./pause-marker.js";
+import { readBackgroundWorkEndedMarker } from "./background-work-ended.js";
 import { DEFAULT_WARM_OVERFLOW, WakeCoordinator } from "./wake-coordinator.js";
 import { TargetQueueWorker } from "./target-queue-worker.js";
 import { resolveDeliveryWorkerMode } from "./types.js";
@@ -1021,7 +1022,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
   /** instanceName → outage hand-off currently executing; a repeat joins it. */
   private handOffsInFlight = new Map<string, Promise<void>>();
   /** instanceName → explicit stop currently executing; the outage hand-off waits for it. */
-  private stopsInFlight = new Map<string, Promise<void>>();
+  private stopsInFlight = new Map<string, Promise<{ backgroundWorkEnded: boolean }>>();
   /** Aggregation window for the "N instances failed to start" notice. */
   private startupRetryNotices = new Map<"scheduled" | "gave_up", { names: string[]; delayMs: number; timer: NodeJS.Timeout }>();
   /** Unsupported-CLI refusals waiting to go out, grouped by reason (#1109). */
@@ -4836,7 +4837,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     return false;
   }
 
-  async stopInstance(name: string, transition?: TransitionHandle): Promise<void> {
+  async stopInstance(name: string, transition?: TransitionHandle): Promise<{ backgroundWorkEnded: boolean }> {
     this.explicitStopGeneration.set(name, (this.explicitStopGeneration.get(name) ?? 0) + 1);
     this.cancelStartupRetry(name);
     this.failoverActive.delete(name);
@@ -4853,12 +4854,18 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     // Published so the outage hand-off can wait for an explicit stop that began
     // BEFORE it (the generation fence alone only catches stops that begin after
     // the hand-off snapshotted it).
+    // #1716: scope the marker to this stop — a marker older than beganAt is
+    // from an earlier stop and never reports.
+    const beganAt = Date.now();
     const run = (async () => {
       try {
         await this.lifecycle.stop(name, transition);
       } finally {
         this.clearNoncePromptsForInstance(name);
       }
+      const backgroundWorkEnded = readBackgroundWorkEndedMarker(this.getInstanceDir(name), beganAt) !== null;
+      if (backgroundWorkEnded) this.notifyInstanceTopic(name, t("stop.background_work_ended", name));
+      return { backgroundWorkEnded };
     })().finally(() => { if (this.stopsInFlight.get(name) === run) this.stopsInFlight.delete(name); });
     this.stopsInFlight.set(name, run);
     return run;
@@ -6275,12 +6282,19 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       // for cleanup before READY would deadlock with the updater (it retires
       // only after the restart returns), so READY and cleanup notification
       // have separate lifecycles (review checklist 3/5).
+      // #1716: background work this restart/update ended, scoped to the
+      // operation so an older stop never reports. No pending operation means
+      // a plain boot — nothing was stopped by an operation, report nothing.
+      const opStartedAt = pendingUpdateProgress?.startedAt ?? null;
+      const backgroundWorkEndedNames = opStartedAt === null ? [] : configuredNames.filter(
+        n => readBackgroundWorkEndedMarker(this.getInstanceDir(n), opStartedAt) !== null);
       const completionSummary: RestartProgressSummary = {
         running: started,
         total,
         version: agendVersion,
         pausedNames,
         failedNames,
+        backgroundWorkEndedNames,
         tipText: pendingProgressOperation === "update" && this.tipsEnabled()
           ? (() => {
               const tip = this.pickAvailableTip();
@@ -6303,6 +6317,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
             version: agendVersion,
             pausedNames,
             failedNames,
+            backgroundWorkEndedNames,
           }, pendingUpdateProgress!.startedAt);
         } else if (failedNames.length === 0 && pausedNames.length === 0) {
           text = t("fleet.ready", started, total, agendVersion);
@@ -16790,12 +16805,16 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     }
 
     this.instanceWorldBinding.delete(ch.instanceName);
-    await this.stopInstance(ch.instanceName).catch(err =>
-      this.logger.warn({ err, instanceName: ch.instanceName }, "Failed to stop classic instance"));
+    // #1716: say so in the reply when background work was ended with the stop.
+    const stopOutcome = await this.stopInstance(ch.instanceName).catch(err => {
+      this.logger.warn({ err, instanceName: ch.instanceName }, "Failed to stop classic instance");
+      return { backgroundWorkEnded: false };
+    });
     clearPausedMarker(this.getInstanceDir(ch.instanceName));
     this.reregisterClassicChannels();
     this.logger.info({ channelId, adapterId, instanceName: ch.instanceName }, "Classic channel stopped");
-    return t("classic.stopped");
+    return t("classic.stopped")
+      + (stopOutcome.backgroundWorkEnded ? `\n${t("classic.stopped_bg_work")}` : "");
   }
 
   /**
