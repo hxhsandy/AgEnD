@@ -111,4 +111,15 @@ describe("KiroBackend.getPaneActivity", () => {
     ].join("\n");
     expect(backend.getPaneActivity(stillRunning)).toBe("shell: Build project");
   });
+
+  it("#1734: tool output containing '- Completed in' mid-line stays busy (false-positive guard)", () => {
+    // A test runner or build log may emit "- Completed in 0.5s" inside a longer line.
+    // The instance must NOT be considered idle — the completion marker is not at end of line.
+    const midLineOutput = [
+      "I will run the following command: pytest --tb=short (using tool: shell)",
+      "Purpose: Run tests",
+      "test_foo.py::test_bar - Completed in 0.5s FAILED (assert 1 == 2)",
+    ].join("\n");
+    expect(backend.getPaneActivity(midLineOutput)).toBe("shell: Run tests");
+  });
 });
