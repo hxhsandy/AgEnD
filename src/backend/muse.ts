@@ -361,21 +361,33 @@ export function museLocalWorkQuitActive(pane: string): boolean {
   }
   // A free composer on the current screen means any menu text is history.
   if (museFreeComposerLayout(screen, MUSE_BUSY)) return false;
+  // #1730 P2-1 r3: a populated ❯ line means any menu text is a quote, not the
+  // live chrome. The menu only ever answers a submitted /quit, which clears
+  // the box — the live capture's ❯ row is empty with the menu as chrome under
+  // it — while every quoting draft (r2's "cancel me", r3a's hint-carrying
+  // draft, r3b's menu-quoting draft) holds text on the ❯ line itself. A null
+  // draft (no readable box) carries nothing to judge, so it still proceeds.
+  // Residual: an empty ❯ followed by a verbatim menu paste is byte-identical
+  // to the live chrome and cannot be separated here.
+  const draft = museInputBox(pane, MUSE_BUSY);
+  if (draft !== null && draft.rows.length > 0 && draft.rows[0].trim() !== "") return false;
   // Candidates newest-first, so a stale quote above never shadows the live
   // block below (or passes as live itself).
   for (let h = screen.length - 1; h >= 0; h--) {
     if (!MUSE_QUIT_HINT.test(screen[h])) continue;
     if (!(h > top && h < bottom)) continue;
     // The block above, skipping padding blanks (the same 12-non-blank
-    // window as before — the live menu fits in 9).
-    const window: string[] = [];
+    // window as before — the live menu fits in 9), with screen indices so the
+    // WHOLE block is fenced to the live input box, not just the hint: the
+    // backward scan must not borrow the header or options from above top.
+    const window: Array<{ row: string; index: number }> = [];
     for (let i = h - 1; i >= 0 && window.length < 12; i--) {
-      if (screen[i].trim()) window.unshift(screen[i]);
+      if (screen[i].trim()) window.unshift({ row: screen[i], index: i });
     }
     if (window.length < 4) continue;
-    const head = window.findIndex(row => MUSE_LOCAL_WORK_QUIT.test(row));
-    if (head < 0) continue;
-    const block = window.slice(head).join("\n");
+    const head = window.findIndex(entry => MUSE_LOCAL_WORK_QUIT.test(entry.row));
+    if (head < 0 || window[head].index <= top) continue;
+    const block = window.slice(head).map(entry => entry.row).join("\n");
     if (!MUSE_QUIT_OPT_1.test(block) || !MUSE_QUIT_OPT_2.test(block)) continue;
     return true;
   }

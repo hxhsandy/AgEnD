@@ -159,6 +159,43 @@ describe("#1716: the 'Local work is still active' quit menu", () => {
     expect(b.quitBlockedByDialog(stale)).toBe(false);
   });
 
+  it("a borrowed header above the live block is rejected even when the hint is in the draft (#1730 P2-1 r3a)", () => {
+    // Prism r3(a): the historic quote ends just BEFORE its hint, and the live
+    // composer's draft supplies the hint row itself. The 12-row backward scan
+    // must not borrow the header/options from above the live block's top.
+    const quitLines = pane("prod-quit-with-local-work").split("\n");
+    const start = quitLines.findIndex(l => l.includes("Local work is still active"));
+    const end = quitLines.findIndex(l => l.includes("Enter to confirm"));
+    const quote = quitLines.slice(start, end).join("\n");
+    const echo = pane("echo-after-escape").trimEnd().replace(
+      "❯ cancel me", "❯ cancel me\n  Enter to confirm · Esc to cancel");
+    const stale = `${quote}\n\n\n\n\n\n\n\n\n\n${echo}\n`;
+    expect(b.inputDraft(stale)?.rows).toEqual(["cancel me", "Enter to confirm · Esc to cancel"]);
+    expect(museLocalWorkQuitActive(stale)).toBe(false);
+    expect(b.quitBlockedByDialog(stale)).toBe(false);
+  });
+
+  it("a draft quoting the whole menu is composer content, not live chrome (#1730 P2-1 r3b)", () => {
+    // Prism r3(b): every menu string, including the hint, is the populated
+    // composer's own text. The live quit menu replaces the input box, so a
+    // block colliding with the current draft is a quote, never chrome.
+    const quotedMenu = [
+      "Please review this captured menu:",
+      "Local work is still active",
+      "The following will stop when you exit:",
+      "background task · tool.bash",
+      "1. Exit anyway",
+      "2. Stay",
+      "Enter to confirm · Esc to cancel",
+    ];
+    const echo = pane("echo-after-escape").trimEnd().replace(
+      "❯ cancel me", ["❯ " + quotedMenu[0], ...quotedMenu.slice(1).map(r => `  ${r}`)].join("\n"));
+    expect(b.inputDraft(echo)?.rows).toEqual(quotedMenu);
+    expect(b.inputDraftShows(b.inputDraft(echo)!, quotedMenu.join("\n"))).toBe(true);
+    expect(museLocalWorkQuitActive(echo)).toBe(false);
+    expect(b.quitBlockedByDialog(echo)).toBe(false);
+  });
+
   it("deliveries hold on it and never answer it: a passive dialog with no keys", () => {
     const dialog = b.getRuntimeDialogs().find(d => d.isActive === museLocalWorkQuitActive);
     expect(dialog).toMatchObject({ keys: [], holdOnly: true, blocksDelivery: true });
@@ -244,15 +281,31 @@ describe("#1716: the stop flow cancels the menu with Escape — no option chosen
     expect(readBackgroundWorkEndedMarker(dir, 0)?.reason).toBe("stop");
   });
 
-  it("a quoted menu with an owned draft probes clear on a real Daemon (#1730 P2-1 refined)", async () => {
-    // Prism's r2 probe: the stale quote + echo-after-escape pane, with
-    // recentPastes binding this spawn's "cancel me" so ownsInputDraft is
+  it.each([
+    ["r2: stale quote above an owned cancel-me draft", "cancel me", () => {
+      const quitLines = QUIT().split("\n");
+      const start = quitLines.findIndex(l => l.includes("Local work is still active"));
+      const end = quitLines.findIndex(l => l.includes("Enter to confirm"));
+      return `${quitLines.slice(start, end + 1).join("\n")}\n\n\n\n\n\n\n\n\n\n${pane("echo-after-escape").trimEnd()}\n`;
+    }],
+    ["r3a: borrowed header with the hint in the draft", "cancel me", () => {
+      const quitLines = QUIT().split("\n");
+      const start = quitLines.findIndex(l => l.includes("Local work is still active"));
+      const end = quitLines.findIndex(l => l.includes("Enter to confirm"));
+      const echo = pane("echo-after-escape").trimEnd().replace(
+        "❯ cancel me", "❯ cancel me\n  Enter to confirm · Esc to cancel");
+      return `${quitLines.slice(start, end).join("\n")}\n\n\n\n\n\n\n\n\n\n${echo}\n`;
+    }],
+    ["r3b: draft quoting the whole menu", "Please review this captured menu:\nLocal work is still active\nThe following will stop when you exit:\nbackground task · tool.bash\n1. Exit anyway\n2. Stay\nEnter to confirm · Esc to cancel", () => {
+      const quoted = ["Please review this captured menu:", "Local work is still active", "The following will stop when you exit:", "background task · tool.bash", "1. Exit anyway", "2. Stay", "Enter to confirm · Esc to cancel"];
+      return pane("echo-after-escape").trimEnd().replace(
+        "❯ cancel me", [`❯ ${quoted[0]}`, ...quoted.slice(1).map(r => `  ${r}`)].join("\n")) + "\n";
+    }],
+  ])("a quoted menu with an owned draft probes clear on a real Daemon (%s)", async (_name, paste, makePane) => {
+    // Prism's probes: recentPastes bind this spawn's text so ownsInputDraft is
     // true — yet the real probeBlockingDialog must return clear, so the new
     // holdOnly dialog never blocks #829 clearing its own restored draft.
-    const quitLines = QUIT().split("\n");
-    const start = quitLines.findIndex(l => l.includes("Local work is still active"));
-    const end = quitLines.findIndex(l => l.includes("Enter to confirm"));
-    const stale = `${quitLines.slice(start, end + 1).join("\n")}\n\n\n\n\n\n\n\n\n\n${pane("echo-after-escape").trimEnd()}\n`;
+    const stale = (makePane as () => string)();
     const d = makeDaemon();
     d["backend"] = standingIn<CliBackend>({
       binaryName: "muse",
@@ -260,7 +313,7 @@ describe("#1716: the stop flow cancels the menu with Escape — no option chosen
       inputDraft: (p: string) => b.inputDraft(p),
       inputDraftShows: (draft: never, text: string) => b.inputDraftShows(draft, text),
     });
-    d["rememberPaste"]("cancel me", d["spawnGeneration"]);
+    d["rememberPaste"](paste as string, d["spawnGeneration"]);
     d["tmux"] = standingIn<TmuxManager>({
       getWindowId: () => "@1",
       capturePane: vi.fn(async () => stale),
