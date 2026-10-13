@@ -4778,13 +4778,31 @@ export class Daemon extends EventEmitter {
     // tick retries once the task ends. A pane-capture failure proceeds (the
     // quit-menu handler below stays the backstop), never wedges unpaused.
     if (this.backend?.backgroundWorkRunning && this.tmux) {
+      const tmux = this.tmux;
+      const windowId = tmux.getWindowId?.();
+      const generation = this.spawnGeneration;
+      let pane: string | null = null;
       try {
-        if (this.backend.backgroundWorkRunning(await this.tmux.capturePane())) {
-          this.logger.info("Deferring auto-pause: background work is still running");
-          this.pauseRequested = false;
-          return;
-        }
-      } catch { /* capture failed — pause as before */ }
+        pane = await tmux.capturePane();
+      } catch { /* capture failed — pause as before, after revalidation */ }
+      // #1730 P2-2: the await yields — the pane read is only valid for the
+      // world it was taken from. Revalidate owner, phase, state and queue
+      // before acting on it; anything that moved defers this cycle.
+      if (this.tmux !== tmux
+        || this.tmux?.getWindowId?.() !== windowId
+        || this.spawnGeneration !== generation
+        || this.getPauseWakeState() !== "active"
+        || !(this.instanceState === "idle" || (allowStuck && this.instanceState === "stuck"))
+        || this.pasteQueueDepth > 0) {
+        this.logger.info("Deferring auto-pause: pause preconditions changed during the pane read");
+        this.pauseRequested = false;
+        return;
+      }
+      if (pane !== null && this.backend?.backgroundWorkRunning?.(pane)) {
+        this.logger.info("Deferring auto-pause: background work is still running");
+        this.pauseRequested = false;
+        return;
+      }
     }
 
     this.pauseWakeState = "pausing";

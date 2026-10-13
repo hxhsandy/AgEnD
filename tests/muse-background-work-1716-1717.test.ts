@@ -121,6 +121,26 @@ describe("#1716: the 'Local work is still active' quit menu", () => {
     }
   });
 
+  it("a quit menu quoted in the transcript above a free composer is history, not live (#1730 P2-1)", () => {
+    // The live menu's rows, replayed as an old transcript quote, with the
+    // current echo-idle screen below (separated so the idle proof above-window
+    // stays inside the current screen).
+    const quitLines = pane("prod-quit-with-local-work").split("\n");
+    const start = quitLines.findIndex(l => l.includes("Local work is still active"));
+    const end = quitLines.findIndex(l => l.includes("Enter to confirm"));
+    const menuQuote = quitLines.slice(start, end + 1).join("\n");
+    // The current screen's own rows (trailing blanks trimmed, like a live
+    // capture's padding); interior blanks stay so the idle proof above-window
+    // never reaches the quote.
+    const idleCore = pane("echo-idle").trimEnd();
+    const stale = `${menuQuote}\n\n\n\n\n\n\n${idleCore}\n`;
+    expect(stale.split("\n").length).toBeLessThan(40);
+    expect(b.isPeriodicRedrawIdlePane(stale)).toBe(true);
+    expect(b.inputDraft(stale)?.rows).toEqual([]);
+    expect(museBackgroundWorkActive(stale)).toBe(false);
+    expect(museLocalWorkQuitActive(stale)).toBe(false);
+  });
+
   it("deliveries hold on it and never answer it: a passive dialog with no keys", () => {
     const dialog = b.getRuntimeDialogs().find(d => d.isActive === museLocalWorkQuitActive);
     expect(dialog).toMatchObject({ keys: [], holdOnly: true, blocksDelivery: true });
@@ -265,6 +285,80 @@ describe("#1717: an idle pause defers while background work runs", () => {
     expect(quitSent).toEqual([true]);
   });
 
+  it("a state flip to working during the pane read holds the pause (#1730 P2-2a)", async () => {
+    const d = makeDaemon();
+    let release!: (p: string) => void;
+    const held = new Promise<string>(r => { release = r; });
+    d["backend"] = standingIn<CliBackend>({ binaryName: "muse", backgroundWorkRunning: (p: string) => museBackgroundWorkActive(p) });
+    d["tmux"] = standingIn<TmuxManager>({
+      getWindowId: () => "@1",
+      capturePane: vi.fn(() => held),
+      getPaneStatus: vi.fn(async () => ({ alive: true })),
+    });
+    d["instanceState"] = "idle";
+    d["freezeRuntimeMonitors"] = vi.fn();
+    d["checkpointSessionId"] = vi.fn(async () => {});
+    const quit = vi.fn(async () => true);
+    d["sendQuitSequence"] = quit;
+    const pausing = d.pause("idle" as never).catch(() => {});
+    // The pause is parked at the capture await; the turn resumes first.
+    d["applyInstanceStateSnapshot"]({ state: "working", unchangedForMs: 0, observedAt: Date.now(), stateChangedAt: Date.now() });
+    release(pane("echo-idle"));
+    await pausing;
+    expect(quit).not.toHaveBeenCalled();
+    expect(d["pauseWakeState"]).not.toBe("paused");
+  });
+
+  it("a queued paste during the pane read holds the pause (#1730 P2-2b)", async () => {
+    const d = makeDaemon();
+    let release!: (p: string) => void;
+    const held = new Promise<string>(r => { release = r; });
+    d["backend"] = standingIn<CliBackend>({ binaryName: "muse", backgroundWorkRunning: (p: string) => museBackgroundWorkActive(p) });
+    d["tmux"] = standingIn<TmuxManager>({
+      getWindowId: () => "@1",
+      capturePane: vi.fn(() => held),
+      getPaneStatus: vi.fn(async () => ({ alive: true })),
+    });
+    d["instanceState"] = "idle";
+    d["freezeRuntimeMonitors"] = vi.fn();
+    d["checkpointSessionId"] = vi.fn(async () => {});
+    const quit = vi.fn(async () => true);
+    d["sendQuitSequence"] = quit;
+    const pausing = d.pause("idle" as never).catch(() => {});
+    d["pasteQueueDepth"] = 1;
+    release(pane("echo-idle"));
+    await pausing;
+    expect(quit).not.toHaveBeenCalled();
+  });
+
+  it("a replaced tmux during the pane read holds the pause (#1730 P2-2c)", async () => {
+    const d = makeDaemon();
+    let release!: (p: string) => void;
+    const held = new Promise<string>(r => { release = r; });
+    d["backend"] = standingIn<CliBackend>({ binaryName: "muse", backgroundWorkRunning: (p: string) => museBackgroundWorkActive(p) });
+    d["tmux"] = standingIn<TmuxManager>({
+      getWindowId: () => "@1",
+      capturePane: vi.fn(() => held),
+      getPaneStatus: vi.fn(async () => ({ alive: true })),
+    });
+    d["instanceState"] = "idle";
+    d["freezeRuntimeMonitors"] = vi.fn();
+    d["checkpointSessionId"] = vi.fn(async () => {});
+    const quit = vi.fn(async () => true);
+    d["sendQuitSequence"] = quit;
+    const pausing = d.pause("idle" as never).catch(() => {});
+    // The window is respawned mid-read (now with background work); the held
+    // read belongs to the dead owner and must not authorise a quit.
+    d["tmux"] = standingIn<TmuxManager>({
+      getWindowId: () => "@2",
+      capturePane: vi.fn(async () => pane("prod-background-work")),
+      getPaneStatus: vi.fn(async () => ({ alive: true })),
+    });
+    release(pane("echo-idle"));
+    await pausing;
+    expect(quit).not.toHaveBeenCalled();
+  });
+
   it("a failed pane capture pauses as before — never wedged unpaused", async () => {
     vi.useFakeTimers();
     const { d, quitSent } = armPause(BG());
@@ -364,5 +458,26 @@ describe("#1716: the stop reply and topic notice name the ended background work"
     expect(withNames).toContain("Background work was running and was ended: muse-1, muse-2");
     const without = formatRestartProgressCompletion("update", { ...base }, Date.now() - 1000);
     expect(without).not.toContain("Background work");
+  });
+
+  it("the update fallback carries the same background-work names (#1730 P2-3)", async () => {
+    const { formatFleetReadyFallbackText } = await import("../src/restart-progress.js");
+    const base = { started: 2, total: 2, version: "9.9", pausedNames: [] as string[], failedNames: [] as string[] };
+    const withNames = formatFleetReadyFallbackText({ ...base, backgroundWorkEndedNames: ["one"] });
+    expect(withNames).toContain("Fleet ready");
+    expect(withNames).toContain("Background work was running and was ended: one");
+    // No marker, no line — and the stale-marker rule lives in the scoped
+    // marker read, which the builder feeds this helper.
+    expect(formatFleetReadyFallbackText(base)).not.toContain("Background work");
+    expect(formatFleetReadyFallbackText({ ...base, backgroundWorkEndedNames: [] })).not.toContain("Background work");
+    // Paused/failed shapes keep their wording with the line appended.
+    const paused = formatFleetReadyFallbackText({ ...base, pausedNames: ["p"], backgroundWorkEndedNames: ["one"] });
+    expect(paused).toContain("Paused: p");
+    expect(paused).toContain("Background work was running and was ended: one");
+    // A landed cleanup outcome still renders after it, in completion order.
+    const both = formatFleetReadyFallbackText(
+      { ...base, backgroundWorkEndedNames: ["one"], cleanupWarning: "old copy left", cleanupCommand: "sudo rm -rf /x" });
+    expect(both.indexOf("Background work")).toBeLessThan(both.indexOf("old copy left"));
+    expect(both).toContain("`$ sudo rm -rf /x`");
   });
 });

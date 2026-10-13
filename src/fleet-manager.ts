@@ -321,6 +321,7 @@ import {
 } from "./instance-config-impact.js";
 import {
   cleanupWatchVerdict,
+  formatFleetReadyFallbackText,
   formatRestartProgressCompletion,
   RESTART_PROGRESS_TERMINAL_TIMEOUT_MS,
   RestartProgress,
@@ -6367,18 +6368,21 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
             failedNames,
             backgroundWorkEndedNames,
           }, pendingUpdateProgress!.startedAt);
-        } else if (failedNames.length === 0 && pausedNames.length === 0) {
-          text = t("fleet.ready", started, total, agendVersion);
-        } else if (failedNames.length === 0) {
-          text = t("fleet.ready", started, total, agendVersion) + `\n⏸ Paused: ${pausedNames.join(", ")}`;
         } else {
-          text = t("fleet.ready_with_failed", started, total, agendVersion, failedNames.join(", "))
-            + (pausedNames.length > 0 ? `\n⏸ Paused: ${pausedNames.join(", ")}` : "");
-        }
-        // #1735: an outcome that already landed goes in this message too; one still owed is the watch's.
-        if (cleanupOutcome && "render" in cleanupOutcome) {
-          text += `\n\n⚠️ ${cleanupOutcome.render.warning}`
-            + (cleanupOutcome.render.cleanupCommand ? `\n\`$ ${cleanupOutcome.render.cleanupCommand}\`` : "");
+          // #1716: the fallback carries the same background-work names as
+          // the completion; #1735: an outcome that already landed goes in
+          // this message too, one still owed is the watch's.
+          text = formatFleetReadyFallbackText({
+            started,
+            total,
+            version: agendVersion,
+            pausedNames,
+            failedNames,
+            backgroundWorkEndedNames,
+            ...(cleanupOutcome && "render" in cleanupOutcome
+              ? { cleanupWarning: cleanupOutcome.render.warning, cleanupCommand: cleanupOutcome.render.cleanupCommand }
+              : {}),
+          });
         }
         await this.sendFleetStartCompletionFallback(
           String(fleet.channel.group_id),

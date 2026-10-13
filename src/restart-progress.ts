@@ -77,6 +77,48 @@ function retryAfterMs(err: unknown): number {
   return 0;
 }
 
+/** #1716: the shared background-work line for the completion and every fallback path. */
+export function formatBackgroundWorkEndedLine(names: readonly string[]): string {
+  return `⚠️ Background work was running and was ended: ${names.join(", ")}`;
+}
+
+export interface FleetReadyFallbackText {
+  started: number;
+  total: number;
+  version: string;
+  pausedNames: readonly string[];
+  failedNames: readonly string[];
+  backgroundWorkEndedNames?: readonly string[];
+  cleanupWarning?: string;
+  cleanupCommand?: string;
+}
+
+/**
+ * The update/plain-start fallback text for when the adopted progress message
+ * cannot be edited (no saved adapter). Same content as the completion:
+ * ready/paused/failed, then #1716 background-work names, then the #1735
+ * cleanup outcome when it already landed.
+ */
+export function formatFleetReadyFallbackText(s: FleetReadyFallbackText): string {
+  let text: string;
+  if (s.failedNames.length === 0 && s.pausedNames.length === 0) {
+    text = t("fleet.ready", s.started, s.total, s.version);
+  } else if (s.failedNames.length === 0) {
+    text = t("fleet.ready", s.started, s.total, s.version) + `\n⏸ Paused: ${s.pausedNames.join(", ")}`;
+  } else {
+    text = t("fleet.ready_with_failed", s.started, s.total, s.version, s.failedNames.join(", "))
+      + (s.pausedNames.length > 0 ? `\n⏸ Paused: ${s.pausedNames.join(", ")}` : "");
+  }
+  if (s.backgroundWorkEndedNames?.length) {
+    text += `\n${formatBackgroundWorkEndedLine(s.backgroundWorkEndedNames)}`;
+  }
+  if (s.cleanupWarning !== undefined) {
+    text += `\n\n⚠️ ${s.cleanupWarning}`
+      + (s.cleanupCommand ? `\n\`$ ${s.cleanupCommand}\`` : "");
+  }
+  return text;
+}
+
 /** One terminal text shared by the in-place edit and FleetManager fallback. */
 export function formatRestartProgressCompletion(
   mode: RestartProgressMode,
@@ -97,7 +139,7 @@ export function formatRestartProgressCompletion(
     lines.push(`⚠️ Failed (${summary.failedNames.length}): ${summary.failedNames.join(", ")}`);
   }
   if (summary.backgroundWorkEndedNames?.length) {
-    lines.push(`⚠️ Background work was running and was ended: ${summary.backgroundWorkEndedNames.join(", ")}`);
+    lines.push(formatBackgroundWorkEndedLine(summary.backgroundWorkEndedNames));
   }
   if (mode === "update" && summary.warningText) lines.push("", `⚠️ ${summary.warningText}`);
   if (mode === "update" && summary.warningCommand) lines.push(`\`$ ${summary.warningCommand}\``);

@@ -141,6 +141,38 @@ function museStatusFooter(rows: readonly string[], bottomSeparator: number, busy
 }
 
 /**
+ * The structural core of the idle proof, shared with the quit-menu matcher
+ * (#1730 P2-1): true when the CURRENT screen — anchored to the bottom
+ * separator — shows the live, empty input box. A transcript quoting an older
+ * screen above never satisfies it.
+ */
+function museFreeComposerLayout(rows: readonly string[], busyPattern: RegExp): boolean {
+  // The approval prompt is auto-answered rather than input-blocking, so the
+  // idle proof itself must refuse a frame that shows dialog chrome.
+  const dialogChrome = MUSE_DIALOG_CHROME;
+  // Everything after the bottom separator must be the status bar (#1717:
+  // optionally a terminals panel first).
+  const bottomSeparator = museBottomSeparator(rows);
+  if (bottomSeparator < 2) return false;
+  if (!museStatusFooter(rows, bottomSeparator, busyPattern)) return false;
+  // Directly above it, the EMPTY live prompt. A `❯` with text is a draft
+  // (or, higher up, a transcript echo) and never proves idle.
+  if (!/^❯\s*$/.test(rows[bottomSeparator - 1])) return false;
+  const topSeparator = bottomSeparator - 2;
+  if (!MUSE_SEPARATOR.test(rows[topSeparator])) return false;
+  // No busy indicator and no dialog just above the input box. The working
+  // line (`◇ Thinking (2s · esc to interrupt)`) sits immediately above the
+  // top separator; check 8 rows up to be safe.
+  const above = rows.slice(Math.max(0, topSeparator - 8), topSeparator);
+  if (above.some(r => busyPattern.test(r) || dialogChrome.test(r))) return false;
+  // Arrow-key pickers (`/model`) are refused by their component chrome
+  // above, not by guessing from answer text that happens to list model ids.
+  // A `›` selection cursor is refused too; `❯` is not a cursor here — muse
+  // echoes submitted messages with it.
+  return !above.some(r => /^\s*›\s+\S/.test(r));
+}
+
+/**
  * Nearest bottom separator, with the #1717 panel extension: the plain search
  * stays capped at MUSE_MAX_STATUS_ROWS (a 5-row wrapped bar still fails
  * closed, #958); a deeper separator is accepted only when the row right
@@ -319,8 +351,16 @@ export function museLocalWorkQuitActive(pane: string): boolean {
   const head = window.findIndex(row => MUSE_LOCAL_WORK_QUIT.test(row));
   if (head < 0) return false;
   const block = window.slice(head).join("\n");
-  return /^[ \t]*[❯›]?[ \t]*1\.[ \t]+Exit anyway[ \t]*$/m.test(block)
-    && /^[ \t]*[❯›]?[ \t]*2\.[ \t]+Stay[ \t]*$/m.test(block);
+  if (!(/^[ \t]*[❯›]?[ \t]*1\.[ \t]+Exit anyway[ \t]*$/m.test(block)
+    && /^[ \t]*[❯›]?[ \t]*2\.[ \t]+Stay[ \t]*$/m.test(block))) return false;
+  // #1730 P2-1: menu text quoted in the transcript while the composer is
+  // already free is history, not the live confirmation — a live menu owns the
+  // input region, so a free composer next to it means this match is stale.
+  // Without this, the holdOnly dialog would block ready deliveries and the
+  // stop flow would mistake the quote for the current confirmation.
+  const screen = pane.replace(/\r/g, "").split("\n");
+  while (screen.length && !screen[screen.length - 1].trim()) screen.pop();
+  return !museFreeComposerLayout(screen, MUSE_BUSY);
 }
 
 /**
@@ -650,31 +690,7 @@ export class MuseBackend implements CliBackend {
   isPeriodicRedrawIdlePane(pane: string): boolean {
     const rows = pane.replace(/\r/g, "").split("\n");
     while (rows.length && !rows[rows.length - 1].trim()) rows.pop();
-    const separator = MUSE_SEPARATOR;
-    const busyPattern = this.getBusyPattern();
-    // The approval prompt is auto-answered rather than input-blocking, so the
-    // idle proof itself must refuse a frame that shows dialog chrome.
-    const dialogChrome = MUSE_DIALOG_CHROME;
-    // Everything after the bottom separator must be the status bar (#1717:
-    // optionally a terminals panel first).
-    const bottomSeparator = museBottomSeparator(rows);
-    if (bottomSeparator < 2) return false;
-    if (!museStatusFooter(rows, bottomSeparator, busyPattern)) return false;
-    // Directly above it, the EMPTY live prompt. A `❯` with text is a draft
-    // (or, higher up, a transcript echo) and never proves idle.
-    if (!/^❯\s*$/.test(rows[bottomSeparator - 1])) return false;
-    const topSeparator = bottomSeparator - 2;
-    if (!separator.test(rows[topSeparator])) return false;
-    // No busy indicator and no dialog just above the input box. The working
-    // line (`◇ Thinking (2s · esc to interrupt)`) sits immediately above the
-    // top separator; check 8 rows up to be safe.
-    const above = rows.slice(Math.max(0, topSeparator - 8), topSeparator);
-    if (above.some(r => busyPattern.test(r) || dialogChrome.test(r))) return false;
-    // Arrow-key pickers (`/model`) are refused by their component chrome
-    // above, not by guessing from answer text that happens to list model ids.
-    // A `›` selection cursor is refused too; `❯` is not a cursor here — muse
-    // echoes submitted messages with it.
-    return !above.some(r => /^\s*›\s+\S/.test(r));
+    return museFreeComposerLayout(rows, this.getBusyPattern());
   }
 
   getErrorPatterns(): ErrorPattern[] {
