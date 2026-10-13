@@ -502,6 +502,70 @@ export function museLocalWorkQuitActive(pane: string): boolean {
 }
 
 /**
+ * #1796: the fallback `/model` set, used only when muse's on-disk provider
+ * catalog is missing or unreadable. It mirrors what the 1.4.7 picker shows
+ * (visible rows only — no `-contributor` ids); the live catalog remains the
+ * source of truth whenever it can be read.
+ */
+const MUSE_MODEL_FALLBACK: readonly ModelOption[] = [
+  { id: "muse-wonder-1.0", label: "muse-wonder-1.0" },
+  { id: "muse-spark-1.3", label: "muse-spark-1.3" },
+  { id: "muse-spark-1.2", label: "muse-spark-1.2" },
+];
+
+/**
+ * #1796: read the provider catalog muse caches on disk
+ * (`<state>/model-catalog/<provider>__<profile>.json`). Bounded (at most 16
+ * files, 256 KiB each) and best-effort — anything unexpected yields the
+ * fallback. Listed rows only: `visibility: "visible"` is what the 1.4.7
+ * picker shows (the `-contributor` siblings and the image model are hidden),
+ * and a null `context_limit` additionally marks a non-chat model. File order
+ * is kept and ids deduped.
+ *
+ * `stateDir` is injectable for tests; production passes nothing and reads the
+ * host state dir (the fleet never isolates XDG_DATA_HOME, mirroring the
+ * session lookup).
+ */
+export function readMuseModelCatalog(stateDir?: string): ModelOption[] {
+  // Root resolution mirrors the binary, not XDG_STATE_HOME: 1.4.7 builds its
+  // state dir as `$XDG_DATA_HOME/muse` or `$HOME/.local/share/muse`
+  // (MUSE_SESSIONS uses the same root).
+  const base = process.env.XDG_DATA_HOME
+    ? join(process.env.XDG_DATA_HOME, "muse")
+    : join(homedir(), ".local", "share", "muse");
+  const dir = join(stateDir ?? base, "model-catalog");
+  try {
+    const files = readdirSync(dir).filter(f => f.endsWith(".json")).sort().slice(0, 16);
+    if (files.length === 0) return [...MUSE_MODEL_FALLBACK];
+    const seen = new Set<string>();
+    const out: ModelOption[] = [];
+    for (const file of files) {
+      const path = join(dir, file);
+      try {
+        if (statSync(path).size > 262_144) continue;
+        const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
+        const rows = (parsed as { rows?: unknown }).rows;
+        if (!Array.isArray(rows)) continue;
+        for (const row of rows.slice(0, 256)) {
+          const r = row as { model_id?: unknown; display_label?: unknown; context_limit?: unknown; visibility?: unknown };
+          if (typeof r.model_id !== "string" || r.model_id === "" || r.visibility !== "visible") continue;
+          // A `-contributor` suffix is a legacy spelling of contributor mode,
+          // not a model — excluded even if some profile ever marks it visible.
+          if (r.model_id.endsWith("-contributor")) continue;
+          if (r.context_limit == null) continue;
+          if (seen.has(r.model_id)) continue;
+          seen.add(r.model_id);
+          out.push({ id: r.model_id, label: typeof r.display_label === "string" && r.display_label !== "" ? r.display_label : r.model_id });
+        }
+      } catch { /* one bad file never hides the rest */ }
+    }
+    return out.length > 0 ? out : [...MUSE_MODEL_FALLBACK];
+  } catch {
+    return [...MUSE_MODEL_FALLBACK];
+  }
+}
+
+/**
  * Meta Muse Code — the `muse` CLI (v1.3.0 verified).
  *
  * Everything below was confirmed against live sessions on 2026-09-22 rather
@@ -1048,15 +1112,11 @@ export class MuseBackend implements CliBackend {
   async listModels(): Promise<ModelOption[]> {
     // muse has no models subcommand (the command table is: resume, exec,
     // config, export, trace, skills, plugins, sandbox, schema, serve,
-    // session-message, mcp, auth, login, logout, init). This set was read off
-    // the live `/model` picker; the `-contributor` variants are the same models
-    // with content sharing enabled, which the picker spells out.
-    return [
-      { id: "muse-spark-1.3", label: "muse-spark-1.3" },
-      { id: "muse-spark-1.3-contributor", label: "muse-spark-1.3-contributor (shares content)" },
-      { id: "muse-spark-1.2", label: "muse-spark-1.2" },
-      { id: "muse-spark-1.2-contributor", label: "muse-spark-1.2-contributor (shares content)" },
-    ];
+    // session-message, mcp, auth, login, logout, init). The live `/model`
+    // picker reads the provider catalog muse caches on disk (#1796), so this
+    // reads the same files — bounded and best-effort, falling back to the
+    // last known set when the cache is missing or unreadable.
+    return readMuseModelCatalog();
   }
 
   async probeCLIEnv() {
