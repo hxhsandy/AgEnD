@@ -196,6 +196,17 @@ describe("#1716: the 'Local work is still active' quit menu", () => {
     expect(b.quitBlockedByDialog(echo)).toBe(false);
   });
 
+  it("a scrollback header above the box does not shadow the live menu (#1730 P2-1 r4)", () => {
+    // Prism r4: a stale header line just above the input box's top separator,
+    // live menu rows untouched. The oldest header in the window must not win
+    // over the eligible live header inside the box.
+    const lines = pane("prod-quit-with-local-work").split("\n");
+    const topSep = lines.findIndex(l => /^─+$/.test(l));
+    const shadowed = [...lines.slice(0, topSep), "  Local work is still active", ...lines.slice(topSep)].join("\n");
+    expect(museLocalWorkQuitActive(shadowed)).toBe(true);
+    expect(b.quitBlockedByDialog(shadowed)).toBe(true);
+  });
+
   it("deliveries hold on it and never answer it: a passive dialog with no keys", () => {
     const dialog = b.getRuntimeDialogs().find(d => d.isActive === museLocalWorkQuitActive);
     expect(dialog).toMatchObject({ keys: [], holdOnly: true, blocksDelivery: true });
@@ -320,6 +331,29 @@ describe("#1716: the stop flow cancels the menu with Escape — no option chosen
       getPaneStatus: vi.fn(async () => ({ alive: true })),
     });
     expect(await d["probeBlockingDialog"]()).toEqual({ state: "clear" });
+  });
+
+  it("a shadowed live menu still probes dialog on a real Daemon (#1730 P2-1 r4)", async () => {
+    // Prism r4 positive control: stale header above the box, live menu
+    // untouched — the probe must return dialog so the stop flow still holds
+    // and reports the ended background work.
+    const lines = QUIT().split("\n");
+    const topSep = lines.findIndex(l => /^─+$/.test(l));
+    const shadowed = [...lines.slice(0, topSep), "  Local work is still active", ...lines.slice(topSep)].join("\n");
+    const d = makeDaemon();
+    d["backend"] = standingIn<CliBackend>({
+      binaryName: "muse",
+      getRuntimeDialogs: () => b.getRuntimeDialogs(),
+      inputDraft: (p: string) => b.inputDraft(p),
+      inputDraftShows: (draft: never, text: string) => b.inputDraftShows(draft, text),
+    });
+    d["tmux"] = standingIn<TmuxManager>({
+      getWindowId: () => "@1",
+      capturePane: vi.fn(async () => shadowed),
+      getPaneStatus: vi.fn(async () => ({ alive: true })),
+    });
+    const probe = await d["probeBlockingDialog"]();
+    expect(probe.state).toBe("dialog");
   });
 
   it("no menu, no marker: a clean stop reports nothing", async () => {

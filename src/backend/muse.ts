@@ -385,11 +385,16 @@ export function museLocalWorkQuitActive(pane: string): boolean {
       if (screen[i].trim()) window.unshift({ row: screen[i], index: i });
     }
     if (window.length < 4) continue;
-    const head = window.findIndex(entry => MUSE_LOCAL_WORK_QUIT.test(entry.row));
-    if (head < 0 || window[head].index <= top) continue;
-    const block = window.slice(head).map(entry => entry.row).join("\n");
-    if (!MUSE_QUIT_OPT_1.test(block) || !MUSE_QUIT_OPT_2.test(block)) continue;
-    return true;
+    // #1730 P2-1 r4: headers newest-first, eligible only — a scrollback header
+    // above top must not shadow the live header inside the box. The first
+    // (oldest) match can sit above top while the current menu is intact below.
+    for (let head = window.length - 1; head >= 0; head--) {
+      if (!MUSE_LOCAL_WORK_QUIT.test(window[head].row)) continue;
+      if (window[head].index <= top) continue;
+      const block = window.slice(head).map(entry => entry.row).join("\n");
+      if (!MUSE_QUIT_OPT_1.test(block) || !MUSE_QUIT_OPT_2.test(block)) continue;
+      return true;
+    }
   }
   return false;
 }
