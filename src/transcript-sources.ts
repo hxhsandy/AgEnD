@@ -27,7 +27,7 @@ import { measureSyncWork } from "./sync-work-attribution.js";
  *     one found silently goes blind when the CLI starts a new session.
  */
 
-import { closeSync, existsSync, openSync, readSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { open as openFile, readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -37,7 +37,7 @@ import { sharedKiroTranscriptLane, type KiroDbLane, type KiroDbLease } from "./k
 import type { KiroDbCursor } from "./kiro-db-reader.js";
 export { extractKiroAssistantStrings } from "./kiro-db-reader.js";
 import type { TranscriptTurnEvent } from "./transcript-turns.js";
-import { lastLineBoundary, readNewLines } from "./transcript-jsonl.js";
+import { LINE_MAX_BYTES, LONG_HEAD_BYTES, LOOKS_PER_POLL, READ_MAX_BYTES, lastLineBoundary, readNewLines, readWholeLine, resolveLongLines, type ReadNewLinesResult } from "./transcript-jsonl.js";
 import { museSessionCwd, readFileHeadSync } from "./backend/muse.js";
 import { performance } from "node:perf_hooks";
 
@@ -83,17 +83,54 @@ export interface TranscriptSource {
   takeTurns?(): TranscriptTurnEvent[];
 }
 
-/** #1641 R3: the complete records in [from, to) — `to` is a line boundary (a checkpoint's), so nothing is cut. */
-async function readLineRange(path: string, from: number, to: number): Promise<string[]> {
+/**
+ * #1641 R3: the complete records in [from, to) that `keep` accepts — `to` is a line boundary (a checkpoint's), so
+ * nothing is cut. #1218 P0: read in READ_MAX_BYTES chunks (the range a checkpoint skips can be many MB), and only kept
+ * lines are held. A line over LINE_MAX_BYTES is judged by its head: kept, it is read whole (≤ WHOLE_LINE_MAX_BYTES —
+ * a turn's record must not be lost to the limit, #1786 review); otherwise it is skipped without being decoded.
+ */
+export async function readLineRange(path: string, from: number, to: number, keep: (line: string) => boolean = () => true): Promise<string[]> {
   const fh = await openFile(path, "r");
+  const out: string[] = [];
+  const whole = async (offset: number, bytes: number, head: string) => {
+    if (!keep(head)) return;
+    const line = await readWholeLine(path, offset, bytes);
+    if (line !== null && line.trim() && keep(line)) out.push(line);
+  };
   try {
-    const buffer = Buffer.alloc(to - from);
-    for (let filled = 0; filled < buffer.length;) {
-      const { bytesRead } = await fh.read(buffer, filled, buffer.length - filled, from + filled);
-      if (bytesRead <= 0) throw new Error(`readLineRange: no progress reading ${path} at ${from + filled}`);
-      filled += bytesRead;
+    let pos = from;
+    let long: { start: number; head: string } | null = null;   // a long line that started in an earlier chunk
+    while (pos < to) {
+      const buffer = Buffer.alloc(Math.min(READ_MAX_BYTES, to - pos));
+      for (let filled = 0; filled < buffer.length;) {
+        const { bytesRead } = await fh.read(buffer, filled, buffer.length - filled, pos + filled);
+        if (bytesRead <= 0) throw new Error(`readLineRange: no progress reading ${path} at ${pos + filled}`);
+        filled += bytesRead;
+      }
+      // Up to the last line end in this chunk (the range's end is one); a chunk with none is inside one long line.
+      const complete = buffer.lastIndexOf(0x0a) + 1;
+      if (complete === 0) {
+        long ??= { start: pos, head: buffer.toString("utf8", 0, Math.min(LONG_HEAD_BYTES, buffer.length)) };
+        pos += buffer.length;
+        continue;
+      }
+      let start = 0;
+      while (start < complete) {
+        const end = buffer.indexOf(0x0a, start);
+        if (long) {
+          await whole(long.start, pos + end - long.start, long.head);
+          long = null;
+        } else if (end - start > LINE_MAX_BYTES) {
+          await whole(pos + start, end - start, buffer.toString("utf8", start, start + LONG_HEAD_BYTES));
+        } else {
+          const line = buffer.toString("utf8", start, end);
+          if (line.trim() && keep(line)) out.push(line);
+        }
+        start = end + 1;
+      }
+      pos += complete;
     }
-    return buffer.toString("utf8").split("\n").filter(line => line.trim());
+    return out;
   } finally {
     await fh.close();
   }
@@ -157,6 +194,10 @@ function emptyEvents(): TranscriptEvents {
 export class CodexRolloutSource implements TranscriptSource {
   private currentFile: string | null = null;
   private byteOffset = 0;
+  /** #1218 P0: the offset is inside a long line being skipped (readNewLines `skipping`). */
+  private skipping = false;
+  /** #1218 P0: a long line being skipped that is to be read whole once its end is found. */
+  private pendingLong: { offset: number } | null = null;
   /** EOF snapshots taken when the monitor attaches; existing history is skipped. */
   private initialOffsets = new Map<string, number>();
   /** Files whose session_meta was read and did NOT match our cwd. */
@@ -209,6 +250,8 @@ export class CodexRolloutSource implements TranscriptSource {
     this.pendingTurns = [];
     this.currentFile = null;
     this.byteOffset = 0;
+    this.skipping = false;
+    this.pendingLong = null;
     this.openTurnId = "";
     this.rejected.clear();
     this.accepted.clear();
@@ -216,7 +259,7 @@ export class CodexRolloutSource implements TranscriptSource {
   }
 
   async checkpoint(): Promise<TranscriptCheckpoint | null> {
-    const active = this.candidateFiles(true).find(file => this.fileBelongsToUs(file.path));
+    const active = await this.firstOwned(this.candidateFiles(true));
     if (!active) return null;
     try {
       // A line boundary, not the size: a record being written now is read once complete (#1250).
@@ -225,7 +268,7 @@ export class CodexRolloutSource implements TranscriptSource {
       else if (offset > this.byteOffset) {
         // #1641 R3: the range this checkpoint skips is never polled — its turn boundaries (and user records) are taken
         // now, so the turn state stays the file's. Tool and text records stay skipped, as before.
-        for (const line of await readLineRange(active.path, this.byteOffset, offset)) {
+        for (const line of await readLineRange(active.path, this.byteOffset, offset, (l) => l.includes('"event_msg"') || l.includes('"role":"user"'))) {
           let entry: Record<string, unknown>;
           try { entry = JSON.parse(line); } catch { continue; }
           this.turnRecord(entry, this.pendingTurns);
@@ -233,6 +276,8 @@ export class CodexRolloutSource implements TranscriptSource {
       }
       this.currentFile = active.path;
       this.byteOffset = offset;
+      this.skipping = false;
+      this.pendingLong = null;
       return { path: active.path, offset, sessionId: active.path };
     } catch {
       return null;
@@ -261,6 +306,8 @@ export class CodexRolloutSource implements TranscriptSource {
     this.turnKnown = known;
     this.currentFile = path;
     this.byteOffset = offset;
+    this.skipping = false;
+    this.pendingLong = null;
     this.openTurnId = this.openTurn ?? "";                 // a steer after the baseline belongs to the carried-in turn
   }
 
@@ -316,20 +363,27 @@ export class CodexRolloutSource implements TranscriptSource {
     return this.index.list(fresh);
   }
 
-  private fileBelongsToUs(path: string): boolean {
+  /** The first of `files` that is ours (in order), or undefined. Verdicts are cached, so a known file costs no read. */
+  private async firstOwned<T extends { path: string }>(files: readonly T[]): Promise<T | undefined> {
+    for (const file of files) if (await this.fileBelongsToUs(file.path)) return file;
+    return undefined;
+  }
+
+  private async fileBelongsToUs(path: string): Promise<boolean> {
     if (this.rejected.has(path)) return false;
     if (this.accepted.has(path)) return true;
     try {
       // session_meta is the first line. It can carry long instructions, so
-      // give it headroom — but never read the whole rollout.
-      const fd = openSync(path, "r");
+      // give it headroom — but never read the whole rollout. #1218 P0: read asynchronously, off the fleet loop's
+      // critical path (it was a synchronous 64 KiB read per new rollout).
+      const fh = await openFile(path, "r");
       let head: string;
       try {
         const buf = Buffer.alloc(65536);
-        const bytes = readSync(fd, buf, 0, buf.length, 0);
-        head = buf.toString("utf-8", 0, bytes);
+        const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+        head = buf.toString("utf-8", 0, bytesRead);
       } finally {
-        closeSync(fd);
+        await fh.close();
       }
       const firstLine = head.split("\n")[0];
       const meta = JSON.parse(firstLine);
@@ -350,7 +404,7 @@ export class CodexRolloutSource implements TranscriptSource {
     // Re-resolve every poll: a restarted codex writes a NEW rollout, and
     // staying pinned to the old one goes silently blind (#528 trap 1).
     const candidates = this.candidateFiles();
-    const active = candidates.find(c => this.fileBelongsToUs(c.path));
+    const active = await this.firstOwned(candidates);
     // Cleared only by a real loss (none found, an adoption or read that failed) — never for the length of a poll's
     // await, when a capture reading following() would drop the veto mid-turn.
     if (!active) { this.lastPollFollowed = false; return EMPTY; }
@@ -370,15 +424,28 @@ export class CodexRolloutSource implements TranscriptSource {
       await this.adopt(active.path, offset);
     }
 
-    let read: Awaited<ReturnType<typeof readNewLines>>;
-    try { read = await readNewLines(active.path, this.byteOffset); } catch (err) { this.lastPollFollowed = false; throw err; }
-    const { lines, newOffset } = read;
-    this.byteOffset = newOffset;
+    // #1218 P0: bounded looks (READ_MAX_BYTES each), a few per poll, each awaited (a sampled rollout was 322 MB).
+    const records: Array<{ line: string } | { long: { head: string } }> = [];
+    for (let look = 0; look < LOOKS_PER_POLL; look++) {
+      let read: ReadNewLinesResult;
+      try { read = await readNewLines(active.path, this.byteOffset, { skipping: this.skipping }); } catch (err) { this.lastPollFollowed = false; throw err; }
+      this.skipping = read.skipping;
+      const moved = read.newOffset !== this.byteOffset;
+      this.byteOffset = read.newOffset;
+      // #1786 review: a long turn record (task_complete with a long final reply, a pasted prompt) is read whole — a
+      // turn's end must never be lost to the line limit. Long outputs stay head-only.
+      const resolved = await resolveLongLines(active.path, read, this.pendingLong, codexWholeLine);
+      this.pendingLong = resolved.pending;
+      records.push(...resolved.records);
+      if (!moved || !read.more) break;
+    }
     this.lastPollFollowed = true;
 
     const events = emptyEvents();
     const turns: TranscriptTurnEvent[] = this.pendingTurns.splice(0);
-    for (const line of lines) {
+    for (const record of records) {
+      if ("long" in record) { codexLongHead(record.long.head, events); continue; }
+      const line = record.line;
       let entry: Record<string, unknown>;
       try { entry = JSON.parse(line); } catch { continue; }
       const p = entry.payload as Record<string, unknown> | undefined;
@@ -407,6 +474,24 @@ export class CodexRolloutSource implements TranscriptSource {
     if (turns.length) events.turns = turns;
     return events;
   }
+}
+
+/** #1786 review: the long rollout lines read whole — turn records (event_msg) and messages (a pasted prompt, a long reply). */
+function codexWholeLine(head: string): boolean {
+  return head.includes('"type":"event_msg"') || (head.includes('"type":"response_item"') && /"payload":\{"type":"message"/.test(head));
+}
+
+/**
+ * #1218 P0: a rollout line too long to parse (an output of MBs, a huge call input) — what its head still says, so the
+ * bubble keeps the step: a call by its name, or an output. Turn records and messages are read whole (codexWholeLine).
+ */
+function codexLongHead(head: string, events: TranscriptEvents): void {
+  if (!head.includes('"type":"response_item"')) return;
+  const type = /"payload":\{[^{}]{0,400}?"type":"(function_call|custom_tool_call|function_call_output|custom_tool_call_output)"/.exec(head)?.[1];
+  if (type === "function_call" || type === "custom_tool_call") {
+    const name = /"name":"([^"]{1,200})"/.exec(head)?.[1];
+    events.toolUses.push({ name: name ?? "unknown", input: undefined });
+  } else if (type) events.toolResults.push({ name: "unknown" });
 }
 
 /* -------------------------------------------------------------------- muse */
@@ -439,6 +524,9 @@ export class MuseSessionSource implements TranscriptSource {
   private baselineComplete = false;
   private rejected = new Set<string>();
   private sizes = new Map<string, number>();
+  /** #1218 P0: per log, whether its offset is inside a long line being skipped, and a long turn record held for its end. */
+  private skipping = new Map<string, boolean>();
+  private pendingLong = new Map<string, { offset: number }>();
   private listedAt = Number.NEGATIVE_INFINITY;
   private baselined = false;
   /** intent_id → its text and time, until it materializes (bounded). */
@@ -453,6 +541,7 @@ export class MuseSessionSource implements TranscriptSource {
 
   reset(): void {
     this.files.clear(); this.preexisting.clear(); this.rejected.clear(); this.sizes.clear(); this.intents.clear();
+    this.skipping.clear(); this.pendingLong.clear();
     this.listedAt = Number.NEGATIVE_INFINITY; this.baselined = false; this.baselineComplete = false;
   }
 
@@ -498,14 +587,28 @@ export class MuseSessionSource implements TranscriptSource {
       else {
         try { from = await lastLineBoundary(path, next.anchor ?? size); } catch { continue; }
       }
-      let read: { lines: string[]; newOffset: number };
-      try { read = await readNewLines(path, from); } catch { continue; }
-      this.files.set(path, read.newOffset);
-      this.sizes.set(path, size);
-      // One record at a time: a record of an unexpected shape is skipped, never the batch it came in.
-      for (const line of read.lines) {
-        try { this.parse(line, turns); } catch { /* skipped */ }
+      // #1218 P0 (#1786 review): bounded looks, as the other sources; the size is remembered only once the log has been
+      // read to it, so the rest of a delta over the look budget is read next poll, not when the log grows again.
+      let caughtUp = false;
+      for (let look = 0; look < LOOKS_PER_POLL; look++) {
+        let read: ReadNewLinesResult;
+        try { read = await readNewLines(path, from, { skipping: this.skipping.get(path) ?? false }); } catch { break; }
+        this.skipping.set(path, read.skipping);
+        const moved = read.newOffset !== from;
+        from = read.newOffset;
+        this.files.set(path, from);
+        // A long turn record (a pasted prompt in user_intent.accepted) is read whole, bounded.
+        const resolved = await resolveLongLines(path, read, this.pendingLong.get(path) ?? null, (head) => head.includes('"payload_type":"runtime.'));
+        if (resolved.pending) this.pendingLong.set(path, resolved.pending); else this.pendingLong.delete(path);
+        // One record at a time: a record of an unexpected shape is skipped, never the batch it came in.
+        for (const record of resolved.records) {
+          if (!("line" in record)) continue;
+          try { this.parse(record.line, turns); } catch { /* skipped */ }
+        }
+        if (!read.more) { caughtUp = !read.skipping; break; }
+        if (!moved) break;
       }
+      if (caughtUp) this.sizes.set(path, size);
     }
     const events = emptyEvents();
     if (turns.length) events.turns = turns;
@@ -701,6 +804,10 @@ async function forEachLimited(count: number, limit: number, task: (index: number
 export class KiroSessionSource implements TranscriptSource {
   private currentFile: string | null = null;
   private byteOffset = 0;
+  /** #1218 P0: the offset is inside a long line being skipped (readNewLines `skipping`). */
+  private skipping = false;
+  /** #1218 P0: a long line being skipped that is to be read whole once its end is found. */
+  private pendingLong: { offset: number } | null = null;
   private readonly createdAt: number;
   private generation = 0;
   private cursor: KiroDbCursor | undefined;
@@ -734,6 +841,8 @@ export class KiroSessionSource implements TranscriptSource {
     this.close();
     this.currentFile = null;
     this.byteOffset = 0;
+    this.skipping = false;
+    this.pendingLong = null;
     this.cursor = undefined;
     this.needsBaseline = true;
     void this.initialize();
@@ -849,6 +958,8 @@ export class KiroSessionSource implements TranscriptSource {
       if (active.createdAtMs >= this.createdAt) {
         this.currentFile = active.jsonlPath;
         this.byteOffset = 0; // our own fresh session — observable from the start
+        this.skipping = false;
+        this.pendingLong = null;
       } else {
         // An older session is attached at its last line boundary. If that cannot be read now, nothing is adopted
         // and the next poll tries again (#1283 review) — never offset 0, which would replay the whole session.
@@ -857,19 +968,31 @@ export class KiroSessionSource implements TranscriptSource {
         if (generation !== this.generation) return EMPTY;
         this.currentFile = active.jsonlPath;
         this.byteOffset = offset;
+        this.skipping = false;
+        this.pendingLong = null;
         return EMPTY;
       }
     }
 
-    const { lines, newOffset } = await readNewLines(this.currentFile, this.byteOffset);
-    if (generation !== this.generation) return EMPTY;
-    this.byteOffset = newOffset;
-
+    // #1218 P0: bounded looks, as the other JSONL sources. Kiro's nesting needs the whole record: a long line is read
+    // whole up to WHOLE_LINE_MAX_BYTES (as every line was before), and skipped beyond it.
     const events = emptyEvents();
-    for (const line of lines) {
-      let entry: unknown;
-      try { entry = JSON.parse(line); } catch { continue; }
-      collectKiroEvents(entry, events);
+    for (let look = 0; look < LOOKS_PER_POLL; look++) {
+      const read = await readNewLines(this.currentFile, this.byteOffset, { skipping: this.skipping });
+      if (generation !== this.generation) return EMPTY;
+      this.skipping = read.skipping;
+      const moved = read.newOffset !== this.byteOffset;
+      this.byteOffset = read.newOffset;
+      const resolved = await resolveLongLines(this.currentFile, read, this.pendingLong, () => true);
+      if (generation !== this.generation) return EMPTY;
+      this.pendingLong = resolved.pending;
+      for (const record of resolved.records) {
+        if (!("line" in record)) continue;
+        let entry: unknown;
+        try { entry = JSON.parse(record.line); } catch { continue; }
+        collectKiroEvents(entry, events);
+      }
+      if (!moved || !read.more) break;
     }
     return events;
   }
