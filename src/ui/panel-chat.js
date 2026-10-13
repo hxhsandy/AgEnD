@@ -10,7 +10,7 @@ import { html, useEffect, useLayoutEffect, useRef, useState } from "/assets/app-
 import { t } from "/assets/app-i18n.js";
 import { appStore, useStore } from "/assets/app-store.js";
 import { useLease } from "/assets/app-ctx.js";
-import { labelOf } from "/assets/instance-nav.js";
+import { namesOf, namesStore } from "/assets/instance-nav.js";
 import { PanelHeader, onPanelKey, setTitle, statusClass, statusLabel, openDrawer, requestNewInstance } from "/assets/app-shell.js";
 import { detailsPath } from "/assets/app-route.js";
 import { InstanceSwitch } from "/assets/instance-switch.js";
@@ -28,6 +28,7 @@ import { confirmedWrite } from "./settings-confirm.js";
 import { createChatStore } from "./chat-store.js";
 import { createThread, msgKey } from "./chat-thread.js";
 import { createEmojiIndex } from "./chat-emojis.js";
+import { pollPublicPreview } from "./preview-status.js";
 import { createMentionIndex } from "./chat-mentions.js";
 import { PreviewPanel, claimPanel, openPanel, panelClaims, panelStore, panelVersion, shownKey } from "./preview-panel.js";
 import { needsArgument, paletteFor, parseCommandLine } from "./chat-commands.js";
@@ -82,6 +83,8 @@ export function boot({ stream, boot: bootData, deps = {} }) {
   // belong to the app, once (they are never per mount).
   // #1554: its words in the page's language (chat.pv*); a key the dictionary does not have keeps preview.js's English.
   if (P() && bootData) P().init(bootData, { text: (key, ...v) => { const k = `chat.${key}`, s = t(k, ...v); return s === k ? null : s; } });
+  // #1723: the public link's preview was still starting when this page loaded: ask until it is up (or failed).
+  if (P() && bootData) pollPublicPreview(P());
   // #1568: the banner's "I understand" lasts until the next sign-in — preview.js is told which sign-in this page is
   // (the session handle, from the one /auth/session read); none (no session, or no AgendAuth): this tab only.
   if (P() && typeof P().setBannerScope === "function") {
@@ -131,6 +134,9 @@ function useChatTick(name, kinds) {
 
 // ── The panel ──
 
+/** #1722: the chat's title — the name that leads, the other on hover. */
+const headerName = ({ primary, secondary }) => (secondary ? html`<span title=${secondary}>${primary}</span>` : primary);
+
 export function ChatPanel({ route, navKey }) {
   const lease = useLease(navKey);
   const app = useStore(appStore);
@@ -166,6 +172,7 @@ function NotFound({ name }) {
 }
 
 function ChatView({ name, inst, lease, navKey, exec, awaiting }) {
+  const names = useStore(namesStore);   // #1722: which name leads (the title)
   const [dialog, setDialog] = useState(null);       // "delete" | null
   const [wrap, setWrap] = useState(codeWrap);
   const view = useRef(null), split = useRef(null), thread = useRef(null);
@@ -219,7 +226,7 @@ function ChatView({ name, inst, lease, navKey, exec, awaiting }) {
     ${inst.model ? html`<button type="button" class="hd-chip" title=${t("chat.chipModel", inst.model)} aria-label=${t("chat.chipModel", inst.model)} onClick=${() => pick("model")}>${inst.model}</button>` : null}
     ${inst.effort ? html`<button type="button" class="hd-chip" title=${t("chat.chipEffort", inst.effort)} aria-label=${t("chat.chipEffort", inst.effort)} onClick=${() => pick("effort")}>${inst.effort}</button>` : null}`;
   return html`<div class=${`panel p-chat${wrap ? " wrap-code" : ""}`} ref=${view}>
-    <${PanelHeader} title=${labelOf(inst) !== name ? html`<span title=${name}>${labelOf(inst)}</span>` : name} sub=${sub} nav=${html`<${InstanceSwitch} name=${name} current="chat" />`}><${HeaderTools} navKey=${navKey} /><${Menu} items=${items} label=${t("app.more")} /></${PanelHeader}>
+    <${PanelHeader} title=${headerName(namesOf(inst || { name }, names.primary))} sub=${sub} nav=${html`<${InstanceSwitch} name=${name} current="chat" />`}><${HeaderTools} navKey=${navKey} /><${Menu} items=${items} label=${t("app.more")} /></${PanelHeader}>
     <div class="chat-split" ref=${split}>
       <div class="chat-main">
         <${Thread} name=${name} th=${thread} />

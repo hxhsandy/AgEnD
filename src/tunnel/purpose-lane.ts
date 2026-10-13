@@ -3,9 +3,14 @@ import type { TunnelProvider, TunnelStartContext, TunnelStopResult } from "./typ
 
 export interface TunnelReservation {
   start(provider: TunnelProvider, context: TunnelStartContext): Promise<ManagedStartResult>;
-  stop(reason: string): Promise<TunnelStopResult>;
+  /**
+   * Stop this reservation's tunnel. `alsoProven` (#1723): another tunnel the holder ran beside it (the public link's
+   * preview) — the lane is released only once BOTH are proven stopped, and the first unproven one is the result.
+   */
+  stop(reason: string, alsoProven?: Promise<TunnelStopResult>): Promise<TunnelStopResult>;
   releaseUnused(): void;
 }
+const unproven = (): TunnelStopResult => ({ confirmed: false, reason: "stop failed", pid: null, identity: null });
 /** One actual manager, claimed before installer/listener awaits. Different origins never join. */
 export class TunnelPurposeLane {
   private owner: { purpose: string; id: string; reservation: TunnelReservation } | null = null;
@@ -27,13 +32,19 @@ export class TunnelPurposeLane {
         });
         return starting;
       },
-      stop: reason => stopping ??= (async () => {
-        await starting?.catch(() => {});
-        const result = await this.manager.stop(reason).catch(() => ({ confirmed: false as const, reason: "stop failed", pid: null, identity: null }));
-        stopped = result.confirmed;
-        release();
-        return result;
-      })(),
+      stop: (reason, alsoProven) => {
+        // Observed now, before any wait: a companion stop that fails while this one is still running is an unproven
+        // result here, never an unhandled rejection.
+        const other = alsoProven?.then(r => r, unproven);
+        return stopping ??= (async () => {
+          await starting?.catch(() => {});
+          const own = await this.manager.stop(reason).catch(unproven);
+          const result = !own.confirmed ? own : other ? await other : own;
+          stopped = result.confirmed;
+          release();
+          return result;
+        })();
+      },
       releaseUnused: release,
     };
     this.owner = { purpose, id, reservation };
