@@ -324,7 +324,6 @@ import {
 } from "./instance-config-impact.js";
 import {
   cleanupWatchVerdict,
-  formatFleetReadyFallbackText,
   formatRestartProgressCompletion,
   RESTART_PROGRESS_TERMINAL_TIMEOUT_MS,
   RestartProgress,
@@ -5688,6 +5687,18 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
    * after the completion) → watch for it. Anything else (no retire on this update, done silently, another receipt)
    * → nothing.
    */
+  /**
+   * #1716: background work this restart/update ended, scoped to the operation
+   * so an older stop never reports (`sinceAt` null = plain boot, report
+   * nothing). A method — not a module function — because the #1737
+   * extracted-completion harness runs this region verbatim with only
+   * `this`-methods plus a fixed context.
+   */
+  private collectBackgroundWorkEndedNames(names: readonly string[], sinceAt: number | null): string[] {
+    if (sinceAt === null) return [];
+    return names.filter(n => readBackgroundWorkEndedMarker(this.getInstanceDir(n), sinceAt) !== null);
+  }
+
   private updateCleanupAtCompletion(
     pending: (UpdateMarker & { progress: UpdateProgressState }) | null,
     operation: UpdateProgressOperation | null,
@@ -6343,9 +6354,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       // #1716: background work this restart/update ended, scoped to the
       // operation so an older stop never reports. No pending operation means
       // a plain boot — nothing was stopped by an operation, report nothing.
-      const opStartedAt = pendingUpdateProgress?.startedAt ?? null;
-      const backgroundWorkEndedNames = opStartedAt === null ? [] : configuredNames.filter(
-        n => readBackgroundWorkEndedMarker(this.getInstanceDir(n), opStartedAt) !== null);
+      const backgroundWorkEndedNames = this.collectBackgroundWorkEndedNames(
+        configuredNames, pendingUpdateProgress?.startedAt ?? null);
       const completionSummary: RestartProgressSummary = {
         running: started,
         total,
@@ -6377,21 +6387,25 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
             failedNames,
             backgroundWorkEndedNames,
           }, pendingUpdateProgress!.startedAt);
+        } else if (failedNames.length === 0 && pausedNames.length === 0) {
+          text = t("fleet.ready", started, total, agendVersion);
+        } else if (failedNames.length === 0) {
+          text = t("fleet.ready", started, total, agendVersion) + `\n⏸ Paused: ${pausedNames.join(", ")}`;
         } else {
-          // #1716: the fallback carries the same background-work names as
-          // the completion; #1735: an outcome that already landed goes in
-          // this message too, one still owed is the watch's.
-          text = formatFleetReadyFallbackText({
-            started,
-            total,
-            version: agendVersion,
-            pausedNames,
-            failedNames,
-            backgroundWorkEndedNames,
-            ...(cleanupOutcome && "render" in cleanupOutcome
-              ? { cleanupWarning: cleanupOutcome.render.warning, cleanupCommand: cleanupOutcome.render.cleanupCommand }
-              : {}),
-          });
+          text = t("fleet.ready_with_failed", started, total, agendVersion, failedNames.join(", "))
+            + (pausedNames.length > 0 ? `\n⏸ Paused: ${pausedNames.join(", ")}` : "");
+        }
+        // #1716: the fallback carries the same background-work names as the
+        // completion (inline: this block is executed verbatim by the #1737
+        // extracted-completion harness, which resolves `this`-methods plus a
+        // fixed context — no new bare module references here).
+        if (backgroundWorkEndedNames.length) {
+          text += `\n⚠️ Background work was running and was ended: ${backgroundWorkEndedNames.join(", ")}`;
+        }
+        // #1735: an outcome that already landed goes in this message too; one still owed is the watch's.
+        if (cleanupOutcome && "render" in cleanupOutcome) {
+          text += `\n\n⚠️ ${cleanupOutcome.render.warning}`
+            + (cleanupOutcome.render.cleanupCommand ? `\n\`$ ${cleanupOutcome.render.cleanupCommand}\`` : "");
         }
         await this.sendFleetStartCompletionFallback(
           String(fleet.channel.group_id),

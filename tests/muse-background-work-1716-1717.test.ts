@@ -460,24 +460,108 @@ describe("#1716: the stop reply and topic notice name the ended background work"
     expect(without).not.toContain("Background work");
   });
 
-  it("the update fallback carries the same background-work names (#1730 P2-3)", async () => {
-    const { formatFleetReadyFallbackText } = await import("../src/restart-progress.js");
-    const base = { started: 2, total: 2, version: "9.9", pausedNames: [] as string[], failedNames: [] as string[] };
-    const withNames = formatFleetReadyFallbackText({ ...base, backgroundWorkEndedNames: ["one"] });
-    expect(withNames).toContain("Fleet ready");
-    expect(withNames).toContain("Background work was running and was ended: one");
-    // No marker, no line — and the stale-marker rule lives in the scoped
-    // marker read, which the builder feeds this helper.
-    expect(formatFleetReadyFallbackText(base)).not.toContain("Background work");
-    expect(formatFleetReadyFallbackText({ ...base, backgroundWorkEndedNames: [] })).not.toContain("Background work");
-    // Paused/failed shapes keep their wording with the line appended.
-    const paused = formatFleetReadyFallbackText({ ...base, pausedNames: ["p"], backgroundWorkEndedNames: ["one"] });
-    expect(paused).toContain("Paused: p");
-    expect(paused).toContain("Background work was running and was ended: one");
-    // A landed cleanup outcome still renders after it, in completion order.
-    const both = formatFleetReadyFallbackText(
-      { ...base, backgroundWorkEndedNames: ["one"], cleanupWarning: "old copy left", cleanupCommand: "sudo rm -rf /x" });
-    expect(both.indexOf("Background work")).toBeLessThan(both.indexOf("old copy left"));
-    expect(both).toContain("`$ sudo rm -rf /x`");
+  it("collectBackgroundWorkEndedNames scopes to the operation (#1730 P2-3)", async () => {
+    const { FleetManager } = await import("../src/fleet-manager.js");
+    const { writeBackgroundWorkEndedMarker } = await import("../src/background-work-ended.js");
+    const collect = (FleetManager.prototype as any).collectBackgroundWorkEndedNames;
+    const cdir = mkdtempSync(join(tmpdir(), "agend-1716-collect-"));
+    try {
+      const getInstanceDir = (n: string) => join(cdir, "instances", n);
+      mkdirSync(join(cdir, "instances", "one"), { recursive: true });
+      mkdirSync(join(cdir, "instances", "two"), { recursive: true });
+      // Plain boot (null op) reports nothing, even with a marker present.
+      writeBackgroundWorkEndedMarker(join(cdir, "instances", "one"), "stop");
+      expect(collect.call({ getInstanceDir }, ["one", "two"], null)).toEqual([]);
+      // A fresh marker reports; a stale one and a missing one do not.
+      const opStart = Date.now();
+      writeBackgroundWorkEndedMarker(join(cdir, "instances", "one"), "stop", opStart + 5);
+      writeBackgroundWorkEndedMarker(join(cdir, "instances", "two"), "stop", opStart - 600_000);
+      expect(collect.call({ getInstanceDir }, ["one", "two"], opStart)).toEqual(["one"]);
+    } finally {
+      rmSync(cdir, { recursive: true, force: true });
+    }
+  });
+
+  it("the real update fallback carries the ended names (#1730 P2-3)", async () => {
+    // Same instrument as the #1737 fence tests: the real startAll completion
+    // block, extracted by AST and run against an inert manager — so this also
+    // proves the region stays compatible with their fixed vm context.
+    const ts = (await import("typescript")).default;
+    const { createContext, runInContext } = await import("node:vm");
+    const { FleetManager } = await import("../src/fleet-manager.js");
+    const { RestartProgress, formatRestartProgressCompletion } = await import("../src/restart-progress.js");
+    const marker = await import("../src/update-marker.js");
+    const { writeBackgroundWorkEndedMarker } = await import("../src/background-work-ended.js");
+    const wdir = mkdtempSync(join(tmpdir(), "agend-1716-fallback-"));
+    try {
+      const now = Date.now();
+      marker.beginUpdateProgress(wdir, { adapterId: "a", chatId: "c", messageId: "A" }, now - 500);
+      const pending = marker.readUpdateProgress(wdir)!;
+      const instDir = join(wdir, "instances", "one");
+      mkdirSync(instDir, { recursive: true });
+      writeBackgroundWorkEndedMarker(instDir, "stop", now - 100);
+      const sendText = vi.fn().mockResolvedValue({ messageId: "fallback" });
+      const adapter = { id: "a", editMessage: vi.fn().mockResolvedValue(undefined), sendText };
+      const fm: any = Object.create(FleetManager.prototype);
+      Object.assign(fm, {
+        dataDir: wdir,
+        fleetConfig: { instances: { one: {}, two: {} }, channel: { group_id: "c" } },
+        adapters: new Map([["a", adapter]]),
+        logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+        startNeedsYou: vi.fn(), announceToolPermissionsChange: vi.fn(), tightenInstanceDirectories: vi.fn(),
+        fleetLevelSignature: () => "inert", checkStartupSignatureConsistency: vi.fn(),
+        applyJobStoreCache: { settleAfterRestart: () => [] }, reloadPending: false,
+        sweepOrphanedCancelButtons: async () => {}, announceWebChatOnce: async () => {},
+        configuredStartupInstanceNames: () => ["one", "two"],
+        lifecycle: { isPaused: () => false, daemons: new Map([["one", {}], ["two", {}]]) },
+        findGeneralInstance: () => null, tipsEnabled: () => false,
+        updateCleanupWatch: null, updateProgressTimer: null, updateProgressEditRunning: false,
+        lastUpdateProgressText: null, updateCompletionTipText: null,
+        sendFleetStartCompletionFallback: async (_chat: string, text: string) => { await adapter.sendText("c", text); return true; },
+      });
+      const source = readFileSync(join(process.cwd(), "src", "fleet-manager.ts"), "utf8");
+      const ast = ts.createSourceFile("fleet-manager.ts", source, ts.ScriptTarget.ES2022, true);
+      let method: any, block: any;
+      const visit = (n: any): void => {
+        if (ts.isMethodDeclaration(n) && n.name.getText(ast) === "startAll") method = n;
+        ts.forEachChild(n, visit);
+      };
+      visit(ast);
+      const find = (n: any): void => {
+        if (ts.isBlock(n) && n.statements.some((st: any) => ts.isVariableStatement(st)
+          && st.declarationList.declarations.some((d: any) => d.name.getText(ast) === "completionSummary"))) block = n;
+        ts.forEachChild(n, find);
+      };
+      find(method.body);
+      const statements = block.statements;
+      const first = statements.findIndex((st: any) => ts.isVariableStatement(st)
+        && st.declarationList.declarations.some((d: any) => d.name.getText(ast) === "configuredNames"));
+      const tail = method.body.statements.find((st: any) => ts.isExpressionStatement(st)
+        && ts.isCallExpression(st.expression) && ts.isPropertyAccessExpression(st.expression.expression)
+        && st.expression.expression.name.text === "finishStartup");
+      const snapshot = method.body.statements.find((st: any) => ts.isVariableStatement(st)
+        && st.declarationList.declarations.some((d: any) => d.name.getText(ast) === "bootUpdateMarker"));
+      const script = (snapshot ? snapshot.getText(ast) + "\n" : "")
+        + statements.slice(first).map((st: any) => st.getText(ast)).join("\n") + "\n" + tail.getText(ast);
+      const progress = new RestartProgress(2, pending.startedAt, fm.logger, { mode: "update" });
+      const context = createContext({
+        fm, fleet: fm.fleetConfig, topicMode: true, pendingUpdateProgress: pending, pendingProgressOperation: "update",
+        startupProgress: progress, progressStart: Promise.resolve(true),
+        updateMarkerIdentity: marker.updateMarkerIdentity, updateReceiptOf: marker.updateReceiptOf,
+        formatRestartProgressCompletion, t: () => "fleet ready", Date,
+        load: async (name: string) => {
+          if (name !== "node:module") throw Error("unexpected inert import");
+          return { createRequire: () => () => ({ version: "9.9" }) };
+        },
+      });
+      const js = ts.transpileModule(`(async function(){ ${script} }).call(fm)`,
+        { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText
+        .replaceAll("import.meta.url", "'file:///inert/compiled.js'").replaceAll("import(", "load(").replaceAll("export {};", "");
+      await runInContext(js, context);
+      const text = String(sendText.mock.calls[0][1]);
+      expect(text).toContain("Background work was running and was ended: one");
+    } finally {
+      rmSync(wdir, { recursive: true, force: true });
+    }
   });
 });
