@@ -1949,31 +1949,31 @@
      "kind": "regex",
      "surface": "exit",
      "file": "src/backend/muse.ts",
-     "line": 348,
-     "symbol": "museLocalWorkQuitActive.hint"
+     "line": 346,
+     "symbol": "MUSE_QUIT_HINT"
     },
     {
      "text": "1. Exit anyway",
      "kind": "regex",
      "surface": "exit",
      "file": "src/backend/muse.ts",
-     "line": 354,
-     "symbol": "museLocalWorkQuitActive"
+     "line": 347,
+     "symbol": "MUSE_QUIT_OPT_1"
     },
     {
      "text": "2. Stay",
      "kind": "regex",
      "surface": "exit",
      "file": "src/backend/muse.ts",
-     "line": 355,
-     "symbol": "museLocalWorkQuitActive"
+     "line": 348,
+     "symbol": "MUSE_QUIT_OPT_2"
     },
     {
      "text": "ENOENT",
      "kind": "string",
      "surface": "other",
      "file": "src/backend/muse.ts",
-     "line": 494,
+     "line": 513,
      "symbol": "MuseBackend.mirrorSharedConfigEntries"
     },
     {
@@ -1981,7 +1981,7 @@
      "kind": "regex",
      "surface": "idle-busy",
      "file": "src/backend/muse.ts",
-     "line": 621,
+     "line": 640,
      "symbol": "MuseBackend.getReadyPattern"
     },
     {
@@ -1989,7 +1989,7 @@
      "kind": "string",
      "surface": "error",
      "file": "src/backend/muse.ts",
-     "line": 701,
+     "line": 720,
      "symbol": "MuseBackend.getErrorPatterns.type"
     },
     {
@@ -1997,7 +1997,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/muse.ts",
-     "line": 701,
+     "line": 720,
      "symbol": "MuseBackend.getErrorPatterns.pattern"
     },
     {
@@ -2005,7 +2005,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/muse.ts",
-     "line": 714,
+     "line": 733,
      "symbol": "MuseBackend.getErrorPatterns.pattern"
     },
     {
@@ -2013,7 +2013,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/muse.ts",
-     "line": 715,
+     "line": 734,
      "symbol": "MuseBackend.getErrorPatterns.pattern"
     },
     {
@@ -2021,7 +2021,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/muse.ts",
-     "line": 716,
+     "line": 735,
      "symbol": "MuseBackend.getErrorPatterns.pattern"
     },
     {
@@ -2029,7 +2029,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/muse.ts",
-     "line": 717,
+     "line": 736,
      "symbol": "MuseBackend.getErrorPatterns.pattern"
     },
     {
@@ -2037,7 +2037,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/muse.ts",
-     "line": 717,
+     "line": 736,
      "symbol": "MuseBackend.getErrorPatterns.pattern"
     },
     {
@@ -2045,7 +2045,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/muse.ts",
-     "line": 718,
+     "line": 737,
      "symbol": "MuseBackend.getErrorPatterns.pattern"
     },
     {
@@ -2053,7 +2053,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/muse.ts",
-     "line": 718,
+     "line": 737,
      "symbol": "MuseBackend.getErrorPatterns.pattern"
     },
     {
@@ -2061,7 +2061,7 @@
      "kind": "string",
      "surface": "error",
      "file": "src/backend/muse.ts",
-     "line": 720,
+     "line": 739,
      "symbol": "MuseBackend.getErrorPatterns.type"
     },
     {
@@ -2069,7 +2069,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/muse.ts",
-     "line": 722,
+     "line": 741,
      "symbol": "MuseBackend.getErrorPatterns.pattern"
     },
     {
@@ -2077,7 +2077,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/muse.ts",
-     "line": 722,
+     "line": 741,
      "symbol": "MuseBackend.getErrorPatterns.pattern"
     },
     {
@@ -2085,7 +2085,7 @@
      "kind": "regex",
      "surface": "trust",
      "file": "src/backend/muse.ts",
-     "line": 734,
+     "line": 753,
      "symbol": "MuseBackend.getStartupDialogs.pattern"
     },
     {
@@ -2093,7 +2093,7 @@
      "kind": "regex",
      "surface": "trust",
      "file": "src/backend/muse.ts",
-     "line": 743,
+     "line": 762,
      "symbol": "MuseBackend.getStartupDialogs.pattern"
     },
     {
@@ -2101,7 +2101,7 @@
      "kind": "regex",
      "surface": "trust",
      "file": "src/backend/muse.ts",
-     "line": 743,
+     "line": 762,
      "symbol": "MuseBackend.getStartupDialogs.pattern"
     },
     {
@@ -2109,7 +2109,7 @@
      "kind": "regex",
      "surface": "trust",
      "file": "src/backend/muse.ts",
-     "line": 743,
+     "line": 762,
      "symbol": "MuseBackend.getStartupDialogs.pattern"
     },
     {
@@ -2117,7 +2117,7 @@
      "kind": "regex",
      "surface": "resume",
      "file": "src/backend/muse.ts",
-     "line": 864,
+     "line": 883,
      "symbol": "MuseBackend.resumeMissingPattern"
     },
     {
@@ -2125,7 +2125,7 @@
      "kind": "regex",
      "surface": "resume",
      "file": "src/backend/muse.ts",
-     "line": 864,
+     "line": 883,
      "symbol": "MuseBackend.resumeMissingPattern"
     }
    ]
@@ -2497,7 +2497,7 @@
      "kind": "regex",
      "surface": "idle-busy",
      "file": "src/backend/kiro.ts",
-     "line": 1392,
+     "line": 1395,
      "symbol": "KiroBackend.getPaneActivity"
     },
     {
@@ -2505,7 +2505,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1400,
+     "line": 1403,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2513,7 +2513,7 @@
      "kind": "string",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1400,
+     "line": 1403,
      "symbol": "KiroBackend.getErrorPatterns.type"
     },
     {
@@ -2521,7 +2521,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1400,
+     "line": 1403,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2529,7 +2529,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1401,
+     "line": 1404,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2537,7 +2537,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1443,
+     "line": 1446,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2545,7 +2545,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1443,
+     "line": 1446,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2553,7 +2553,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1443,
+     "line": 1446,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2561,7 +2561,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1444,
+     "line": 1447,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2569,7 +2569,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1444,
+     "line": 1447,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2577,7 +2577,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1445,
+     "line": 1448,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2585,7 +2585,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1445,
+     "line": 1448,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2593,7 +2593,7 @@
      "kind": "string",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1449,
+     "line": 1452,
      "symbol": "KiroBackend.getErrorPatterns.type"
     },
     {
@@ -2601,7 +2601,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1470,
+     "line": 1473,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2609,7 +2609,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1470,
+     "line": 1473,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2617,7 +2617,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1500,
+     "line": 1503,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2625,7 +2625,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1500,
+     "line": 1503,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2633,7 +2633,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1500,
+     "line": 1503,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2641,7 +2641,7 @@
      "kind": "string",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1523,
+     "line": 1526,
      "symbol": "KiroBackend.getErrorPatterns.type"
     },
     {
@@ -2649,7 +2649,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1544,
+     "line": 1547,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2657,7 +2657,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1544,
+     "line": 1547,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2665,7 +2665,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1544,
+     "line": 1547,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2673,7 +2673,7 @@
      "kind": "regex",
      "surface": "error",
      "file": "src/backend/kiro.ts",
-     "line": 1555,
+     "line": 1558,
      "symbol": "KiroBackend.getErrorPatterns.pattern"
     },
     {
@@ -2681,7 +2681,7 @@
      "kind": "regex",
      "surface": "dialog",
      "file": "src/backend/kiro.ts",
-     "line": 1619,
+     "line": 1622,
      "symbol": "KiroBackend.getClearConfirmationDialog.pattern"
     },
     {
@@ -2689,7 +2689,7 @@
      "kind": "regex",
      "surface": "dialog",
      "file": "src/backend/kiro.ts",
-     "line": 1619,
+     "line": 1622,
      "symbol": "KiroBackend.getClearConfirmationDialog.pattern"
     },
     {
