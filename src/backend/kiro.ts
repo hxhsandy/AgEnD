@@ -1389,7 +1389,7 @@ export class KiroBackend implements CliBackend {
     if (last?.index === undefined) return null; // index 0 is a valid position
 
     const after = pane.slice(last.index);
-    if (/^\s*-\s*Completed in\b/m.test(after)) return null; // that tool has finished
+    if (/(?:^|\s)-\s*Completed in\b/m.test(after)) return null; // that tool has finished (normal or same-line-as-output)
 
     const purpose = after.match(/^\s*Purpose:\s*(.+)$/m);
     return purpose ? `${last[1]}: ${purpose[1].trim()}` : last[1];
