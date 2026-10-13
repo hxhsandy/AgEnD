@@ -111,6 +111,10 @@ is hand the new session a summary of what the old one was doing
 transcript. Tell the user plainly: the agent restarted on the other
 subscription, it knows what it was doing, it cannot quote what was said.
 
+**For claude-code**, if the operator wants the conversation to continue on the
+new profile, they can copy it across manually. See "Keep the Claude conversation
+when switching" below for the procedure.
+
 **For codex** the reply says `conversation_carried_over: true` and carries a
 `conversation_note`. Relay it as what it is — a statement about where the
 history lives, not a promise about what happens next. The accurate sentence is
@@ -119,6 +123,11 @@ history lives, not a promise about what happens next. The accurate sentence is
 a conversation recorded under a different account has not been tested yet. If it
 does not, the agent starts a fresh conversation and carries on — nothing breaks,
 it just does not continue.
+
+**For claude-code**, if the operator wants the conversation to continue on the
+new profile, they can copy it across manually before starting the instance on
+the new profile. This procedure is being automated by #1753. Until then, see
+"Keep the Claude conversation when switching" below.
 
 `backend_options` merges per backend, so setting a kiro option leaves a codex
 option on the same instance alone.
@@ -156,6 +165,78 @@ A profile that is configured but has never been logged in still gets a row,
 reading **Signed out — run `kiro-cli` to log in**. That is the reminder to go
 and log it in, so report it as such rather than as a missing subscription.
 
+## Keep the Claude conversation when switching (manual, until #1753 automates it)
+
+Each Claude Code profile is a separate config directory, so switching normally
+starts a fresh conversation. To carry the conversation across, copy it before
+starting the instance on the new profile. Run these steps on the host, or
+delegate them to an agent with shell access.
+
+1. **Record first.** Write down:
+   - the instance's current `<AGEND_HOME>/instances/<name>/session-id`;
+   - the path and mtime of the newest `.jsonl` in the old profile's
+     `projects/<slug>/`;
+   - the path and mtime of any `.jsonl` already in the new profile's
+     `projects/<slug>/` (there may not be one yet).
+
+2. **Stop the instance.**
+   ```
+   stop_instance("<name>")
+   ```
+
+3. **Switch the profile while stopped** (the instance is not started; the
+   switch applies at the next `start_instance`):
+   ```
+   update_instance_config("<name>", { backend_options: { "claude-code": { "credential_profile": "<new>" } } })
+   ```
+   To go back to the default login, send `null` for `credential_profile`.
+
+4. **Locate the directories.**
+
+   - *Old config dir:* `~/.claude` for the default login, or the
+     `CLAUDE_CONFIG_DIR` the default profile runs with, if that env var is set.
+   - *Profile dir:* `${AGEND_HOME:-$HOME/.agend}/credential-profiles/claude-code/<profile>`.
+   - *Slug:* the instance's absolute working directory with **every character
+     that is not A–Z, a–z, or 0–9 replaced by `-`**. A dot, a space, a slash
+     all become `-`. For example, `/home/han/.agend/workspaces/x` becomes
+     `-home-han--agend-workspaces-x`. **Do not compute this by hand:** list the
+     old profile's `projects/` directory and confirm the folder name there.
+
+5. **Copy (never move)** the conversation:
+   `<old>/projects/<slug>/<session-id>.jsonl` and `<session-id>/` (if present)
+   go to `<new>/projects/<slug>/`. Create the destination folder first if it
+   does not exist.
+
+   **⚠ Never overwrite a transcript that already exists in the destination.**
+   If `<new>/projects/<slug>/<session-id>.jsonl` already exists, the instance
+   may already have run on the new profile. Compare mtime and size and keep the
+   newer file. If you are not sure which to keep, stop and ask rather than
+   overwriting.
+
+6. **Touch the copied `.jsonl`** so it is the newest file in that folder.
+   AgEnD launches with `--continue` when `session-id` exists and the profile
+   has a matching project session:
+   ```
+   touch <new-dir>/projects/<slug>/<session-id>.jsonl
+   ```
+
+7. **Start the instance.**
+   ```
+   start_instance("<name>")
+   ```
+   Verify:
+   - `<AGEND_HOME>/instances/<name>/session-id` equals the copied session id;
+   - the copied `.jsonl` grows (the agent is resuming it);
+   - the original file's mtime is unchanged (it was copied, not moved);
+   - reconcile any work delivered to the instance between the stop and the
+     restore before assuming it was processed.
+
+**Caveats:**
+- The first reply re-reads the whole transcript on the new profile (cold cache,
+  counts against that profile's quota).
+- The original files stay in the old profile's directory, so switching back
+  works the same way.
+
 ## What to tell the user
 
 - Two agents with the same profile name share one login and one quota.
@@ -165,9 +246,11 @@ and log it in, so report it as such rather than as a missing subscription.
   worth saying so before someone sets this up expecting more headroom.
 - Claude Code profiles do not have usage rows of their own yet: the plain
   `Claude` row reads the default login. Do not report it as a profile's quota.
-- Switching a profile does not carry the conversation across; the agent gets a
-  summary of the work, not the transcript. Say anything that must survive
-  verbatim in the channel before switching.
+- Switching a profile for kiro or claude-code does not carry the conversation
+  across automatically; the agent gets a summary of the work, not the transcript.
+  Say anything that must survive verbatim in the channel before switching. For
+  claude-code, offer to copy the conversation first (see "Keep the Claude
+  conversation when switching" above).
 
 ## Do not
 
