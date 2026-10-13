@@ -343,24 +343,43 @@ const MUSE_LOGIN_MENU: RuntimeDialog = {
  * recognised whole and never answered here: the stop flow cancels it.
  */
 export const MUSE_LOCAL_WORK_QUIT = /^[ \t]*Local work is still active[ \t]*$/m;
+const MUSE_QUIT_HINT = /^[ \t]*Enter to confirm · Esc to cancel[ \t]*$/;
+const MUSE_QUIT_OPT_1 = /^[ \t]*[❯›]?[ \t]*1\.[ \t]+Exit anyway[ \t]*$/m;
+const MUSE_QUIT_OPT_2 = /^[ \t]*[❯›]?[ \t]*2\.[ \t]+Stay[ \t]*$/m;
 export function museLocalWorkQuitActive(pane: string): boolean {
-  const rows = pane.replace(/\r/g, "").split("\n").filter(row => row.trim() !== "");
-  const hint = rows.findIndex(row => /^[ \t]*Enter to confirm · Esc to cancel[ \t]*$/.test(row));
-  if (hint < 4) return false;
-  const window = rows.slice(Math.max(0, hint - 12), hint);
-  const head = window.findIndex(row => MUSE_LOCAL_WORK_QUIT.test(row));
-  if (head < 0) return false;
-  const block = window.slice(head).join("\n");
-  if (!(/^[ \t]*[❯›]?[ \t]*1\.[ \t]+Exit anyway[ \t]*$/m.test(block)
-    && /^[ \t]*[❯›]?[ \t]*2\.[ \t]+Stay[ \t]*$/m.test(block))) return false;
-  // #1730 P2-1: menu text quoted in the transcript while the composer is
-  // already free is history, not the live confirmation — a live menu owns the
-  // input region, so a free composer next to it means this match is stale.
-  // Without this, the holdOnly dialog would block ready deliveries and the
-  // stop flow would mistake the quote for the current confirmation.
   const screen = pane.replace(/\r/g, "").split("\n");
   while (screen.length && !screen[screen.length - 1].trim()) screen.pop();
-  return !museFreeComposerLayout(screen, MUSE_BUSY);
+  const bottom = museBottomSeparator(screen);
+  if (bottom < 0) return false;
+  // #1730 P2-1 (refined): the menu must belong to the CURRENT input block —
+  // between the bottom separator and the nearest separator above it. Menu
+  // text quoted in an older screen is history even when the current composer
+  // is busy with a draft, not just when it is free.
+  let top = -1;
+  for (let i = bottom - 1; i >= 0; i--) {
+    if (MUSE_SEPARATOR.test(screen[i])) { top = i; break; }
+  }
+  // A free composer on the current screen means any menu text is history.
+  if (museFreeComposerLayout(screen, MUSE_BUSY)) return false;
+  // Candidates newest-first, so a stale quote above never shadows the live
+  // block below (or passes as live itself).
+  for (let h = screen.length - 1; h >= 0; h--) {
+    if (!MUSE_QUIT_HINT.test(screen[h])) continue;
+    if (!(h > top && h < bottom)) continue;
+    // The block above, skipping padding blanks (the same 12-non-blank
+    // window as before — the live menu fits in 9).
+    const window: string[] = [];
+    for (let i = h - 1; i >= 0 && window.length < 12; i--) {
+      if (screen[i].trim()) window.unshift(screen[i]);
+    }
+    if (window.length < 4) continue;
+    const head = window.findIndex(row => MUSE_LOCAL_WORK_QUIT.test(row));
+    if (head < 0) continue;
+    const block = window.slice(head).join("\n");
+    if (!MUSE_QUIT_OPT_1.test(block) || !MUSE_QUIT_OPT_2.test(block)) continue;
+    return true;
+  }
+  return false;
 }
 
 /**

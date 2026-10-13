@@ -141,6 +141,24 @@ describe("#1716: the 'Local work is still active' quit menu", () => {
     expect(museLocalWorkQuitActive(stale)).toBe(false);
   });
 
+  it("a quit menu quoted above a busy composer is history too, not live (#1730 P2-1 refined)", () => {
+    // Prism's r2 witness: the same historic menu quote, but the current
+    // screen is echo-after-escape — the composer holds this spawn's own
+    // "cancel me" draft, so inputDraftShows matches an owned paste. The menu
+    // must still be rejected: it belongs to an older input block, not the
+    // current live one, and a holdOnly dialog must not block #829's clearing
+    // of the restored draft.
+    const quitLines = pane("prod-quit-with-local-work").split("\n");
+    const start = quitLines.findIndex(l => l.includes("Local work is still active"));
+    const end = quitLines.findIndex(l => l.includes("Enter to confirm"));
+    const stale = `${quitLines.slice(start, end + 1).join("\n")}\n\n\n\n\n\n\n\n\n\n${pane("echo-after-escape").trimEnd()}\n`;
+    expect(stale.split("\n").length).toBeLessThan(40);
+    expect(b.inputDraft(stale)?.rows).toEqual(["cancel me"]);
+    expect(b.inputDraftShows(b.inputDraft(stale)!, "cancel me")).toBe(true);
+    expect(museLocalWorkQuitActive(stale)).toBe(false);
+    expect(b.quitBlockedByDialog(stale)).toBe(false);
+  });
+
   it("deliveries hold on it and never answer it: a passive dialog with no keys", () => {
     const dialog = b.getRuntimeDialogs().find(d => d.isActive === museLocalWorkQuitActive);
     expect(dialog).toMatchObject({ keys: [], holdOnly: true, blocksDelivery: true });
@@ -224,6 +242,31 @@ describe("#1716: the stop flow cancels the menu with Escape — no option chosen
     // #1716: the ended background work is recorded for the stop reply.
     const { readBackgroundWorkEndedMarker } = await import("../src/background-work-ended.js");
     expect(readBackgroundWorkEndedMarker(dir, 0)?.reason).toBe("stop");
+  });
+
+  it("a quoted menu with an owned draft probes clear on a real Daemon (#1730 P2-1 refined)", async () => {
+    // Prism's r2 probe: the stale quote + echo-after-escape pane, with
+    // recentPastes binding this spawn's "cancel me" so ownsInputDraft is
+    // true — yet the real probeBlockingDialog must return clear, so the new
+    // holdOnly dialog never blocks #829 clearing its own restored draft.
+    const quitLines = QUIT().split("\n");
+    const start = quitLines.findIndex(l => l.includes("Local work is still active"));
+    const end = quitLines.findIndex(l => l.includes("Enter to confirm"));
+    const stale = `${quitLines.slice(start, end + 1).join("\n")}\n\n\n\n\n\n\n\n\n\n${pane("echo-after-escape").trimEnd()}\n`;
+    const d = makeDaemon();
+    d["backend"] = standingIn<CliBackend>({
+      binaryName: "muse",
+      getRuntimeDialogs: () => b.getRuntimeDialogs(),
+      inputDraft: (p: string) => b.inputDraft(p),
+      inputDraftShows: (draft: never, text: string) => b.inputDraftShows(draft, text),
+    });
+    d["rememberPaste"]("cancel me", d["spawnGeneration"]);
+    d["tmux"] = standingIn<TmuxManager>({
+      getWindowId: () => "@1",
+      capturePane: vi.fn(async () => stale),
+      getPaneStatus: vi.fn(async () => ({ alive: true })),
+    });
+    expect(await d["probeBlockingDialog"]()).toEqual({ state: "clear" });
   });
 
   it("no menu, no marker: a clean stop reports nothing", async () => {
