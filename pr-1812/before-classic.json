@@ -1,0 +1,216 @@
+{
+ "tag": "before",
+ "scrollbars": "classic",
+ "browser": "151.0.7922.34",
+ "desktop": {
+  "preview": {
+   "card": {
+    "x": 281.5,
+    "y": 52,
+    "width": 728,
+    "height": 536,
+    "top": 52,
+    "right": 1009.5,
+    "bottom": 588,
+    "left": 281.5
+   },
+   "body": {
+    "x": 294.5,
+    "y": 99,
+    "width": 702,
+    "height": 480,
+    "top": 99,
+    "right": 996.5,
+    "bottom": 579,
+    "left": 294.5
+   },
+   "scrollbarW": 15,
+   "leftInsetFromCardBorder": 12,
+   "rightInsetToScrollbarOrEdge": 0,
+   "rightInsetFromCardBorder": 27,
+   "tbl": {
+    "x": 294.5,
+    "y": -17,
+    "width": 687,
+    "height": 288,
+    "top": -17,
+    "right": 981.5,
+    "bottom": 271,
+    "left": 294.5
+   },
+   "table": {
+    "x": 294.5,
+    "y": -17,
+    "width": 687,
+    "height": 288,
+    "top": -17,
+    "right": 981.5,
+    "bottom": 271,
+    "left": 294.5
+   },
+   "tblScrolls": false,
+   "tblScrollbarH": 0,
+   "midWord": [],
+   "colWidths": [
+    109,
+    320,
+    257
+   ]
+  },
+  "bubble": {
+   "tbl": {
+    "x": 281.5,
+    "y": 707,
+    "width": 728,
+    "height": 262,
+    "top": 707,
+    "right": 1009.5,
+    "bottom": 969,
+    "left": 281.5
+   },
+   "table": {
+    "x": 281.5,
+    "y": 707,
+    "width": 728,
+    "height": 262,
+    "top": 707,
+    "right": 1009.5,
+    "bottom": 969,
+    "left": 281.5
+   },
+   "tblScrolls": false,
+   "tblScrollbarH": 0,
+   "midWord": [
+    "code \"ate.go:2|2\""
+   ],
+   "colWidths": [
+    114,
+    340,
+    273
+   ]
+  },
+  "bubbleMd": {
+   "x": 281.5,
+   "y": 675,
+   "width": 728,
+   "height": 294,
+   "top": 675,
+   "right": 1009.5,
+   "bottom": 969,
+   "left": 281.5
+  },
+  "cspViolations": []
+ },
+ "phone": {
+  "preview": {
+   "card": {
+    "x": 12,
+    "y": 86,
+    "width": 351,
+    "height": 536,
+    "top": 86,
+    "right": 363,
+    "bottom": 622,
+    "left": 12
+   },
+   "body": {
+    "x": 25,
+    "y": 133,
+    "width": 325,
+    "height": 480,
+    "top": 133,
+    "right": 350,
+    "bottom": 613,
+    "left": 25
+   },
+   "scrollbarW": 15,
+   "leftInsetFromCardBorder": 12,
+   "rightInsetToScrollbarOrEdge": 0,
+   "rightInsetFromCardBorder": 27,
+   "tbl": {
+    "x": 25,
+    "y": 21,
+    "width": 310,
+    "height": 392,
+    "top": 21,
+    "right": 335,
+    "bottom": 413,
+    "left": 25
+   },
+   "table": {
+    "x": 25,
+    "y": 21,
+    "width": 310,
+    "height": 392,
+    "top": 21,
+    "right": 335,
+    "bottom": 413,
+    "left": 25
+   },
+   "tblScrolls": false,
+   "tblScrollbarH": 0,
+   "midWord": [
+    "text \" analyti|cs\"",
+    "code \"ame:\\\"Ana|lytics\\\"\"",
+    "code \"go_serve|r/config\"",
+    "code \"yer/mode|l/model.\"",
+    "code \"o:154,48|4\"",
+    "text \"direct|or 不要動\"",
+    "code \"tor.go:9|6\""
+   ],
+   "colWidths": [
+    60,
+    136,
+    113
+   ]
+  },
+  "bubble": {
+   "tbl": {
+    "x": 12,
+    "y": 1435,
+    "width": 351,
+    "height": 392,
+    "top": 1435,
+    "right": 363,
+    "bottom": 1827,
+    "left": 12
+   },
+   "table": {
+    "x": 12,
+    "y": 1435,
+    "width": 351,
+    "height": 392,
+    "top": 1435,
+    "right": 363,
+    "bottom": 1827,
+    "left": 12
+   },
+   "tblScrolls": false,
+   "tblScrollbarH": 0,
+   "midWord": [
+    "text \" analyti|cs\"",
+    "code \"e:\\\"Analy|tics\\\"\"",
+    "code \"server/c|onfigDBS\"",
+    "code \"ing/upda|te.go:22\"",
+    "code \"/model/m|odel.go:\"",
+    "text \"directo|r 不要動\""
+   ],
+   "colWidths": [
+    65,
+    156,
+    129
+   ]
+  },
+  "bubbleMd": {
+   "x": 12,
+   "y": 1403,
+   "width": 351,
+   "height": 424,
+   "top": 1403,
+   "right": 363,
+   "bottom": 1827,
+   "left": 12
+  },
+  "cspViolations": []
+ }
+}

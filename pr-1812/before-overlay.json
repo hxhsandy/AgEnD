@@ -1,0 +1,212 @@
+{
+ "tag": "before",
+ "scrollbars": "overlay",
+ "browser": "151.0.7922.34",
+ "desktop": {
+  "preview": {
+   "card": {
+    "x": 289,
+    "y": 52,
+    "width": 728,
+    "height": 536,
+    "top": 52,
+    "right": 1017,
+    "bottom": 588,
+    "left": 289
+   },
+   "body": {
+    "x": 302,
+    "y": 99,
+    "width": 702,
+    "height": 480,
+    "top": 99,
+    "right": 1004,
+    "bottom": 579,
+    "left": 302
+   },
+   "scrollbarW": 0,
+   "leftInsetFromCardBorder": 12,
+   "rightInsetToScrollbarOrEdge": 0,
+   "rightInsetFromCardBorder": 12,
+   "tbl": {
+    "x": 302,
+    "y": -17,
+    "width": 702,
+    "height": 288,
+    "top": -17,
+    "right": 1004,
+    "bottom": 271,
+    "left": 302
+   },
+   "table": {
+    "x": 302,
+    "y": -17,
+    "width": 702,
+    "height": 288,
+    "top": -17,
+    "right": 1004,
+    "bottom": 271,
+    "left": 302
+   },
+   "tblScrolls": false,
+   "tblScrollbarH": 0,
+   "midWord": [],
+   "colWidths": [
+    111,
+    327,
+    263
+   ]
+  },
+  "bubble": {
+   "tbl": {
+    "x": 289,
+    "y": 707,
+    "width": 728,
+    "height": 262,
+    "top": 707,
+    "right": 1017,
+    "bottom": 969,
+    "left": 289
+   },
+   "table": {
+    "x": 289,
+    "y": 707,
+    "width": 728,
+    "height": 262,
+    "top": 707,
+    "right": 1017,
+    "bottom": 969,
+    "left": 289
+   },
+   "tblScrolls": false,
+   "tblScrollbarH": 0,
+   "midWord": [
+    "code \"ate.go:2|2\""
+   ],
+   "colWidths": [
+    114,
+    340,
+    273
+   ]
+  },
+  "bubbleMd": {
+   "x": 289,
+   "y": 675,
+   "width": 728,
+   "height": 294,
+   "top": 675,
+   "right": 1017,
+   "bottom": 969,
+   "left": 289
+  },
+  "cspViolations": []
+ },
+ "phone": {
+  "preview": {
+   "card": {
+    "x": 12,
+    "y": 86,
+    "width": 366,
+    "height": 536,
+    "top": 86,
+    "right": 378,
+    "bottom": 622,
+    "left": 12
+   },
+   "body": {
+    "x": 25,
+    "y": 133,
+    "width": 340,
+    "height": 480,
+    "top": 133,
+    "right": 365,
+    "bottom": 613,
+    "left": 25
+   },
+   "scrollbarW": 0,
+   "leftInsetFromCardBorder": 12,
+   "rightInsetToScrollbarOrEdge": 0,
+   "rightInsetFromCardBorder": 12,
+   "tbl": {
+    "x": 25,
+    "y": 21,
+    "width": 340,
+    "height": 392,
+    "top": 21,
+    "right": 365,
+    "bottom": 413,
+    "left": 25
+   },
+   "table": {
+    "x": 25,
+    "y": 21,
+    "width": 340,
+    "height": 392,
+    "top": 21,
+    "right": 365,
+    "bottom": 413,
+    "left": 25
+   },
+   "tblScrolls": false,
+   "tblScrollbarH": 0,
+   "midWord": [
+    "text \" analyti|cs\"",
+    "code \"me:\\\"Anal|ytics\\\"\"",
+    "code \"ting/upd|ate.go:2\"",
+    "text \"directo|r 不要動\""
+   ],
+   "colWidths": [
+    64,
+    151,
+    125
+   ]
+  },
+  "bubble": {
+   "tbl": {
+    "x": 12,
+    "y": 1435,
+    "width": 366,
+    "height": 392,
+    "top": 1435,
+    "right": 378,
+    "bottom": 1827,
+    "left": 12
+   },
+   "table": {
+    "x": 12,
+    "y": 1435,
+    "width": 366,
+    "height": 392,
+    "top": 1435,
+    "right": 378,
+    "bottom": 1827,
+    "left": 12
+   },
+   "tblScrolls": false,
+   "tblScrollbarH": 0,
+   "midWord": [
+    "text \"analytic|s\"",
+    "code \":\\\"Analyt|ics\\\"\"",
+    "code \"erver/co|nfigDBSe\"",
+    "code \"model/mo|del.go:1\"",
+    "code \"or/.../d|irector.\""
+   ],
+   "colWidths": [
+    67,
+    163,
+    135
+   ]
+  },
+  "bubbleMd": {
+   "x": 12,
+   "y": 1403,
+   "width": 366,
+   "height": 424,
+   "top": 1403,
+   "right": 378,
+   "bottom": 1827,
+   "left": 12
+  },
+  "cspViolations": []
+ }
+}

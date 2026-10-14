@@ -1,0 +1,199 @@
+{
+ "tag": "after",
+ "scrollbars": "overlay",
+ "browser": "151.0.7922.34",
+ "desktop": {
+  "preview": {
+   "card": {
+    "x": 289,
+    "y": 52,
+    "width": 728,
+    "height": 536,
+    "top": 52,
+    "right": 1017,
+    "bottom": 588,
+    "left": 289
+   },
+   "body": {
+    "x": 290,
+    "y": 99,
+    "width": 726,
+    "height": 480,
+    "top": 99,
+    "right": 1016,
+    "bottom": 579,
+    "left": 290
+   },
+   "scrollbarW": 0,
+   "leftInsetFromCardBorder": 12,
+   "rightInsetToScrollbarOrEdge": 12,
+   "rightInsetFromCardBorder": 12,
+   "tbl": {
+    "x": 302,
+    "y": -17,
+    "width": 702,
+    "height": 300,
+    "top": -17,
+    "right": 1004,
+    "bottom": 283,
+    "left": 302
+   },
+   "table": {
+    "x": 302,
+    "y": -17,
+    "width": 702,
+    "height": 288,
+    "top": -17,
+    "right": 1004,
+    "bottom": 271,
+    "left": 302
+   },
+   "tblScrolls": false,
+   "tblScrollbarH": 0,
+   "midWord": [],
+   "colWidths": [
+    111,
+    323,
+    267
+   ]
+  },
+  "bubble": {
+   "tbl": {
+    "x": 289,
+    "y": 707,
+    "width": 728,
+    "height": 300,
+    "top": 707,
+    "right": 1017,
+    "bottom": 1007,
+    "left": 289
+   },
+   "table": {
+    "x": 289,
+    "y": 707,
+    "width": 728,
+    "height": 288,
+    "top": 707,
+    "right": 1017,
+    "bottom": 995,
+    "left": 289
+   },
+   "tblScrolls": false,
+   "tblScrollbarH": 0,
+   "midWord": [],
+   "colWidths": [
+    114,
+    338,
+    274
+   ]
+  },
+  "bubbleMd": {
+   "x": 289,
+   "y": 675,
+   "width": 728,
+   "height": 332,
+   "top": 675,
+   "right": 1017,
+   "bottom": 1007,
+   "left": 289
+  },
+  "cspViolations": []
+ },
+ "phone": {
+  "preview": {
+   "card": {
+    "x": 12,
+    "y": 86,
+    "width": 366,
+    "height": 536,
+    "top": 86,
+    "right": 378,
+    "bottom": 622,
+    "left": 12
+   },
+   "body": {
+    "x": 13,
+    "y": 133,
+    "width": 364,
+    "height": 480,
+    "top": 133,
+    "right": 377,
+    "bottom": 613,
+    "left": 13
+   },
+   "scrollbarW": 0,
+   "leftInsetFromCardBorder": 12,
+   "rightInsetToScrollbarOrEdge": 12,
+   "rightInsetFromCardBorder": 12,
+   "tbl": {
+    "x": 25,
+    "y": 21,
+    "width": 340,
+    "height": 480,
+    "top": 21,
+    "right": 365,
+    "bottom": 501,
+    "left": 25
+   },
+   "table": {
+    "x": 25,
+    "y": 21,
+    "width": 387.796875,
+    "height": 468,
+    "top": 21,
+    "right": 412.796875,
+    "bottom": 489,
+    "left": 25
+   },
+   "tblScrolls": true,
+   "tblScrollbarH": 0,
+   "midWord": [],
+   "colWidths": [
+    74,
+    134,
+    179
+   ]
+  },
+  "bubble": {
+   "tbl": {
+    "x": 12,
+    "y": 1519,
+    "width": 366,
+    "height": 480,
+    "top": 1519,
+    "right": 378,
+    "bottom": 1999,
+    "left": 12
+   },
+   "table": {
+    "x": 12,
+    "y": 1519,
+    "width": 387.796875,
+    "height": 468,
+    "top": 1519,
+    "right": 399.796875,
+    "bottom": 1987,
+    "left": 12
+   },
+   "tblScrolls": true,
+   "tblScrollbarH": 0,
+   "midWord": [],
+   "colWidths": [
+    74,
+    134,
+    179
+   ]
+  },
+  "bubbleMd": {
+   "x": 12,
+   "y": 1487,
+   "width": 366,
+   "height": 512,
+   "top": 1487,
+   "right": 378,
+   "bottom": 1999,
+   "left": 12
+  },
+  "cspViolations": []
+ }
+}
