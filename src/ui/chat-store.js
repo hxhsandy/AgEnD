@@ -37,6 +37,10 @@ export function createChatStore(deps) {
     msgs: {}, drafts: {}, failedSends: {}, pendingFiles: {}, sending: {}, inFlightFiles: {},
     prompts: {}, workingSince: {}, stopping: {}, cancelling: {}, scrollMemo: {}, historyRead: new Set(), rbBusy: new Set(),
     pollMine: readPollMine(),
+    // #1823 (#1828 review): the server's clock minus this device's. A poll's deadline is the server's; a page whose clock
+    // is a few seconds off would count a 10 s poll wrong. Only the server's explicit `clock` sets it (#1830 review): a
+    // view's rev is when it was made, and a polled or replayed view can be minutes old.
+    clockSkew: 0,
     exec: {}, awaiting: {}, current: null,
     // #1269: the last chat command per instance — { command, busy, text?, error?, choices? } — shown above the composer.
     commands: {},
@@ -83,6 +87,10 @@ export function createChatStore(deps) {
   }
 
   // ── Messages: one way in, from the stream, a poll or the history; one entry per boot+id.
+  /** #1823: the server's clock, `clock` from the stream or a poll answer — handed over as soon as it is read. */
+  function noteServerClock(c) {
+    if (c && typeof c.now === "number" && Number.isFinite(c.now)) s.clockSkew = c.now - Date.now();
+  }
   function ingest(m) {
     if (!m || typeof m.instance !== "string") return;
     const before = s.msgs[m.instance];
@@ -348,6 +356,7 @@ export function createChatStore(deps) {
     stream.on("prompts", applyPrompts);
     stream.on("prompt_resolved", resolvePrompt);
     stream.on("reply_buttons", applyReplyButtons);
+    stream.on("clock", noteServerClock);                                  // #1823
   }
 
   return {
