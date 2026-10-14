@@ -206,11 +206,12 @@ describe("`agend update` when the package is already current (built CLI copy, st
    * Runs `agend update --beta` from a fresh COPY of dist/: its cli.js mtime is
    * "now", so a process started before the copy predates the install.
    */
-  function update(fleetPid: number | null) {
+  function update(fleetPid: number | null, opts: { installedVersion?: string; pidFile?: (path: string) => void } = {}) {
     const home = tmp();
     const agendHome = join(home, ".agend");
     mkdirSync(agendHome, { recursive: true });
     if (fleetPid !== null) writeFileSync(join(agendHome, "fleet.pid"), `${fleetPid}\n`);
+    opts.pidFile?.(join(agendHome, "fleet.pid"));
     spawnSync("sleep", ["2.5"]); // past the 2 s margin
     const pkg = join(home, "pkg");
     mkdirSync(pkg);
@@ -236,7 +237,7 @@ describe("`agend update` when the package is already current (built CLI copy, st
     // it (#1449 review: version, bin on PATH, a database opens on its node).
     const globalPkg = join(home, "lib", "node_modules", "@songsid", "agend");
     // The installed `agend`: this build — its `install --no-activate` refreshes the unit, its `restart` is the real one.
-    installedCopy(globalPkg, version);
+    installedCopy(globalPkg, opts.installedVersion ?? version);
     symlinkSync(join(globalPkg, "launcher", "agend"), join(bin, "agend"));   // npm's bin link
     writeFileSync(join(bin, "npm"), `#!/bin/sh\necho "npm $*" >> '${log}'\ncase "$*" in view*) echo '${version}';; "root -g") echo '${join(home, "lib", "node_modules")}';; "prefix -g") echo '${home}';; esac\nexit 0\n`);
     // systemd 249 as observed: CoredumpFilter stays 0x33 whatever the unit file says.
@@ -277,18 +278,62 @@ exit 0
     try {
       const { r, out, restarted } = update(stranger.pid);
       expect(restarted, out).toBe(false);
-      expect(r.stdout).toContain("Already up to date");
+      // #1829 ⑥: a fleet.pid naming a process that is not a fleet means no fleet runs — never "up to date".
+      expect(r.stdout).not.toContain("Already up to date");
+      expect(r.stderr).toContain("is installed but the fleet is not running — run: agend start");
+      expect(r.status).toBe(1);
       expect(r.stdout).not.toContain("the running fleet started before it was");
     } finally { stranger.stop(); }
     // pid 1 (init) predates everything and is alive — still not a fleet.
     expect(update(1).restarted).toBe(false);
   });
 
+  // #1829 ⑥: the target installed, no fleet running → never "Already up to date": verified, then the exact next step.
+  it.skipIf(!existsSync(cli) || !linux)("no fleet.pid, or a pid that is gone → 'installed but not running — run: agend start', exit 1, nothing started", () => {
+    const gone = liveProcess("node /opt/agend/bin/agend fleet start");
+    gone.stop();
+    spawnSync("sleep", ["0.2"]);
+    for (const pid of [null, gone.pid]) {
+      const { r, out, calls, restarted } = update(pid);
+      expect(restarted, out).toBe(false);
+      expect(calls.some(c => /^systemctl --user (start|restart)/.test(c)), out).toBe(false);
+      expect(r.stdout, out).not.toContain("Already up to date");
+      expect(r.stderr, out).toContain("is installed but the fleet is not running — run: agend start");
+      expect(r.status, out).toBe(1);
+    }
+  }, 30_000);
+
+  // #1829 review: a fleet.pid that cannot be read or parsed is not evidence of a stopped fleet — the old answer stays.
+  it.skipIf(!existsSync(cli) || !linux)("a fleet.pid that is a directory, empty, malformed or unreadable → not 'not running'", () => {
+    const writers: Array<[string, (path: string) => void]> = [
+      ["directory", path => mkdirSync(path)],
+      ["empty", path => writeFileSync(path, "")],
+      ["malformed", path => writeFileSync(path, "not-a-pid\n")],
+      ["beyond process.kill's range", path => writeFileSync(path, "2147483648\n")],
+    ];
+    if (process.getuid?.() !== 0) writers.push(["unreadable", path => { writeFileSync(path, `${process.pid}\n`); chmodSync(path, 0o000); }]);
+    for (const [label, pidFile] of writers) {
+      const { r, out, restarted } = update(null, { pidFile });
+      expect(restarted, `${label}\n${out}`).toBe(false);
+      expect(r.stderr, `${label}\n${out}`).not.toContain("the fleet is not running");
+      expect(r.stdout, `${label}\n${out}`).toContain("Already up to date");
+    }
+  }, 60_000);
+
+  it.skipIf(!existsSync(cli) || !linux)("no fleet running and the installed package does not verify → the reinstall message, not 'run: agend start'", () => {
+    const { r, out, restarted } = update(null, { installedVersion: "0.0.1" });
+    expect(restarted, out).toBe(false);
+    expect(r.stderr, out).toContain("Reinstall a working version");
+    expect(r.stderr, out).not.toContain("run: agend start");
+    expect(r.stdout, out).not.toContain("Already up to date");
+    expect(r.status, out).toBe(1);
+  });
+
   it.skipIf(!existsSync(cli))("leaves a fleet that is already running the installed code alone; no fleet → nothing", () => {
     expect(update(process.pid).restarted).toBe(false); // the test runner: not a fleet, and newer anyway
     expect(update(null).restarted).toBe(false);
     expect(update(2 ** 22 + 4321).restarted).toBe(false); // a pid that does not exist
-  });
+  }, 60_000);   // three built-CLI runs; the two with no fleet also verify the install (#1829)
 });
 
 describe("detached `agend restart` signals only a confirmed fleet (built CLI; the self-spawn is recorded, no fleet starts)", () => {
