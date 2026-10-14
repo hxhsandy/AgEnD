@@ -125,7 +125,7 @@ import {
 import { TopicArchiver, type ArchiverContext } from "./topic-archiver.js";
 import { StatuslineWatcher, type StatuslineWatcherContext } from "./statusline-watcher.js";
 import { applyInstanceConfigPatch, outboundHandlers, type OutboundContext } from "./outbound-handlers.js";
-import { backendArgs, backendStep, joinBackendArgs, planDisplay, type BackendCommandDeps, type BackendStep } from "./backend-command.js";
+import { backendArgs, backendStep, joinBackendArgs, modelNameCarried, planDisplay, type BackendCommandDeps, type BackendStep } from "./backend-command.js";
 import { DeliveryOutbox, DEFAULT_REPLY_OBLIGATION_TTL_MS, isSilentScheduleDelivery, type ClaimedOutboxDelivery, type OutboxDelivery, type DeliveryStatusSelector, type DeliveryStatusPage } from "./delivery-outbox.js";
 
 // The target Daemon can legitimately wait 30 minutes for a busy pane before
@@ -17013,9 +17013,8 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
       currentDisplay: (name) => `${this.backendNameForInstance(name)} · ${this.resolveInstanceModel(name).display}`,
       installedBackends: () => KNOWN_BACKENDS.filter(b => b !== "mock" && this.backendInstalledHere(b)),
       models: (backend) => this.backendModelOptions(backend, opts),
-      // claude-code takes names beyond its list (aliases, the account catalog) — the same check /model makes, without
-      // this instance's configured model, which belongs to the backend being left.
-      modelKnown: (backend, model) => backend === "claude-code" && this.claudeModelKnown(instanceName, model, null).known,
+      // #1808: the same rule update_instance_config's switch applies (backendModelVerdict).
+      modelKnown: (backend, model) => this.backendModelVerdict(instanceName, backend, model).ok,
       effortLevels: (backend, model) => this.backendEffortLevels(instanceName, backend, model),
       inherited: (key) => {
         const value = (getEffectiveInstanceDefaults(this.fleetConfig?.defaults) as Record<string, unknown>)[key];
@@ -17034,7 +17033,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
    * `/effort`'s levels for a backend this instance may move to, for the model that will run there (codex's levels are
    * per model; null: its configured default). Empty: it has no effort setting. A file read, never a CLI.
    */
-  private backendEffortLevels(instanceName: string, backend: string, model: string | null = null): string[] {
+  backendEffortLevels(instanceName: string, backend: string, model: string | null = null): string[] {
     // codex: the model the NEXT launch runs, for the levels and the gate alike (#1807 review r2).
     let runs = model;
     if (backend === "codex") {
@@ -17051,6 +17050,31 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     // itself applies) — an effort chosen here reaches the new CLI with the one relaunch, or is not offered.
     const takes = this.launchEffortGate(instanceName, backend, runs);
     return levels.filter(takes);
+  }
+
+  /**
+   * #1808: whether a backend takes this model name — the one rule for /backend and update_instance_config's switch.
+   * The name must be one its launch line can carry (modelNameCarried); then its offered list (the cached CLI env), and
+   * claude-code's known names (without this instance's configured model, which belongs to the backend being left).
+   * With no list known, the backend's usual name pattern decides.
+   */
+  backendModelVerdict(
+    instanceName: string, backend: string, model: string,
+    /** The provider the backend will run on (default: this instance's own, else the fleet's). */
+    opts: { provider: string | null } = { provider: this.customProviderFor(instanceName, backend) },
+  ): { ok: true } | { ok: false; choices: string[] } {
+    // A custom provider has its own catalog, which the CLI reads at launch and AgEnD cannot see before one (#1815
+    // review): only the launch-line rule applies — never the account's list or the default provider's naming pattern.
+    if (opts.provider) return modelNameCarried(backend, model) ? { ok: true } : { ok: false, choices: [] };
+    const listed = this.readCliEnv(backend)?.models ?? [];
+    const choices = listed.slice(0, 24).map(o => o.id);
+    if (!modelNameCarried(backend, model)) return { ok: false, choices };
+    if (listed.some(o => o.id === model)) return { ok: true };
+    if (backend === "claude-code") {
+      const check = this.claudeModelKnown(instanceName, model, null);
+      return check.known ? { ok: true } : { ok: false, choices: check.names };
+    }
+    return listed.length === 0 && isModelCompatible(backend, model) ? { ok: true } : { ok: false, choices };
   }
 
   /**
