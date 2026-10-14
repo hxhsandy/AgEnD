@@ -287,6 +287,25 @@ describe.each(["legacy", "tui"] as const)("Kiro %s real-pane human completion", 
     expect(h.daemon.turnReplyGuard.snapshot()?.phase).toBe("awaiting");
   });
 
+  it("#1839: a dialog while the turn runs still lets the guard fire once the dialog lifts", async () => {
+    // If kiro shows a dialog (e.g. Classic nudge) while processing a message, the
+    // old code returned early without calling noteTurnActivity() → busyObserved stayed
+    // false → the guard never fired. Now noteTurnActivity() is called even when blocked.
+    const h = harness(ui);
+    await h.inbound();
+    // Dialog shows during the turn — must NOT fire the guard yet, but MUST record work.
+    h.daemon.inputBlockedDialogKey = "approval";
+    h.daemon.applyInstanceStateSnapshot({ state: "idle", observedAt: Date.now(), unchangedForMs: 0, stateChangedAt: Date.now() }, idlePane());
+    expect(h.daemon.turnReplyGuard.snapshot()?.busyObserved).toBe(true); // fixed by #1839
+    expect(h.detected).not.toHaveBeenCalled();
+    // Dialog lifts — now the idle edge should fire the guard.
+    h.daemon.inputBlockedDialogKey = null;
+    await h.capture(idlePane());
+    await h.confirmIdle();
+    expect(h.detected).toHaveBeenCalledOnce();
+    expect(recoveryWrites(h)).toHaveLength(1);
+  });
+
   it("bounds recovery to one prompt and cooldowns repeated unrecovered warnings", async () => {
     const h = harness(ui);
     for (let turn = 0; turn < 3; turn++) {

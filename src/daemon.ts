@@ -5013,6 +5013,10 @@ export class Daemon extends EventEmitter {
       // measured through a dialog would recover on pre-dialog idle time, so
       // the block dissolves it; the silence after the dialog clears starts a
       // fresh interval below.
+      // #1839: a dialog is still evidence that the turn started — record
+      // activity so the guard's busyObserved gate is satisfied when the
+      // dialog lifts and the turn ends without a reply.
+      this.turnReplyGuard.noteTurnActivity();
       this.sawBlockedInput = true;
       this.clearReplyGuardConfirm();
       return;
