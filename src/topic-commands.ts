@@ -3,7 +3,7 @@ import { LOGIN_BACKEND_ALIASES } from "./login-flows.js";
 import { measureSyncWork } from "./sync-work-attribution.js";
 import { LOOPBACK_HOST_NAMES } from "./web-host-guard.js";
 import { WEB_REMOTE_DOCS_URL } from "./upgrade-notices.js";
-import { readFileSync, existsSync } from "node:fs";
+import { closeSync, readFileSync, existsSync } from "node:fs";
 import { exec, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { join, basename } from "node:path";
@@ -34,7 +34,7 @@ import { instanceSupportsSteer } from "./steer-capability.js";
 import { SYSINFO_BACKEND_IDS, type BackendCliVersionSnapshot, type SysInfoBackendId } from "./backend/types.js";
 import { recordInternalRequest, withOrigin } from "./fleet-control-audit.js";
 import { resolveInstalledAgend } from "./update-dispatch.js";
-import { resolveUpdateLaunch, watchUpdateLaunch } from "./update-launch.js";
+import { resolveUpdateLaunch, openUpdateLog, updateLogPath, watchUpdateLaunch } from "./update-launch.js";
 import { selfCommand } from "./cli-entry.js";
 
 export { parseContextPercent, parseTokenContextRatio } from "./context-percent.js";
@@ -1691,10 +1691,14 @@ export class TopicCommands {
       this.ctx.failUpdateProgress?.(t("not_authorized"));
       return;
     }
+    const logPath = updateLogPath(this.ctx.dataDir);
+    const ts = new Date().toISOString();
+    const logFd = openUpdateLog(logPath, `--- /update ${ts} ---`);
     const child = spawn(launch.command, launch.args, {
-      detached: true, stdio: "ignore", env: withOrigin(origin),
+      detached: true, stdio: ["ignore", logFd ? logFd.fd : "ignore", logFd ? logFd.fd : "ignore"], env: withOrigin(origin),
     });
-    watchUpdateLaunch(child, message => this.ctx.failUpdateProgress?.(message));
+    if (logFd) closeSync(logFd.fd);
+    watchUpdateLaunch(child, message => this.ctx.failUpdateProgress?.(message), logFd ? logPath : undefined, logFd?.offset);
     child.unref();
   }
 
