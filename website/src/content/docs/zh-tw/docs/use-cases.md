@@ -61,7 +61,7 @@ AgEnD 把每個工作變成聊天室裡的一個頻道。在手機上就找得�
 
 內建的保護機制：
 
-- 卡住超過 15 分鐘會推出 hang 提示按鈕
+- 卡住超過 10 分鐘會推出 hang 提示按鈕
 - `/cancel` 可以中斷正在執行的動作
 - 程序掛掉會自動重啟（指數退避，最多 10 次）
 
@@ -138,7 +138,7 @@ AgEnD 把每個工作變成聊天室裡的一個頻道。在手機上就找得�
 **一個 Telegram 群組就是你的助理辦公室：每個專案一個 topic，在手機上回一句話就能派工。**
 
 - **一個 bot 管一個 forum 群組**：每個專案對應一個 topic。
-- **topic 的 icon 就是狀態燈**：🔵 處理中、🟢 已回覆、🔴 卡住（超過 15 分鐘沒有進展，同時會推出處置按鈕）。
+- **topic 的 icon 就是狀態燈**：🔵 處理中、🟢 已回覆、🔴 卡住（超過 10 分鐘沒有進展，同時會推出處置按鈕）。
 - **自動封存**：閒置超過 24 小時的 topic 會自動封存，群組不會被塞爆；有新訊息時會自動重新開啟。
 - **inline 核准按鈕**：需要你核准的操作會出現 Allow／Always／Deny 按鈕。
 - **附件**：照片、文件、影片都能直接傳。
@@ -158,7 +158,7 @@ Discord 和 Telegram 可以接到同一個 fleet（用 `agend quickstart` 設定
 ## 日常使用技巧
 
 - **開一個專門做事的 instance**：對 General 說「幫我開一個 instance，專門準備下週的分享簡報，這次用 Codex」。建好之後，到那個頻道繼續工作就好。
-- **它還在跑嗎？先開 `/dashboard`**：會回傳管理頁的連結。
+- **它還在跑嗎？先開 `/web`**：會回傳管理頁的連結。
   - View：看各 instance 的狀態、最近的輸出，以及 AI 訂閱還剩多少用量。
   - Settings：調整 instance 設定，例如閒置多久自動暫停。
   - 這是管理員指令，預設的 localhost 網址只能在主機上打開。Telegram 請在 General 使用。
@@ -173,15 +173,15 @@ Discord 和 Telegram 可以接到同一個 fleet（用 `agend quickstart` 設定
 |---|---|
 | 讓助理加入頻道／群組 | `/start [backend]`（Telegram 群組用 `/start@bot`） |
 | 移除 | `/stop` |
-| 工作進行中補充方向 | `/steer <內容>`（支援 Claude Code、Codex、Grok、Muse） |
+| 工作進行中補充方向 | `/steer <內容>`（claude-code、codex、grok、muse、kiro TUI） |
 | 插一句話但不打斷它 | `/btw <內容>`（僅 Claude Code） |
 | 中斷目前的動作 | `/cancel` 或取消按鈕 |
 | 查看／壓縮／清空上下文 | `/ctx`、`/compact`、`/clear` |
 | 切換模型或推理強度 | `/model`、`/effort` |
 | 手動暫停／喚醒 | `/pause`、`/wake`（暫停中的 instance 收到訊息也會自動喚醒） |
-| 看狀態、用量、設定 | `/dashboard`（管理員）、`/usage`、`/sysinfo` |
+| 看狀態、用量、設定 | `/web`（管理員）、`/usage`、`/sysinfo` |
 
-斜線指令由 AgEnD 程式先處理，不是丟給模型猜。例如 `/dashboard` 是程式直接回連結；`/chat`、`/steer` 則會把內容送進助理。Telegram 在群組中請用 `/指令@bot名`。
+斜線指令由 AgEnD 程式先處理，不是丟給模型猜。例如 `/web` 是程式直接回連結；`/chat`、`/steer` 則會把內容送進助理。Telegram 在群組中請用 `/指令@bot名`。
 
 ---
 
