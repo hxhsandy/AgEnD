@@ -1136,6 +1136,15 @@ export class TopicCommands {
 
   /** Send the backend-appropriate compact command to an instance's tmux pane */
   async sendCompact(instanceName: string, instructions?: string): Promise<string> {
+    return this.compactInstance(instanceName, instructions).text;
+  }
+
+  /**
+   * sendCompact, saying whether the command was handed to the daemon (the web chat follows a sent one to its end,
+   * board 003648ac). `notify` runs only when it is about to be handed over; its id rides along so the daemon says when
+   * the command reached the pane (`raw_paste_written`). A write the IPC refuses is not sent.
+   */
+  compactInstance(instanceName: string, instructions?: string, notify?: () => string | null): { sent: boolean; text: string } {
     const ipc = this.ctx.instanceIpcClients.get(instanceName);
     if (ipc?.connected) {
       const classicBackend = this.ctx.classicChannels?.getChannelIdByInstance(instanceName)
@@ -1148,22 +1157,24 @@ export class TopicCommands {
       const custom = normalizeCompactInstructions(instructions);
       if (custom.length > COMPACT_INSTRUCTIONS_MAX) {
         // Refuse rather than cut: a truncated instruction is a different instruction.
-        return t("compact.instructions_too_long", String(COMPACT_INSTRUCTIONS_MAX));
+        return { sent: false, text: t("compact.instructions_too_long", String(COMPACT_INSTRUCTIONS_MAX)) };
       }
+      const id = notify?.() ?? null;
+      const paste = (content: string) => ipc.send({ type: "raw_paste", content, ...(id ? { notify_written: id } : {}) }) !== false;
       if (!custom) {
-        ipc.send({ type: "raw_paste", content: base });
-        return t("compact.sent", base);
+        if (!paste(base)) return { sent: false, text: t("compact.not_connected") };
+        return { sent: true, text: t("compact.sent", base) };
       }
       if (backendSupportsCompactInstructions(backend)) {
-        ipc.send({ type: "raw_paste", content: `${base} ${custom}` });
-        return t("compact.sent_with_instructions", base);
+        if (!paste(`${base} ${custom}`)) return { sent: false, text: t("compact.not_connected") };
+        return { sent: true, text: t("compact.sent_with_instructions", base) };
       }
       // Compact as asked, without the text, and say so — never send it (codex
       // would take it for a chat message) and never drop it unannounced.
-      ipc.send({ type: "raw_paste", content: base });
-      return `${t("compact.sent", base)}\n${t("compact.instructions_ignored", backend)}`;
+      if (!paste(base)) return { sent: false, text: t("compact.not_connected") };
+      return { sent: true, text: `${t("compact.sent", base)}\n${t("compact.instructions_ignored", backend)}` };
     }
-    return t("compact.not_connected");
+    return { sent: false, text: t("compact.not_connected") };
   }
 
   /** Whether the instance backend exposes a verified full-reset command. */
@@ -1252,20 +1263,25 @@ export class TopicCommands {
 
   /** Send the backend-appropriate full conversation reset through raw_paste. */
   async sendClear(instanceName: string): Promise<string> {
+    return this.clearInstance(instanceName).text;
+  }
+
+  /** sendClear, saying whether the command was handed to the daemon (board 003648ac: the web chat's card then leaves). */
+  clearInstance(instanceName: string): { sent: boolean; text: string } {
     const backend = this.effectiveBackend(instanceName);
     const cmd = clearCommandForBackend(backend);
-    if (!cmd) return t("clear.unsupported");
+    if (!cmd) return { sent: false, text: t("clear.unsupported") };
 
     const ipc = this.ctx.instanceIpcClients.get(instanceName);
     if (ipc?.connected) {
-      ipc.send({
+      const sent = ipc.send({
         type: "raw_paste",
         content: cmd,
         ...(backend === "kiro-cli" ? { confirm_clear: true } : {}),
-      });
-      return t("clear.sent", cmd);
+      }) !== false;
+      return sent ? { sent: true, text: t("clear.sent", cmd) } : { sent: false, text: t("clear.not_connected") };
     }
-    return t("clear.not_connected");
+    return { sent: false, text: t("clear.not_connected") };
   }
 
   /** Send a backend-appropriate session-save command to a fleet-topic instance. */

@@ -2,6 +2,7 @@ import type { PaneContextSource } from "./pane-context-cache.js";
 import { AGENT_WHATS_NEW, agendVersion, planWhatsNew, readWhatsNewRecord, recordWhatsNew, whatsNewNotice } from "./agent-whats-new.js";
 import { join, dirname, basename, resolve } from "node:path";
 import { mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, unlinkSync, rmSync, appendFileSync, statSync, chmodSync, renameSync } from "node:fs";
+import { launchIdentity } from "./compact-watch.js";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { ensureInstanceDir } from "./private-dir.js";
@@ -4036,19 +4037,42 @@ export class Daemon extends EventEmitter {
     confirmClear = false,
     durableAttempt?: DurableDeliveryAttempt,
     ownSwitch?: { id: string; kind: "model"; requested: string },
+    notifyWritten?: string,
   ): void {
     const reportSwitch = (result: OwnSwitchOutcome) => {
       if (!ownSwitch) return;
       this.ipcServer?.broadcast({ type: "runtime_switch_result", id: ownSwitch.id, ...result });
     };
+    // Board 003648ac: the fleet follows a web /compact from just before its paste is written: the transcript's end then
+    // (taken here, under this launch, before the write) and the launch it was written under ride with the notice — once.
+    // The checkpoint and the launch are taken together, right before the paste (each attempt takes them again); the
+    // notice carries those — never the launch at notice time, which a respawn in between would relabel.
+    let told = false;
+    let checkpoint: { path: string; ino: number; size: number } | null = null;
+    let owner: string | null = null;
+    const tellWritten = (written: boolean) => {
+      if (!notifyWritten || told) return;
+      told = true;
+      this.ipcServer?.broadcast({ type: "raw_paste_written", id: notifyWritten, outcome: written ? "written" : "not_written",
+        ...(written ? { owner, checkpoint } : {}) });
+    };
+    const takeCheckpoint = () => {
+      owner = launchIdentity(this.interactionOwner());
+      const path = this.logTranscriptPath();
+      checkpoint = null;
+      if (!path) return;
+      try { const st = statSync(path); checkpoint = { path, ino: st.ino, size: st.size }; } catch { checkpoint = null; }
+    };
     if (!this.tmux || !this.isDeliveryEpochCurrent(deliveryEpoch)) {
       if (durableAttempt) this.retryDurableDeliveryBeforeBegin(durableAttempt, "raw_paste target unavailable before pane queue");
       reportSwitch({ outcome: "not_sent" });
+      tellWritten(false);
       return;
     }
     this.pasteLock = this.pasteLock.then(async () => {
       if (!this.isDeliveryEpochCurrent(deliveryEpoch)) {
         reportSwitch({ outcome: "not_sent" });
+        tellWritten(false);
         this.logger.info("Pending raw delivery dropped by user cancel");
         if (durableAttempt) this.retryDurableDeliveryBeforeBegin(durableAttempt, "raw_paste epoch changed while queued");
         return;
@@ -4059,6 +4083,7 @@ export class Daemon extends EventEmitter {
         if (!this.isDeliveryEpochCurrent(deliveryEpoch)) {
           if (durableAttempt) this.retryDurableDeliveryBeforeBegin(durableAttempt, "raw_paste epoch changed while waking");
           reportSwitch({ outcome: "not_sent" });   // #1690: cancelled before anything was typed — said at once, nothing saved
+          tellWritten(false);
           return;
         }
         const delivered = await this.deliverMessage(rawText, undefined, {
@@ -4068,8 +4093,10 @@ export class Daemon extends EventEmitter {
           preserveExactBytes: true,
           // #1690: our own /model holds every other delivery from its write on — before the lock is released, so a steer
           // or /btw waiting on it cannot type into the gap before claude paints "Switch model?" (default cursor: Yes).
-          ...(ownSwitch ? { onPaneWritten: () => { this.ownSwitch = ownSwitch; } } : {}),
+          ...(ownSwitch || notifyWritten ? { onPaneWritten: () => { if (ownSwitch) this.ownSwitch = ownSwitch; tellWritten(true); } } : {}),
+          ...(notifyWritten ? { beforePaneWrite: takeCheckpoint } : {}),
         });
+        tellWritten(false);                                                // never written (once told, this says nothing)
         if (delivered) this.finishDurableSubmission(durableAttempt ?? null, verdict);
         else if (durableAttempt && verdict.paneWriteStarted) {
           const unproven = `${verdict.phase ?? "raw-paste"}:${verdict.proof ?? "unverified"}`;
@@ -4095,6 +4122,7 @@ export class Daemon extends EventEmitter {
         else if (durableAttempt) this.retryDurableDeliveryBeforeBegin(durableAttempt, (err as Error).message);
         this.logger.warn({ err: (err as Error).message }, "raw_paste delivery error");
         if (ownSwitch) { if (this.ownSwitch === ownSwitch) this.ownSwitch = null; reportSwitch({ outcome: "not_confirmed" }); }
+        tellWritten(false);
         return;
       }
       if (confirmClear) await this.confirmBackendClearDialog();
@@ -4128,12 +4156,14 @@ export class Daemon extends EventEmitter {
     const sw = msg.runtime_switch as { id?: unknown; kind?: unknown; requested?: unknown } | undefined;
     const ownSwitch = sw && typeof sw.id === "string" && sw.kind === "model" && typeof sw.requested === "string"
       ? { id: sw.id, kind: "model" as const, requested: sw.requested } : undefined;
+    const notifyWritten = typeof msg.notify_written === "string" && /^[0-9a-f]{16}$/.test(msg.notify_written) ? msg.notify_written : undefined;
     this.queueRawPaste(
       msg.content as string,
       this.captureDeliveryEpoch(msg.delivery_epoch),
       msg.confirm_clear === true,
       durableAttempt ? { ...durableAttempt, submissionMode: "raw_paste", silentSchedule: msg.silent_schedule === true } : undefined,
       ownSwitch,
+      notifyWritten,
     );
   }
 
@@ -6980,6 +7010,8 @@ export class Daemon extends EventEmitter {
       preserveExactBytes?: boolean;
       /** Called under the pane write lock the moment this delivery's write has begun (#1690: our switch's hold). */
       onPaneWritten?: () => void;
+      /** Board 003648ac: just before each paste of this message (after every wait and fence), synchronously. */
+      beforePaneWrite?: () => void;
     },
   ): Promise<boolean> {
     // The caller passes its own holder when it needs the answer; a system paste
@@ -7162,6 +7194,7 @@ export class Daemon extends EventEmitter {
           opts?.steer === true,
           writeCurrent,
           opts?.humanVerificationId,
+          opts?.beforePaneWrite,
         );
         // #1690: still under the lock — whatever waits on it next must already see what this write started.
         if (verdict.paneWriteStarted) opts?.onPaneWritten?.();
@@ -8570,6 +8603,8 @@ export class Daemon extends EventEmitter {
     // first side effect. Stale means unwritten: false, with no failure verdict.
     stillCurrent?: () => boolean,
     humanVerificationId?: string,
+    // Board 003648ac: called synchronously right before each paste — after the last await and fence of that attempt.
+    beforePaste?: () => void,
     // "handoff-box-unread": a hand-off's last capture had no readable box — nothing begun or written (#1169).
   ): Promise<boolean | KiroPendingDelivery | "handoff-box-unread"> {
     const signature = this.submissionSignature(formatted, humanVerificationId ?? submissionId, humanVerificationId !== undefined);
@@ -8698,6 +8733,7 @@ export class Daemon extends EventEmitter {
       // same pane; the write-ahead Enter marker later separates safe pre-Enter
       // recovery from a possibly executed command.
       const pasteGeneration = this.spawnGeneration;
+      beforePaste?.();
       const pasted = await this.tmux!.pasteBuffer(formatted);
       if (pasted) this.rememberPaste(formatted, pasteGeneration);
       if (!pasted) {
