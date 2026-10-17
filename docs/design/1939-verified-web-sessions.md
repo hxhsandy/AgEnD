@@ -1,21 +1,24 @@
 # #1939 Verified web sessions with step-up (option B)
 
-Status: design for review, no code. Target 2.3. The user chose option B on 2026-10-16. Nothing here is built until
-the user has read it.
+Status: design, no code. Target 2.3. The user chose option B on 2026-10-16. On 2026-10-17 they decided the open
+questions; §11 lists the decisions, and this text reflects them.
 
 ## 1. Summary
 
 A web chat message or button click from a qualifying session gets its own owned authority: `web-session`, bound to
 the Discord or Telegram account that signed the session in. Receivers may accept it for ordinary decisions.
 
-A fixed list of risky actions needs a **step-up**: a fresh confirmation by that same account, given at that moment
-and bound to the exact action, target and request text. There are two kinds:
+An action the user has put on the **enforced step-up list** needs a **step-up**: a fresh confirmation by that same
+account, given at that moment and bound to the exact action, target and request text. The default list is release,
+force-push and deleting an instance. For anything else that is irreversible, outward-facing, or touches accounts and
+credentials, agents judge by context and ask for a step-up when unsure (§5). There are two kinds:
 
 - a click on a Confirm card that AgEnD posts on Discord or Telegram (the stronger one, §6.3);
 - a one-time code that AgEnD DMs to the account and the person types into AgEnD's own Authorize page (§6.2).
 
-The step-up list lives in one source file that the receipts, the instructions and the coordinator gate all read. A
-server-side switch turns all web authority off at once, whatever instructions a running agent has (§10).
+One source file holds the list's schema and its defaults. The user's configured list, from Settings, is what the
+receipts, the instructions and the coordinator's rule use. A server-side switch turns all web authority off at once,
+whatever instructions a running agent has (§10).
 
 Nothing changes for platform messages. A web session that does not qualify keeps today's meaning: recognition
 only, no permission.
@@ -78,33 +81,47 @@ do), and again when a step-up is verified (§6). Nothing about locality is remem
    target instance (same `adapterId`, not just an equal user-id string), and that user must be in that adapter's
    `access.allowed_users`. This is rechecked with `adminGate(userId, adapterId)` on each request. Removing someone
    from `allowed_users` ends their web authority at once.
-4. **This request is from this machine.** This is new. A request is `loopback` only if all of these hold for that
-   request:
+4. **Where this request comes from.** This is new. Each request is classified on its own, never from sign-in. A
+   request is `loopback` only if all of these hold for that request:
    - it arrived on the health listener (`gatewayRequestContext(req)` is empty);
    - its TCP peer (`req.socket.remoteAddress`) is a loopback address;
    - its Host is in `LOOPBACK_HOST_NAMES`;
    - it carries **no** forwarding header (`Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Real-IP`,
      `CF-Connecting-IP`, `Via`).
 
-   Otherwise it is `lan`.
+   Otherwise it is `lan`: a LAN or tailnet browser, or a reverse proxy.
 
-   **The guarantee, stated exactly:** the request's TCP connection comes from this machine and names a loopback
-   host. It does **not** prove which person sits at it.
-   - **A stolen cookie** later presented from another machine fails the check on that request, so it carries no
-     authority.
-   - **A local reverse proxy** in front of the health port is not a supported configuration for authority. If one
-     adds a forwarding header, its requests are `lan`. One that strips those headers is indistinguishable from a
-     local browser, which is the same out-of-scope case as other local processes and users (A7 in the secure-login
-     design).
-   - **The opt-in.** `web.verified_authority.allow_lan: true` (behind Settings confirmation) lets `lan` requests
-     qualify. Its warning says AgEnD then cannot tell your browser from anything else that can reach the port.
+   **By default, both qualify** (the user's decision). The class is still recorded in the receipt
+   (`session.peer`) and in the audit log.
+   - **The switch.** Settings → Web sign-ins has a switch, "Only this computer can authorize"
+     (`web.verified_authority.loopback_only: true`). Turning it on makes only `loopback` requests qualify. Turning it
+     on takes effect at once. Turning it back off goes through Settings confirmation.
+   - **What `loopback` guarantees, stated exactly:** the request's TCP connection comes from this machine and names a
+     loopback host. It does **not** prove which person sits at it. A local reverse proxy that strips forwarding
+     headers is indistinguishable from a local browser, the same out-of-scope case as other local processes and
+     users (A7 in the secure-login design).
+   - **What `lan` means: only "not loopback".** The classifier does not check that a peer is on a private network or
+     a tailnet. `lan` is everything that reaches the health listener and is not loopback. That includes whatever a
+     port forward, a changed bind address, `web.allowed_hosts` or an ordinary reverse proxy exposes, and it can be the
+     internet.
+     - **What this design assumes.** The health listener is reachable only from networks the user trusts. The
+       supported way in from outside is the public link, a separate `gateway` surface that never qualifies (item 5).
+     - **What AgEnD enforces.** The only barrier AgEnD itself enforces against non-local requests is the "Only this
+       computer can authorize" switch.
+     - **The default.** A cookie stolen and replayed from any host that can reach the health listener carries
+       ordinary authority. On a trusted LAN or tailnet that is the risk the user accepted. If the listener is exposed
+       to the internet, the same holds for the internet (§8).
+     - **The warning.** Settings → Web sign-ins warns when `web.allowed_hosts` names a host that isn't loopback while
+       the switch is off.
 5. **Never the public link.** A `gateway` session can never qualify, whatever the configuration.
 6. **Freshness.**
-   - **Ordinary authority:** the session is at most 12 hours old (`web.verified_authority.max_session_hours`, range
-     1–48), and its activity *before this request* was within the last 2 hours.
-     - **Reading the right timestamp.** `WebSessionStore.authenticate` updates `lastSeen` before it returns, so the
-       check must read the previous value: authenticate with `touch: false` first, or capture `lastSeen` before the
-       touch. Otherwise the idle test always passes.
+   - **Ordinary authority:** the session is at most 48 hours old by default (`web.verified_authority.max_session_hours`,
+     range 1–48; the user's decision).
+     - **Idle limit.** The session's own idle limit still applies, through `web.session.local.idle_hours`. A session
+       the store has already expired is gone.
+     - **Pre-touch activity.** An implementation that adds a tighter idle check must read activity from *before*
+       this request: `WebSessionStore.authenticate` updates `lastSeen` before it returns, so authenticate with
+       `touch: false` first, or capture `lastSeen` before the touch.
      - **Older sessions** still work for reading and chatting; their messages simply carry no authority.
    - **Step-up:** the same session bound, plus a fresh code or click (§6).
 
@@ -134,8 +151,11 @@ interface HumanAuthority {
     verified_at: string;
     event_id: string | null;        // the platform interaction id for a click
   };
-  /** The server policy this authority was granted under (§10). delivery_status downgrades a stale or disabled one. */
-  policy_generation: number;
+  /**
+   * The revocation epoch this authority was granted under (§10). Only an explicit revocation bumps it; a change to the
+   * enforced list does not. delivery_status reports authority from an older epoch as none.
+   */
+  authority_epoch: number;
 }
 
 type StepUpTarget =
@@ -169,31 +189,92 @@ receipt, because header text can be faked by anything that reaches the pane.
 
 So nothing an agent accepted before changes meaning.
 
-## 5. The step-up list: one source
+## 5. The step-up list: a class, a configurable enforced list, one source
 
-`src/authority/step-up-actions.ts` exports a frozen, ordered list. Each entry has an id, an English and a zh-TW
-label, and the target kind it must name. Three consumers read it:
-- the receipt writer validates `step_up.binding.action` against it;
-- the instructions builder (`instructions.ts`) renders the list into the rule text, so it can never drift from the
-  code;
-- the `/authorize` page builds its menu from it.
+**The class.** A step-up is for actions that are irreversible, outward-facing, or touch accounts and credentials.
+The instructions and the docs name three examples (release, force-push, deleting an instance) and describe the class.
+They do not enumerate every action.
 
-A docs test pins the list against `docs/features.md`.
+**Agents judge by context.** For an action in the class that is not on the enforced list, an agent decides from
+context whether ordinary web authority is enough. When unsure, it asks the person for a step-up, or for confirmation
+on Discord or Telegram.
 
-| id | What | Target |
-|---|---|---|
-| `release` | publish a package, push a release tag, create a GitHub release | tag |
-| `merge` | merge into a protected branch (main, release/*, feature integration branches) | pr |
-| `force-push` | force-push or delete a remote branch | branch |
-| `history-rewrite` | rebase, reset or amend anything already pushed and shared | branch |
-| `delete-instance` | `delete_instance`, `replace_instance`, `teardown_deployment` | instance |
-| `real-account` | requests on a real vendor account or host login (probes, audits) | account |
-| `deploy` | deploy to a shared or production environment | text |
-| `close` | close or lock an issue or PR that someone else opened | pr or issue |
-| `credential` | switch an instance to another account or credential profile, `/login` for someone else | instance |
-| `fleet-control` | stop, restart or update the whole fleet | text |
+**The enforced list is the user's.** Settings → Web sign-ins → "Always require a step-up for" lets the user add or
+remove actions. AgEnD enforces whatever is on it, and only that.
+- **The default** is `release`, `force-push` and `delete-instance`.
+- **Adding** an action takes effect at once.
+- **Removing** one goes through Settings confirmation, because that loosens the rule.
+- **Custom actions.** The user can define actions the catalog doesn't name. Each has its own id and label, with target
+  kind `text`.
+
+**The configuration** (fleet.yaml, the only place the list and custom definitions live):
+
+```yaml
+web:
+  verified_authority:
+    enabled: false              # the server switch (§10)
+    loopback_only: false        # "Only this computer can authorize" (§3.4)
+    max_session_hours: 48       # 1–48 (§3.6)
+    step_up:
+      enforce: [release, force-push, delete-instance]   # catalog ids and/or custom ids
+      custom:                                            # user-defined actions, merged with the catalog
+        - { id: drop-database, label: "Drop a production database", label_zh: "刪除正式資料庫" }
+```
+
+- **How the two lists combine.** `step-up-policy.ts` merges the catalog and `custom` into one action table. A custom
+  id must match `^[a-z][a-z0-9-]{2,31}$` and must not shadow a catalog id; the config validator refuses one that does.
+  `enforce` may name only ids in the merged table. A custom action's target kind is always `text`.
+- **A binding is self-describing.** It records the action's id **and** its label as shown when it was issued
+  (`binding.action_label`). If a custom definition is later deleted or relabelled, receipts already written still
+  read correctly. An id that is no longer in the table is simply not enforced. A step-up for it remains valid
+  evidence until its `act_by`.
+
+**One source.** `src/authority/step-up-policy.ts` holds:
+- **The catalog.** The schema and the actions people can pick from. Each entry has an id, English and zh-TW labels,
+  and the target kind it names.
+- **The default list.**
+- **One reader,** `enforcedStepUps(config)`, which every consumer goes through:
+  - the receipt writer, which validates `step_up.binding.action` against catalog ids or the configured custom ids;
+  - the instructions builder, which renders the three examples, the class, and the *current* enforced list from
+    config;
+  - the `/authorize` page, which builds its menu from the catalog plus the configured custom actions;
+  - `delivery_status`, which returns the list in force as `step_up_policy: { version, enforced: [ids] }` with every
+    human receipt. `version` is informational: it changes when the list changes, and it is **not** the revocation
+    epoch. Agents never have to guess the list.
+- **A docs test** pins the three examples and the defaults against `docs/features.md`.
+
+| id (catalog) | What | Target | Enforced by default |
+|---|---|---|---|
+| `release` | publish a package, push a release tag, create a GitHub release | tag | yes |
+| `force-push` | force-push or delete a remote branch | branch | yes |
+| `delete-instance` | `delete_instance`, `replace_instance`, `teardown_deployment` | instance | yes |
+| `merge` | merge into a protected branch (main, release/*, feature integration branches) | pr | — |
+| `history-rewrite` | rebase, reset or amend anything already pushed and shared | branch | — |
+| `real-account` | requests on a real vendor account or host login (probes, audits) | account | — |
+| `deploy` | deploy to a shared or production environment | text | — |
+| `close` | close or lock an issue or PR that someone else opened | pr or issue | — |
+| `credential` | switch an instance to another account or credential profile, `/login` for someone else | instance | — |
+| `fleet-control` | stop, restart or update the whole fleet | text | — |
 
 There is no separate `grant` action. Who may *perform* the action is part of every step-up (`executors`, §6.1).
+
+**Changing the list never revokes anything.** It changes only which actions need a step-up. The receiver applies the
+list `delivery_status` returns *now* to the receipt it is about to act on. Revocation is separate (`authority_epoch`,
+§10). Examples, with a release step-up issued at 10:00 that can be acted on until 10:15:
+- **At 10:01, force-push is removed.** The release step-up still passes, because release is still enforced and the
+  step-up matches. An ordinary web-session message from 09:55 asking for a force-push now needs only ordinary
+  authority, plus the agent's judgement.
+- **At 10:01, merge is added.** That same 09:55 ordinary message, if it asked for a merge, no longer suffices: merge
+  is enforced now, and the message has no step-up for it. Unrelated receipts and existing step-ups are unaffected.
+- **Release is removed.** The 10:00 release step-up is still valid evidence. Release just doesn't require one any
+  more.
+
+**The coordinator.** The coordinator's human-consent rule uses the same configured list.
+- **`merge` is off by default.** A human go-ahead to merge is then judged by context, while `gate-merge.sh` still
+  enforces the mechanical reviewer gate.
+- **If the user enforces `merge`,** the coordinator's instructions require platform authority or a matching web
+  step-up for it.
+- **A mechanical check is a follow-up.** Making `gate-merge.sh` itself read the list is a separate decision.
 
 **Not on the list,** because each already has its own gate:
 - Settings writes (Settings confirmation);
@@ -203,7 +284,8 @@ There is no separate `grant` action. Who may *perform* the action is part of eve
 
 A step-up never replaces those gates. It is about authority that an agent acts on.
 
-**The rule receivers apply.** For an action on the list, accept a human authorization only if one of these holds.
+**The rule receivers apply.** For an action on the **enforced list in force now** (`step_up_policy.enforced`), accept a
+human authorization only if one of these holds.
 
 **Platform authority.** `authority.kind` is `platform`, and the content names the action and target (today's rule).
 
@@ -220,6 +302,9 @@ A step-up never replaces those gates. It is about authority that an agent acts o
 
 For anything else, accept `platform` or `web-session`, never `none`.
 
+**In the class but not enforced.** For an action in the class that the list doesn't enforce, `web-session` may be
+enough. The agent judges by context and asks for a step-up when unsure.
+
 The receiver applies the rule to the receipt **as `delivery_status` returns it now**. A downgrade by the server switch
 (§10) therefore takes effect on the next check.
 
@@ -231,7 +316,8 @@ The receiver applies the rule to the receipt **as `delivery_status` returns it n
 interface StepUpBinding {
   v: 1;
   challenge_id: string;          // 32 hex, the code's or the card's id
-  action: StepUpAction;
+  action: string;                // an id in the merged action table (§5)
+  action_label: string;          // its label as shown at issuance, so the receipt reads correctly later
   target: StepUpTarget;
   content_sha256: string;        // the exact original text of the web message being authorized
   audience: string;              // the instance the message is delivered to
@@ -291,8 +377,7 @@ that binding.
   preview origin can't read the cookie or call `/authorize/verify`, but what a person types into a page can leave it
   (`1306-inline-html-preview.md` §4.3 keeps navigation and proxy-log exfiltration as known limits).
 - **The platform click is stronger.** It is the person's own platform client, showing the action and target in the
-  platform's UI. It is the recommended default, and §11 asks whether the most dangerous actions should accept only
-  the click.
+  platform's UI. Both kinds ship (the user's decision); the Authorize page offers the click first.
 
 ### 6.3 Kind B: a platform click
 
@@ -310,6 +395,9 @@ Instead of a code, the dialog can post a Confirm/Reject card.
 to `binding_sha256`.
 
 ### 6.4 When an agent asks for one
+
+**Not in S2** (the user's decision). In S2 a step-up is always started by the person on `/authorize`; an agent that
+needs one says so in its reply. The card below is a later stage (S4), recorded here so its constraints are not lost.
 
 An agent cannot open the Authorize page and cannot write a step-up. It may only *suggest* one, with a new MCP tool:
 
@@ -398,13 +486,14 @@ No code, cookie, CSRF value or message text is logged; the receipt keeps the tex
 
 | Threat | Today | With this design |
 |---|---|---|
-| A stolen or unlocked browser on this machine | It can chat; it authorizes nothing | It can give ordinary authority for up to 12 h. It can step up only with the account's click, or a DM code the person reveals (codes are phishable, §6.2). Revocation: `/web revoke`, the device list, `agend web-token rotate`, or the server switch (§10) |
-| A stolen cookie used from another machine | It can chat | No authority: locality is checked on every request (§3.4) |
+| A stolen or unlocked browser on this machine | It can chat; it authorizes nothing | It can give ordinary authority for up to 48 h (the default age). It can step up only with the account's click, or a DM code the person reveals (codes are phishable, §6.2). Revocation: `/web revoke`, the device list, `agend web-token rotate`, or the server switch (§10) |
+| A stolen cookie used from another machine on the same network (LAN, tailnet) | It can chat | **Accepted risk by default** (the user's decision, 2026-10-17): it can give ordinary authority, and step-ups only with the account's click or a revealed code. Turning on "Only this computer can authorize" (§3.4) stops it for new messages, and makes existing `lan` receipts and step-ups read as `none` (§10). The receipt and the audit log record `peer: lan` |
+| A stolen cookie used from outside the network | It can chat | **A deployment assumption, not an AgEnD barrier.** If the health listener is reachable only through the public link, outside requests arrive on the `gateway` surface, which never qualifies (§3.5). If the listener itself is exposed (a port forward, a changed bind, an ordinary reverse proxy), the classifier sees only "not loopback", calls it `lan`, and by default it qualifies. Turn on "Only this computer can authorize", or don't expose the health listener |
 | Public link | Recognition only | Never authority (§3.5) |
-| LAN or tailnet peer, or a reverse proxy that adds forwarding headers | Same as local | No authority unless `allow_lan` is set behind Settings confirmation |
+| A reverse proxy in front of the health listener (forwarding headers or not) | Same as local | Classified `lan`, with or without forwarding headers (a header-stripping local proxy reads as loopback; see the next row). It qualifies by default, which is right only if everyone who can reach that proxy is trusted (the previous row). Under "Only this computer can authorize" it doesn't qualify, except for the case in the next row (a local proxy that strips forwarding headers), which can't be told apart from a local browser and is out of scope |
 | A local reverse proxy that strips forwarding headers | Same as local | Not supported for authority. Indistinguishable from a local browser, so out of scope like other local processes (§3.4) |
 | An agent asks the person to "just click" | Same on any platform | A reply button can never step up. A step-up needs the `/authorize` page plus the person's own click or DM code, and shows the exact action, target and executors |
-| A phishing page in an agent's HTML preview asks for the code | — | The page can't use the code itself (no cookie, no `/authorize/verify`), but the code can leave it, and whoever holds the session can redeem it. The DM says where to enter it. The platform click is the recommended default, and §11 asks whether to require it for the most dangerous actions |
+| A phishing page in an agent's HTML preview asks for the code | — | The page can't use the code itself (no cookie, no `/authorize/verify`), but the code can leave it, and whoever holds the session can redeem it. The DM says where to enter it. Both kinds ship; the Authorize page offers the click first |
 | Script in the dashboard origin | CSP and the preview origin keep agent HTML out | Unchanged, and now load-bearing. The §9 invariants become release blockers |
 | Owner CSS, or imported CSS, restyles or fakes authorization UI | — | Authorization happens only on `/authorize`, a separate document with no owner CSS, mods or effects (§6.5). In-app indicators and app controls can be disguised by CSS (e.g. as a fake code prompt, which is the phishing in §6.2). Only `/authorize`, confirmed in the address bar, and the platform's Confirm card are trusted |
 | Replaying a step-up on another message, target or executor | — | The receiver recomputes `binding_sha256` and checks content, target, executors and expiry (§5). The challenge is single use |
@@ -434,53 +523,76 @@ These must hold, and a change to any of them needs a security review and a fresh
 ## 10. Migration and staging
 
 - **The switch, first.** `web.verified_authority.enabled` is a server setting, off by default, and turning it on
-  goes through Settings confirmation. Each authority is stamped with the current `policy_generation`.
-  - **Turning it off,** or bumping the generation (e.g. `/web revoke` bumps it), immediately makes `delivery_status`
-    return every web-session receipt, step-ups included, as `kind: "none"` with `downgraded: "policy"`. New web
-    receipts are written as `none`.
+  goes through Settings confirmation. Each authority is stamped with the current `authority_epoch`.
+- **What revokes, and only what revokes.** `delivery_status` evaluates every web-session receipt against the
+  revocation state *now*:
+  - **Turning the switch off.** The change from `enabled: true` to `false` atomically bumps `authority_epoch`, in
+    the same write. While the switch is off:
+    - every web-session receipt reads as `kind: "none"`, whatever its epoch, step-ups included, with
+      `downgraded: "disabled"`;
+    - new web receipts are written as `none`.
+  - **Bumping `authority_epoch` without turning off.** `/web revoke` does this, and so does a Settings "Revoke web
+    authority". From then on, every web-session receipt from an older epoch, step-ups included, reads as `none` with
+    `downgraded: "revoked"`.
+  - **Turning it back on.** It goes through Settings confirmation. Only authority granted *after* that, under the
+    current (already bumped) epoch, counts. A receipt from before the switch was turned off can never come back,
+    whether it was ordinary or a step-up still before its `act_by`: its epoch is older than the current one, so it
+    stays `none`.
+  - **Turning "Only this computer can authorize" on.** From then on, every web-session receipt whose
+    `session.peer` is `lan` reads as `none` with `downgraded: "loopback_only"`, step-ups included. `loopback`
+    receipts are unaffected. Turning it off again doesn't restore them: re-enabling requires Settings confirmation,
+    and the epoch is bumped along with it.
+  - **Not revocation.** Changing the enforced step-up list or its `version` (§5), lowering `max_session_hours`, or
+    editing custom actions. These affect only what is required or allowed from then on, as §5 describes.
   - **Why this is fail-closed.** It doesn't depend on which instruction text an agent is running: agents act on the
     receipt they read now (§5).
 - **S1: observe only.** Admission evaluates §3 per request, computes `authority`, and writes it into receipts, and
   `delivery_status` returns it. Instruction text is unchanged, so agents keep refusing web. Ship this first and watch the `web_authority`
   events for a beta cycle.
-- **S2: step-up.** Add `step-up-actions.ts`, the `/authorize` page, the server switch, DM codes, platform clicks, `request_step_up` and
+- **S2: step-up, person-initiated only.** Add `step-up-policy.ts` and the Settings list, the `/authorize` page, the server switch, DM codes, platform clicks and
   the audit events. Instructions are still unchanged.
 - **S3: instructions.** Only S3 changes what agents accept. Every place in §2 that says web carries no permission is
   rewritten from one generated paragraph:
   - **`VERIFY_PEER_MESSAGE_RULE`.** It keeps the platform rule and adds: "A web receipt counts only with
-    `authority.kind: web-session`. For an action in the step-up list (rendered from `step-up-actions.ts`), require
+    `authority.kind: web-session`. For an action on the enforced list (`step_up_policy.enforced`, rendered from config), require
     `authority.kind: platform`, or `web-session` with a `step_up` that passes every check in §5: the recomputed
     `binding_sha256`, the content, the actor and session, the action and target, you among the executors, and not
-    expired. `none` never counts."
+    expired. `none` never counts. Other actions that are irreversible, outward-facing, or touch accounts and
+    credentials (for example a release, a force-push, deleting an instance) need judgement: if you are unsure that
+    ordinary web authority is enough, ask for a step-up or for confirmation on Discord or Telegram."
   - **The MCP Message Format line.** "`via web (verified)` is a hint; read the receipt's `authority` before acting.
     Plain `via web` grants nothing."
   - **The rest.** `agent-whats-new.ts` gets a new entry. `agent-cli-instructions.md` and the two skills
     (`cross-instance-messaging`, `worker-collaboration`) get the same paragraph.
-  - **The coordinator's instructions.** "A human go-ahead for a step-up action needs platform authority or a
-    matching web step-up. A reviewer instance's APPROVE is not human consent."
+  - **The coordinator's instructions.** "A human go-ahead for an action on the enforced list in force needs
+    platform authority or a matching web step-up. A reviewer instance's APPROVE is not human consent."
   - **Live instances.** They see the new text on their next session, through the existing "Instructions changed"
     path. A running agent may keep the old or the new text until then.
+- **S4 (later): the agent card.** `request_step_up` and its host-rendered card (§6.4), once S2 and S3 have run in a
+  beta.
 - **Rollback.**
-  - **Immediate stop:** turn the switch off (or bump the generation). Every web-session authority, including
+  - **Immediate stop:** turn the switch off (or bump `authority_epoch`). Every web-session authority, including
     already-verified step-ups, reads as `none` from the next `delivery_status`, so even an agent still running S3
     text gets nothing to act on.
   - **Code and instructions:** after that, revert S3 (and S2/S1 if wanted). Live instances pick up the reverted text
     on their next session; a restart of the fleet's instances makes that immediate.
   - **What is not promised:** a file revert alone does not revoke anything immediately. The switch is what does.
 
-## 11. Decisions for the user
+## 11. Decisions (the user, 2026-10-17)
 
-1. **Field name.** Use `authority.kind: "web-session"` (recommended, §4), or a new `proof_kind` value as the issue
-   sketched.
-2. **Ordinary authority age.** Recommended: 12 h, configurable from 1 to 48 h.
-3. **LAN and tailnet.** Recommended: off by default, behind `allow_lan`.
-4. **Step-up kinds.** Ship both, with the platform click as the default (recommended). Also: should release,
-   force-push, history rewrite, delete-instance, real-account, credential and fleet-control accept **only** the click,
-   since DM codes are phishable (§6.2)?
-5. **The list in §5.** Add or remove entries.
-6. **The agent card.** Whether `request_step_up` ships in S2 or later.
-7. **Executors.** Whether the Authorize page offers "and the coordinator" as a one-click executor, or only explicit
-   instance names.
+1. **Field.** A new `authority` field (§4), not a new `proof_kind`.
+2. **Ordinary authority age.** 48 h by default, configurable from 1 to 48 h (§3.6).
+3. **LAN and tailnet.** They qualify by default. Settings can restrict to this computer, and the risk is accepted
+   (§3.4, §8).
+4. **Step-up kinds.** Both the platform click and the DM code (§6.2, §6.3).
+5. **The list.** The docs and instructions describe the class with three examples, and agents judge by context. The
+   enforced list is the user's, configurable in Settings, defaulting to release, force-push and delete-instance.
+   One source file holds the schema and the defaults, and the receipts and the coordinator use the configured list
+   (§5).
+6. **The agent card.** Later (S4), not S2. S2 is only the person-initiated Authorize flow (§6.4).
+
+Still open, for the implementation PR: whether the Authorize page offers "and the coordinator" as a one-click
+executor, or only explicit instance names.
 
 ## 12. Not in scope
 
