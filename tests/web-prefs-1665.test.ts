@@ -63,12 +63,17 @@ function setup(opts: { tier?: "admin" | "read"; publicLink?: boolean } = {}) {
 describe("the registry: each key validated on its own, unknown keys refused", () => {
   const VALID: Record<string, unknown> = {
     theme: "dark", lang: "zh-TW",
+    ...Object.fromEntries(["fx.sidebar", "fx.header", "fx.page", "fx.box", "fx.cursor"].map(k => [k, "a".repeat(32)])),
     "nav.order": [{ item_type: "group", item_name: "Ops", sort_index: 0, group_name: null }, { item_type: "instance", item_name: "alpha", sort_index: 0, group_name: "Ops" }],
     "nav.collapsed": ["Ops"], "nav.filter": { q: "rev", status: ["working"], cli: ["claude-code"] },
-    "nav.favorites": ["alpha"], "preview.optIn": true, "names.primary": "instance",
+    "nav.favorites": ["alpha"], "preview.optIn": true, "names.primary": "instance", "fx.show": false,
+    "card.size": "l", "card.sizeByInstance": { alpha: "s", __proto__x: "m" },
+    "color.show": ["name", "ring"], "color.off": true,
+    "widget.sidebar": { spec: { v: 1, title: "Fleet", items: [{ type: "stat", label: "Idle", bind: "fleet.idle" }] }, data: {} },
   };
   const INVALID: Record<string, unknown[]> = {
     theme: ["blue", "", 1],
+    ...Object.fromEntries(["fx.sidebar", "fx.header", "fx.page", "fx.box", "fx.cursor"].map(k => [k, ["", "bad", true, {}, "a".repeat(31)]])),
     lang: ["fr", "zh", true],
     "nav.order": ["x", [{ item_type: "group", item_name: "Ops", sort_index: 0 }], [{ item_type: "instance", item_name: "a", sort_index: -1, group_name: "G" }],
       [{ item_type: "group", item_name: "Ops", sort_index: 0, group_name: "G" }], [{ item_type: "panel", item_name: "a", sort_index: 0, group_name: null }],
@@ -78,6 +83,12 @@ describe("the registry: each key validated on its own, unknown keys refused", ()
     "nav.favorites": [["alpha", "alpha"], "alpha", [""]],
     "preview.optIn": ["true", 1],
     "names.primary": ["display", "", true, ["instance"]],
+    "fx.show": ["off", 0, "false"],
+    "card.size": ["xl", "M", 1],
+    "color.show": ["ring", ["ring", "ring"], ["glow"], [1], ["name", "bar", "ring", "name"]],
+    "color.off": [false, "true", 1],
+    "card.sizeByInstance": [[], { a: "xl" }, { "": "s" }, Object.fromEntries(Array.from({ length: 201 }, (_, i) => [`n${i}`, "s"]))],
+    "widget.sidebar": ["x", { spec: { v: 1, title: "x", items: [{ type: "stat", label: "Cost", bind: "cost_usd" }] }, data: {} }, { spec: { v: 1, title: "x", items: [] }, data: {} }],
   };
   it("covers every key the store knows", () => {
     expect([Object.keys(VALID).sort(), Object.keys(INVALID).sort()]).toEqual([[...WEB_PREF_KEYS].sort(), [...WEB_PREF_KEYS].sort()]);
@@ -178,10 +189,10 @@ describe("/ui/prefs", () => {
     const t = setup();
     const w = t.write({ set: { theme: "dark", "nav.collapsed": ["Ops"] } });
     await flush();
-    expect([w.status(), w.json()]).toEqual([200, { values: { theme: "dark", "nav.collapsed": ["Ops"] }, rev: 1, changed: ["theme", "nav.collapsed"] }]);
+    expect([w.status(), w.json()]).toEqual([200, { values: { theme: "dark", "nav.collapsed": ["Ops"] }, rev: 1, changed: ["theme", "nav.collapsed"], ownerScope: "operator", ownerEpoch: expect.stringMatching(/^[0-9a-f]{16}$/) }]);
     expect(t.emitSseEvent.mock.calls).toEqual([["status", { instances: [], prefs_rev: 1 }]]);
     const r = t.read();
-    expect([r.status(), r.json()]).toEqual([200, { values: { theme: "dark", "nav.collapsed": ["Ops"] }, rev: 1 }]);
+    expect([r.status(), r.json()]).toEqual([200, { values: { theme: "dark", "nav.collapsed": ["Ops"] }, rev: 1, ownerScope: "operator", ownerEpoch: expect.stringMatching(/^[0-9a-f]{16}$/) }]);
   });
   it("a session revoked, or the token rotated, while the body was on its way: nothing written, nothing announced (#1669 r1)", async () => {
     const outcomes: unknown[] = [];
@@ -222,7 +233,7 @@ describe("/ui/prefs", () => {
     const t = setup({ publicLink: true });
     t.prefs.write(OPERATOR, new Map([["theme", "dark"]]));
     const r = t.read();
-    expect([r.status(), r.json()]).toEqual([200, { values: { theme: "dark" }, rev: 1 }]);
+    expect([r.status(), r.json()]).toEqual([200, { values: { theme: "dark" }, rev: 1, ownerScope: "none", ownerEpoch: null }]);
     expect([isPublicWebRoute("GET", "/ui/prefs"), isPublicWebRoute("POST", "/ui/prefs")]).toEqual([true, false]);
   });
   it("a read-only session cannot write", async () => {
@@ -246,7 +257,7 @@ describe("/ui/prefs", () => {
     t.prefs.write(OPERATOR, new Map([["theme", "light"]]));
     const w = t.write({ set: { theme: "dark", lang: "zh-TW" }, onlyIfUnset: true });
     await flush();
-    expect(w.json()).toEqual({ values: { theme: "light", lang: "zh-TW" }, rev: 2, changed: ["lang"] });
+    expect(w.json()).toEqual({ values: { theme: "light", lang: "zh-TW" }, rev: 2, changed: ["lang"], ownerScope: "operator", ownerEpoch: expect.stringMatching(/^[0-9a-f]{16}$/) });
   });
   it("a write without the session's CSRF header is refused by the gate", async () => {
     const t = setup();
@@ -274,7 +285,7 @@ describe("the page carries the host's values (no flash on load)", () => {
     expect(tag.startsWith('<html lang="zh-Hant" data-prefs="')).toBe(true);
     expect(tag).not.toMatch(/<script|"><|data-prefs="[^"]*"[^>]*"/);
     const raw = /data-prefs="([^"]*)"/.exec(tag)![1]!.replace(/&#(\d+);/g, (_m, n) => String.fromCharCode(Number(n)));
-    expect(JSON.parse(raw)).toEqual({ rev: 1, values: { theme: "dark", lang: "zh-TW", "nav.filter": { q: `"><script>`, status: [], cli: [] } } });
+    expect(JSON.parse(raw)).toEqual({ ownerScope: "none", ownerEpoch: null, rev: 1, values: { theme: "dark", lang: "zh-TW", "nav.filter": { q: `"><script>`, status: [], cli: [] } } });
   });
   it("the anonymous View reader gets the browser's own: no data-prefs", () => {
     expect(/<html[^>]*>/.exec(shell("view-only", new Map([["theme", "dark"]])))![0]).toBe('<html lang="en">');

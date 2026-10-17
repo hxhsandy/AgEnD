@@ -209,6 +209,59 @@ export const SetPersonaEmojiArgs = z.object({
     .describe("Which of your status stamps to set (default: delivered, the one that stays on a handled message). progress_prefix is not a reaction: it is the emoji at the start of your progress message."),
 });
 
+// ── #1629: your own web theme (no target: always the caller's) ─────────────
+
+export const GetWebThemeArgs = z.object({});
+export const SetWebThemeArgs = z.object({
+  set: z.record(z.string(), z.unknown()).optional()
+    .describe("Theme fields to set, merged into your current theme: colors.light|dark.{bg,surface,text,text2,accent,userBubble,agentBubble} as #rrggbb, accent, bubble.{radius 0..24, border none|thin|accent}, font inter|system|mono, background {image: asset id, fit cover|contain, opacity 0.05..1}, avatar (asset id), workingLabel (1..24 characters), card.{portrait, banner} (asset ids uploaded for those slots), card.tagline (1..60 characters, one line), card.bio (1..280 characters, at most 3 line breaks)"),
+  clear: z.array(z.string().max(64)).max(32).optional().describe("Dotted paths to remove, e.g. [\"colors.dark.bg\", \"workingLabel\"]"),
+});
+export const SetWebThemeAssetArgs = z.object({
+  slot: z.enum(["background", "avatar", "portrait", "banner"]).describe("What the picture is for: your theme's background or avatar, or your identity card's portrait or banner"),
+  file: NonEmptyString.describe("A picture in your working directory: png, jpeg, webp or gif for background (≤ 512 KiB) and avatar (≤ 256 KiB), ≤ 4096 px a side; png, jpeg or webp for portrait and banner (limits set by the fleet — get_web_theme's limits.asset_slots says the ones in force)"),
+});
+export const ResetWebThemeArgs = z.object({});
+// #1629 r4 §1: how you appear on the dashboard — read-only, always yours.
+export const GetWebAppearanceArgs = z.object({});
+export const PreviewWebAppearanceArgs = z.object({
+  modes: z.array(z.enum(["light", "dark"])).min(1).max(2).optional().describe("Which modes to draw (default both)"),
+});
+// #1629 r4-4: your own widgets — declarative (a spec of host components and the values they show), always yours.
+export const SetWebWidgetArgs = z.object({
+  slot: z.enum(["chat_header", "details"]).describe("chat_header: a strip under your chat header (at most 4 of stat, progress, text, badge); details: a card on your Details page (at most 8 items, any type)"),
+  spec: z.record(z.string(), z.unknown()).optional()
+    .describe("Place or replace the widget: { v: 1, title (1..24 characters), items: [{ type: stat|progress|text|list|badge|spark, label?, key (a name in your data) or bind (state, context_pct, cost_usd), unit? (stat), max? (progress, default 100), tone?/tones? (badge: ok|warn|bad|info|muted) }] }. A change for the rate limit. See the web-appearance skill."),
+  data: z.record(z.string(), z.unknown()).optional()
+    .describe("Values by key: a number, a line of text, a list of lines (list) or numbers (spark). With spec: the widget's values. Alone: merged into the placed widget's values (null removes a key) — its own budget, 10 s apart."),
+});
+// #1629 r4-5b: mods — your own look as a file, and proposing one for a person to review. Agents never import.
+export const ExportWebModArgs = z.object({
+  name: NonEmptyString.describe("The mod's name: a-z, 0-9 and - (1..64)"),
+  version: NonEmptyString.describe("MAJOR.MINOR.PATCH, e.g. 1.0.0"),
+  title: z.string().optional().describe("A title for people (1..60 characters; default: the name)"),
+});
+export const ProposeWebModArgs = z.object({
+  file: NonEmptyString.describe("A .agendmod.json file in your working directory (at most 8 MiB, no custom CSS)"),
+});
+export const RemoveWebWidgetArgs = z.object({
+  slot: z.enum(["chat_header", "details"]).optional().describe("The slot to empty (default both). A widget a person placed stays."),
+});
+
+// #1629 CW1 effects: own caller only. Internal upload bytes are never public MCP args.
+export const UploadWebEffectArgs = z.object({
+  dir: z.string().min(1).max(4096).describe("A CW1 directory in your working directory: effect.json, worker.js, optional poster/cursor and at most sixteen raster assets. No HTML or CSS; normalized size <=1 MiB."),
+}).strict();
+export const ListWebEffectsArgs = z.object({}).strict();
+export const PreviewWebEffectArgs = z.object({ id: z.string().regex(/^[0-9a-f]{32}$/) }).strict();
+export const ProfileWebEffectArgs = PreviewWebEffectArgs;
+export const ApplyWebEffectArgs = z.object({
+  id: z.string().regex(/^[0-9a-f]{32}$/),
+  params: z.record(z.string().max(32), z.union([z.string().max(128), z.number().finite(), z.boolean()])).optional().describe("Typed overrides declared by the effect; unknown keys or out-of-range values refuse the whole apply."),
+}).strict();
+export const RemoveWebEffectArgs = z.object({ id: z.string().regex(/^[0-9a-f]{32}$/).optional() }).strict();
+export const DeleteWebEffectArgs = PreviewWebEffectArgs;
+
 export const SetDescriptionArgs = z.object({
   description: NonEmptyString.describe(
     "Your role description, e.g. 'Code reviewer focused on security and error handling'",

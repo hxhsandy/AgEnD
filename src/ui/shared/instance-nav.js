@@ -16,6 +16,8 @@ import { Skeleton } from "./ui-states.js";
 import { viewStore } from "./view-roster-store.js";
 import { onPrefsChanged, prefInForce, prefsWritable, savePref } from "./app-prefs.js";
 import "./view-strings.js";
+import { themesShown, themesStore } from "./app-themes.js";
+import { identityClasses, identityOf, paintIdentity, useIdentityColors } from "./identity-color.js";
 
 /** view.* text with named values. */
 function tn(key, values = {}) {
@@ -280,9 +282,16 @@ const CLI_MONOGRAM = { "claude-code": "C", codex: "X", "kiro-cli": "K", grok: "G
 // One path segment under /ui/img/<kind>/ — no further slash or backslash, and not a dot segment ("." / ".." or their
 // %2e spellings, which a browser resolves too): the picture can only ever be one of those routes (#1642 review).
 const sameOrigin = (src) => typeof src === "string"
-  && /^\/ui\/img\/(bot|avatar|emoji)\/(?!(?:\.|%2[eE]){1,2}(?:\?|$))[^/\\?#\s]+(\?v=[0-9A-Za-z%._-]*)?$/.test(src);
-/** The avatar to draw: the server's, if it is one the page may load; else the first character. */
+  && (/^\/ui\/img\/(bot|avatar|emoji)\/(?!(?:\.|%2[eE]){1,2}(?:\?|$))[^/\\?#\s]+(\?v=[0-9A-Za-z%._-]*)?$/.test(src)
+    // #1629: a theme's picture — one name segment, then its 32-hex content id.
+    || /^\/ui\/img\/theme\/(?!(?:\.|%2[eE]){1,2}\/)[^/\\?#\s]+\/[0-9a-f]{32}$/.test(src));
+/**
+ * The avatar to draw: the server's, if it is one the page may load; else the first character. #1629: the agent's theme
+ * picture first, while this viewer shows agents' themes (fx.show, not safe mode).
+ */
 export function avatarOf(it) {
+  const th = it && themesShown() ? it.theme_avatar : null;
+  if (th && th.kind === "image" && sameOrigin(th.src)) return { kind: "image", src: th.src };
   const a = it && it.avatar;
   if (a && a.kind === "image" && sameOrigin(a.src)) return { kind: "image", src: a.src };
   if (a && a.kind === "emoji" && sameOrigin(a.src)) return { kind: "emoji", src: a.src, alt: typeof a.alt === "string" ? a.alt : "" };
@@ -290,7 +299,6 @@ export function avatarOf(it) {
   // #1722: the initial is the leading name's ("Names"), not the server's (which is always the nickname's).
   return { kind: "initial", text: firstCharacter(namesOf(it).primary) || (a && a.kind === "initial" && typeof a.text === "string" ? a.text : "") };
 }
-const ACCENT = /^#[0-9a-f]{6}$/i;
 /** The status dot on the avatar: needs you, crashed, paused, stopped, looks stuck, working, idle — colour AND a label. */
 export function dotState(it, exec, awaiting) {
   if (awaiting != null) return "needs";
@@ -306,22 +314,19 @@ const DOT = {
 };
 export function dotLabel(state) { return (DOT[state] || DOT.stopped)[1](); }
 
-/** An instance's avatar with its status dot. The ring (its bot's colour) is a CSS custom property set through the CSSOM. */
+/**
+ * An instance's avatar with its status dot. #1958: its ring is the identity colour, painted by the row it sits in
+ * (identity-color.js: `.idc.id-ring`), for every face.
+ */
 export function InstanceAvatar({ it, state, cli = false }) {
+  useStore(themesStore);                                    // #1629: redraw when the viewer turns agents' themes on or off
   const a = avatarOf(it);
   const [broken, setBroken] = useState("");
-  const el = useRef(null);
-  const accent = typeof it.accent === "string" && ACCENT.test(it.accent) && a.kind === "image" ? it.accent : "";
-  useLayoutEffect(() => {
-    const node = el.current;
-    if (!node || !node.style) return;
-    if (accent) node.style.setProperty("--ring", accent); else node.style.removeProperty("--ring");
-  }, [accent]);
   const src = a.kind !== "initial" && a.src && broken !== a.src ? a.src : "";
   const text = a.kind === "emoji" && a.text ? a.text : a.kind === "initial" ? a.text : firstCharacter(namesOf(it).primary);
   const [cls] = DOT[state] || DOT.stopped;
   const label = dotLabel(state);
-  return html`<span ref=${el} class=${`av${accent ? " ring" : ""}${a.kind === "emoji" ? " av-emoji" : ""}`}>
+  return html`<span class=${`av${a.kind === "emoji" ? " av-emoji" : ""}`}>
     ${src ? html`<img src=${src} alt="" decoding="async" onError=${() => setBroken(src)} />` : html`<span class="av-text" aria-hidden="true">${text}</span>`}
     <span class=${`av-dot dot ${cls}`} role="img" aria-label=${label} title=${label}></span>${cli
       ? html`<span class="av-cli" aria-hidden="true" title=${backendLabel(it.backend)}>${CLI_MONOGRAM[it.backend] || "·"}</span>` : null}</span>`;
@@ -341,6 +346,7 @@ const statusText = (facet) => (facet === "needs" ? t("app.needsYou") : facet ===
 export function InstanceNav({ route, items, loaded = true, exec = {}, awaiting = {}, viewOnly = false, onPick }) {
   const nav = useStore(navStore);
   const names = useStore(namesStore);   // #1722: which name leads
+  useIdentityColors();                  // #1958: repaint when the host's colour settings or the themes switch change
   const filterRef = useRef(null);
   const list = useRef(null);
   const drag = useRef(null);
@@ -431,8 +437,10 @@ export function InstanceNav({ route, items, loaded = true, exec = {}, awaiting =
     const waiting = own(awaiting, name) ? awaiting[name] : null;
     const on = name === active;
     const fav = g === FAV_GROUP, starred = favSet.has(name);
+    // #1958: its identity colour — the ring, a left bar and/or the name, as resolved; painted through the CSSOM.
+    const id = identityOf(it);
     const full = !starred && favs.length >= MAX_FAVORITES;
-    return html`<li key=${name} class="v-li"><a class=${`inst v-inst${on ? " active" : ""}`} href=${rowPath(name)} title=${instanceTooltip(it)}
+    return html`<li key=${name} class="v-li"><a class=${`inst v-inst${on ? " active" : ""} ${identityClasses(id)}`} ref=${(el) => paintIdentity(el, id)} href=${rowPath(name)} title=${instanceTooltip(it)}
         aria-current=${on ? "page" : undefined} onClick=${onPick} ...${fav ? {} : dragProps({ type: "instance", name, group: g })}>
       <${InstanceAvatar} it=${it} state=${dotState(it, own(exec, name) ? exec[name] : null, waiting)} cli=${true} />
       <span class="inst-text"><span class="inst-name" title=${label}>${label}</span>
@@ -450,7 +458,7 @@ export function InstanceNav({ route, items, loaded = true, exec = {}, awaiting =
   };
   // The list scrolls; the filter under it stays in view (#999), so it sits outside the scrolling section.
   return html`<div class=${`view-roster inst-nav${editing && canStar ? " fav-editing" : ""}`}>
-    <div class="side-section" id="instanceList" ref=${list}>
+    <div data-trust="navigation" class="side-section" id="instanceList" ref=${list}>
     <div class="inst-head"><h2 class="side-label">${tn("instancesLabel")}</h2>
       ${canStar && items.length ? html`<button type="button" class="chip-btn fav-edit" aria-pressed=${editing ? "true" : "false"} onClick=${() => setEditing(!editing)}>
         ${editing ? tn("favDone") : html`<${Icon} name="star" size=${12} />${tn("favEdit")}`}</button>` : null}</div>

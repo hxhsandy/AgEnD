@@ -15,7 +15,7 @@ import { PanelHeader, onPanelKey, setTitle, statusClass, statusLabel, openDrawer
 import { detailsPath, textLinkSegments } from "/assets/app-route.js";
 import { InstanceSwitch } from "/assets/instance-switch.js";
 import { HeaderTools } from "/assets/header-tools.js";
-import { navigate } from "/assets/app-nav.js";
+import { navigate, navStore } from "/assets/app-nav.js";
 import { Menu } from "/assets/ui-menu.js";
 import { Dialog } from "/assets/ui-dialog.js";
 import { Empty, Skeleton } from "/assets/ui-states.js";
@@ -23,6 +23,26 @@ import { Icon } from "/assets/ui-icons.js";
 import { toast } from "/assets/ui-toast.js";
 import { confirmDialog } from "/assets/ui-confirm.js";
 import { savePref } from "/assets/app-prefs.js";
+import { applyTheme, resolvedMode, themeFor, themeImageUrl, themeMenuItems, themesStore } from "/assets/app-themes.js";
+import { colorMenuItem } from "/assets/identity-color.js";
+import { IdentityCard, useCard } from "/assets/identity-card.js";
+import { AgentWidget, instanceBinds, widgetFor } from "/assets/agent-widget.js";
+
+// #1629 r4 §1: the identity card folded into the chat's header — folded by default; open or not is this device's choice.
+const CHAT_CARD_KEY = "agend_chat_card";
+const chatCardOpen = () => { try { return localStorage.getItem(CHAT_CARD_KEY) === "open"; } catch { return false; } };
+function ChatCard({ name, card }) {
+  const [open, setOpen] = useState(chatCardOpen);
+  if (!card) return null;
+  const toggle = () => { const next = !open; setOpen(next); try { if (next) localStorage.setItem(CHAT_CARD_KEY, "open"); else localStorage.removeItem(CHAT_CARD_KEY); } catch { /* this page only */ } };
+  return html`<div data-trust="card" class=${`chat-card${open ? " open" : ""}`}>
+    <button type="button" class="chat-card-toggle" aria-expanded=${open ? "true" : "false"} onClick=${toggle}>
+      <${Icon} name="chevron" size=${14} cls=${open ? "caret" : "caret flipped"} /><span>${t(open ? "card.hide" : "card.show")}</span>
+      ${!open && card.tagline ? html`<span class="chat-card-peek">${card.tagline.text}</span>` : null}
+    </button>
+    ${open ? html`<${IdentityCard} name=${name} card=${card} compact=${true} />` : null}
+  </div>`;
+}
 import "./chat-strings.js";
 import { confirmedWrite } from "./settings-confirm.js";
 import { createChatStore } from "./chat-store.js";
@@ -34,6 +54,9 @@ import { PreviewPanel, claimPanel, openPanel, panelClaims, panelStore, panelVers
 import { needsArgument, paletteFor, parseCommandLine } from "./chat-commands.js";
 import { installTour, refreshTourSpot } from "./chat-tour.js";
 import { LightboxHost, openLightbox } from "./image-lightbox.js";
+import { ChatEffectPosters } from "/ui/js/chat-effect-posters.js";
+import { ChatEffects, chatEffectsMenuAvailable } from "./chat-effects.js";
+import { startAppEffects, getAppEffects } from "./app-effects.js";
 
 const R = () => globalThis.AgendChatRender;
 const P = () => globalThis.AgendPreview;
@@ -93,6 +116,7 @@ export function boot({ stream, boot: bootData, deps = {} }) {
   }
   // #1604: the preview opt-in and Tour live in Settings → This device now (and on each preview card's menu).
   installTour();
+  startAppEffects({ store });
   return store;
 }
 
@@ -171,11 +195,40 @@ function NotFound({ name }) {
       action=${html`<button type="button" class="btn only-narrow" onClick=${openDrawer}>${t("chat.backToList")}</button>`} /></div></div>`;
 }
 
+/**
+ * #1629: the mode the page is drawn in, followed live (the chosen theme, or the system's for "system"), so an agent's
+ * light and dark palettes swap with it.
+ */
+function useResolvedMode(lease) {
+  const [mode, setMode] = useState(resolvedMode);
+  useEffect(() => {
+    const T = globalThis.AgendTheme;
+    const update = () => setMode(resolvedMode());
+    const off = T && typeof T.onChange === "function" ? T.onChange(update) : null;
+    let mq = null;
+    try { mq = globalThis.matchMedia ? globalThis.matchMedia("(prefers-color-scheme: light)") : null; } catch { mq = null; }
+    if (mq && typeof mq.addEventListener === "function") lease.on(mq, "change", update);
+    return () => { if (typeof off === "function") off(); };
+  }, [lease]);
+  return mode;
+}
+
 function ChatView({ name, inst, lease, navKey, exec, awaiting }) {
   const names = useStore(namesStore);   // #1722: which name leads (the title)
+  // #1629: this agent's theme, on this surface only; redrawn when the themes, the viewer's switch or the mode move.
+  useStore(themesStore);
+  const mode = useResolvedMode(lease);
+  const theme = themeFor(name);
+  const themeKey = JSON.stringify(theme);
+  const card = useCard(name, inst.card_v);
   const [dialog, setDialog] = useState(null);       // "delete" | null
   const [wrap, setWrap] = useState(codeWrap);
-  const view = useRef(null), split = useRef(null), thread = useRef(null);
+  const view = useRef(null), split = useRef(null), thread = useRef(null), bg = useRef(null), effectSurface = useRef(null);
+  useLayoutEffect(() => { applyTheme(view.current, theme, mode); }, [themeKey, mode]);
+  useLayoutEffect(() => {
+    const img = bg.current;
+    if (img && img.style && theme && theme.background) img.style.setProperty("--th-bg-opacity", String(theme.background.opacity));
+  }, [themeKey]);
   useEffect(() => { wrapListeners.add(setWrap); return () => wrapListeners.delete(setWrap); }, []);
   // First visit to this instance's chat on this page: its history (a navigation — it counts as use). Back again: nothing.
   useEffect(() => { store.openHistory(name, lease); }, [name]);
@@ -217,6 +270,11 @@ function ChatView({ name, inst, lease, navKey, exec, awaiting }) {
     running ? null : { key: "start", label: t("chat.start"), icon: "play", onSelect: () => action("start") },
     running ? { key: "restart", label: t("chat.restart"), icon: "restart", onSelect: () => action("restart") } : null,
     running ? { key: "stop", label: t("chat.stopInstance"), icon: "stop", onSelect: () => action("stop") } : null,
+    // #1958: its identity colour and where it shows (the public link too, as profile edits).
+    colorMenuItem(name, inst),
+    // #1629: a person's control over this agent's theme — not over the public link (it only views themes).
+    ...themeMenuItems(name),
+    chatEffectsMenuAvailable() ? { key: "effects", label: t("chatFx.title"), onSelect: () => setDialog("effects") } : null,
     { key: "delete", label: t("chat.delete"), icon: "trash", danger: true, onSelect: () => setDialog("delete") },
   ];
   const cls = statusClass(inst, exec, awaiting);
@@ -226,17 +284,20 @@ function ChatView({ name, inst, lease, navKey, exec, awaiting }) {
     ${inst.model ? html`<button type="button" class="hd-chip" title=${t("chat.chipModel", inst.model)} aria-label=${t("chat.chipModel", inst.model)} onClick=${() => pick("model")}>${inst.model}</button>` : null}
     ${inst.effort ? html`<button type="button" class="hd-chip" title=${t("chat.chipEffort", inst.effort)} aria-label=${t("chat.chipEffort", inst.effort)} onClick=${() => pick("effort")}>${inst.effort}</button>` : null}`;
   return html`<div class=${`panel p-chat${wrap ? " wrap-code" : ""}`} ref=${view}>
-    <${PanelHeader} title=${headerName(namesOf(inst || { name }, names.primary))} sub=${sub} nav=${html`<${InstanceSwitch} name=${name} current="chat" />`}><${HeaderTools} navKey=${navKey} /><${Menu} items=${items} label=${t("app.more")} /></${PanelHeader}>
+    <${PanelHeader} title=${headerName(namesOf(inst || { name }, names.primary))} sub=${sub} nav=${html`<${InstanceSwitch} name=${name} current="chat" />`}><${ChatEffectPosters} name=${name} lease=${lease} element=${effectSurface} /><${ChatEffects} name=${name} lease=${lease} element=${effectSurface} store=${store} open=${dialog === "effects"} onClose=${() => setDialog(null)} /><${HeaderTools} navKey=${navKey} /><${Menu} items=${items} label=${t("app.more")} /></${PanelHeader}>
+    <${ChatCard} key=${name} name=${name} card=${card} />
+    <${AgentWidget} slot="chat_header" widget=${widgetFor(name, "chat_header")} binds=${instanceBinds(inst, exec, awaiting)} />
     <div class="chat-split" ref=${split}>
-      <div class="chat-main">
+      <div ref=${effectSurface} class=${`chat-main${theme && theme.background ? " has-th-bg" : ""}`}>
+        ${theme && theme.background ? html`<img ref=${bg} class=${`th-bg th-bg-${theme.background.fit}`} src=${themeImageUrl(name, theme.background.image)} alt="" aria-hidden="true" decoding="async" />` : null}
         <${Thread} name=${name} th=${thread} />
-        <${Dock} name=${name} inst=${inst} lease=${lease} exec=${exec} awaiting=${awaiting} />
+        <${Dock} name=${name} inst=${inst} lease=${lease} exec=${exec} awaiting=${awaiting} workingLabel=${theme ? theme.workingLabel : undefined} />
       </div>
       <${PreviewPanel} name=${name} split=${split} msgs=${() => store.state.msgs[name] || []} subscribe=${(fn) => store.subscribe(fn)}
         keyOf=${msgKey} reveal=${(k) => thread.current && thread.current.reveal(k)} download=${downloadHtml} allow=${(commit) => setPreviewOptIn(true, commit)} />
     </div>
     <${LightboxHost} />
-    <div class="drop-overlay" aria-hidden="true"><div class="drop-card"><${Icon} name="attach" size=${32} /><span>${t("chat.dropHere")}</span></div></div>
+    <div data-trust="drop" class="drop-overlay" aria-hidden="true"><div class="drop-card"><${Icon} name="attach" size=${32} /><span>${t("chat.dropHere")}</span></div></div>
     ${dialog === "delete" ? html`<${DeleteDialog} name=${name} onClose=${() => setDialog(null)} />` : null}
   </div>`;
 }
@@ -247,9 +308,12 @@ function Thread({ name, th }) {
   const [jump, setJump] = useState({ show: false, unseen: 0 });
   const [empty, setEmpty] = useState(false);
   useLayoutEffect(() => {
+    let live = true;
     const thread = createThread(list.current, scroller.current, {
       t, tf: t, isUser: (x) => store.isUser(x, name), onJump: setJump, onEmpty: setEmpty,
       setPreviewOptIn, copyText, download: downloadHtml, toggleWrap,
+      canTryEffect: x => getAppEffects()?.canTry(x) === true,
+      startEffectTrial: x => { const seq = navStore.get().seq; void getAppEffects()?.startTrial(x).then(ok => { if (!ok && live && navStore.get().seq === seq && document.hasFocus?.() === true && document.visibilityState === "visible") toast(t("chat.effectTrialUnavailable")); }); },
       clickReplyButton: (id, index) => store.clickReplyButton(name, id, index),      // #1266
       replyButtonBusy: (id) => store.state.rbBusy.has(id),
       pollMine: (id) => store.state.pollMine[id],                            // #1823: this device's own vote
@@ -273,13 +337,15 @@ function Thread({ name, th }) {
       else if (kind === "sent") thread.jumpLatest();
     });
     const offPv = P() ? P().onChange(() => thread.refreshCards()) : () => {};
+    const offTrials = getAppEffects()?.subscribeTrial(() => thread.render(store.state.msgs[name] || [])) ?? (() => {});
     const offPanel = panelStore.subscribe(() => thread.refreshCards());   // a card shows whether the panel has its block
     const onScroll = () => { store.state.scrollMemo[name] = thread.onScroll(); };
     const sc = scroller.current, ls = list.current;
     sc.addEventListener("scroll", onScroll, { passive: true });
     ls.addEventListener("click", thread.onClick);
     return () => {
-      off(); offPv(); offPanel(); offEmojis(); offMentions();
+      live = false;
+      off(); offPv(); offPanel(); offTrials(); offEmojis(); offMentions();
       sc.removeEventListener("scroll", onScroll);
       ls.removeEventListener("click", thread.onClick);
       thread.dispose();                     // the whole thread goes: every preview in it stops first
@@ -289,18 +355,18 @@ function Thread({ name, th }) {
   return html`<div class="scroller" ref=${scroller}>
     <div class="thread" ref=${list} role="log" aria-live="off" aria-label=${t("chat.conversationWith", name)}></div>
     ${empty ? html`<${Empty} icon="chat" title=${t("chat.noMessages")} />` : null}
-    ${jump.show ? html`<button type="button" class="jump-latest" onClick=${() => th.current && th.current.jumpLatest()}>
+    ${jump.show ? html`<button data-trust="thread-control" type="button" class="jump-latest" onClick=${() => th.current && th.current.jumpLatest()}>
       <${Icon} name="down" size=${16} />${jump.unseen > 0 ? t("chat.newBelow", jump.unseen) : t("chat.jumpLatest")}</button>` : null}
   </div>`;
 }
 
 /** Everything under the thread: prompts, the working line, a failed send, files waiting, and the composer. */
-function Dock({ name, inst, lease, exec, awaiting }) {
+function Dock({ name, inst, lease, exec, awaiting, workingLabel }) {
   useChatTick(name, ["state"]);
   const s = store.state;
-  return html`<div class="dock"><div class="dock-col">
+  return html`<div data-trust="composer" class="dock"><div class="dock-col">
     <${Prompts} name=${name} />
-    <${WorkBar} name=${name} lease=${lease} exec=${exec} awaiting=${awaiting} />
+    <${WorkBar} name=${name} lease=${lease} exec=${exec} awaiting=${awaiting} workingLabel=${workingLabel} />
     <${CommandCard} name=${name} lease=${lease} />
     <${QuickActions} name=${name} inst=${inst} lease=${lease} />
     ${s.failedSends[name] ? html`<div class="failed-send" role="alert"><span>${t("chat.notSent")}</span><span class="txt">${s.failedSends[name]}</span>
@@ -347,14 +413,14 @@ function QuickActions({ name, inst, lease }) {
 function Prompts({ name }) {
   const list = store.promptsFor(name);
   if (!list.length) return null;
-  return html`<div class="prompts" aria-live="polite">${list.map(p => html`<div key=${p.nonce} class=${`prompt${p.resolved ? " done" : ""}`} role="group" aria-label=${p.text}>
-    <div class="txt">${p.resolved ? (p.outcome || t("chat.promptGone")) : textLinkSegments(p.text, p.links).map(sg => sg.href ? html`<a class="st-link" href=${sg.href}>${sg.text}</a>` : sg.text)}</div>
+  return html`<div data-trust="permission" class="prompts" aria-live="polite">${list.map(p => html`<div key=${p.nonce} class=${`prompt${p.resolved ? " done" : ""}`} role="group" aria-label=${p.text}>
+    <div class="txt">${p.resolved ? (p.outcome || t("chat.promptGone")) : textLinkSegments(p.text, p.links).map(sg => sg.href ? html`<a data-trust="link" class="st-link" href=${sg.href}>${sg.text}</a>` : sg.text)}</div>
     ${p.resolved ? null : html`<div class="acts">${p.actions.map(a => html`<button key=${a.id} type="button" class="btn" disabled=${!!p.busy} onClick=${() => store.answerPrompt(p, a.id)}>${a.label}</button>`)}
       ${p.busy ? html`<span class="wait">${t("chat.promptAnswering")}</span>` : null}</div>`}</div>`)}</div>`;
 }
 
 /** "<name> is working… 0:42", "looks stuck", "Stopping…", or what it waits on at its terminal. Text only. */
-function WorkBar({ name, lease, exec, awaiting }) {
+function WorkBar({ name, lease, exec, awaiting, workingLabel }) {
   const s = store.state;
   const busy = R().isBusy(exec) ? exec : "";
   const kind = awaiting != null ? "awaiting" : s.stopping[name] && busy ? "stopping" : busy;
@@ -365,7 +431,9 @@ function WorkBar({ name, lease, exec, awaiting }) {
     return () => lease.clear(h);
   }, [kind, lease]);
   if (!kind) return null;
-  const label = t(kind === "stuck" ? "chat.stuck" : kind === "stopping" ? "chat.stopping" : kind === "awaiting" ? "chat.awaiting" : "chat.working", name);
+  // #1629: the agent's own working label (its theme), shown as text — only for "working", never for the other states.
+  const label = kind === "working" && workingLabel ? workingLabel
+    : t(kind === "stuck" ? "chat.stuck" : kind === "stopping" ? "chat.stopping" : kind === "awaiting" ? "chat.awaiting" : "chat.working", name);
   const since = s.workingSince[name];
   return html`<div class=${`work-bar ${kind}`}><span class="pulse" aria-hidden="true"></span><span class="lbl">${label}</span>
     ${kind === "awaiting" ? html`<span class="note" title=${t("chat.approxNote")}>${awaiting || t("chat.approxNote")}</span>`
@@ -428,7 +496,7 @@ function Composer({ name, lease, busy }) {
   };
   const optId = (c) => `cmd-${c.name}`;
   return html`<div class="composer-box">
-    ${palette ? html`<ul class="cmd-palette" id="cmdPalette" role="listbox" aria-label=${t("chat.cmdCommands")}>
+    ${palette ? html`<ul data-trust="palette" class="cmd-palette" id="cmdPalette" role="listbox" aria-label=${t("chat.cmdCommands")}>
       ${palette.length ? palette.map((c) => html`<li key=${c.name} id=${optId(c)} role="option" aria-selected=${c === pick ? "true" : "false"}
           class=${c === pick ? "on" : ""} onMouseDown=${(e) => { e.preventDefault(); complete(c); }}>
           <span class="cmd-name mono">/${c.name}${c.arg ? html` <span class="cmd-arg">${c.arg}</span>` : null}</span><span class="cmd-desc">${t(`chat.cmd_${c.name}`)}</span></li>`)

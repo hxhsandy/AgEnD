@@ -8,6 +8,7 @@
 // Unrelated updates (a new message, another message's tick) stop nothing (#1306 §6.2, #1408 §4).
 import "./chat-render.js";
 import "./preview.js";
+import { effectTrialMessage } from "./effect-trial-offer.js";
 import { loadHtmlAttachment } from "./html-attachment.js";
 import { chatTime, chatTimeFull, onDayChange } from "./chat-time.js";
 import { textLinkSegments } from "/assets/app-route.js";
@@ -69,7 +70,7 @@ export function createThread(list, scroller, opts) {
     if (el.textContent !== v) el.textContent = v;
   }
   // #1770: "today" ends at the fleet's midnight; the labels are rewritten then (and on every render), while there are any.
-  let offDay = null;
+  let offDay = null, trialTimer = null;
   function armDay() {
     if (nodes.size && !offDay) offDay = onDayChange(() => { for (const v of nodes.values()) timeLabel(v.node); });
     else if (!nodes.size && offDay) { offDay(); offDay = null; }
@@ -81,11 +82,13 @@ export function createThread(list, scroller, opts) {
     // #1770: the label ("17:38", "Yesterday 17:38", "10/11 17:38") depends on today, so it is not part of the html a node
     // is kept by: it is written into the node (timeLabels) — crossing midnight relabels in place and reloads no preview.
     const time = x.ts ? `<span class="time" data-ts="${escAttr(x.ts)}" title="${escAttr(chatTimeFull(x.ts))}"></span>` : `<span class="time"></span>`;
+    const trial = effectTrialMessage(x);
+    if (trial) return trialHtml(trial, time, x);
     if (x.role === "status") return statusHtml(x, time);
     const u = opts.isUser(x);
     // renderMarkdown escapes the whole text before it adds any tag of its own (chat-render.js).
     const ticks = u && x.delivery ? R().deliveryHtml(x.delivery, TICKS()) : "";
-    const tools = u ? "" : `<div class="msg-tools"><button type="button" class="chip-btn icon-only" data-act="copyMsg" data-arg="${escAttr(msgKey(x))}" title="${escAttr(tr("chat.copyMessage"))}" aria-label="${escAttr(tr("chat.copyMessage"))}">${COPY}</button></div>`;
+    const tools = u ? "" : `<div data-trust="thread-control" class="msg-tools"><button type="button" class="chip-btn icon-only" data-act="copyMsg" data-arg="${escAttr(msgKey(x))}" title="${escAttr(tr("chat.copyMessage"))}" aria-label="${escAttr(tr("chat.copyMessage"))}">${COPY}</button></div>`;
     const buttons = x.role === "agent" ? replyButtonsHtml(x.buttons) : "";
     // A person's click on a reply button shows as the button's label, never the line the agent was given (its value).
     const clicked = x.role === "user" && x.click && typeof x.click.label === "string";
@@ -98,9 +101,20 @@ export function createThread(list, scroller, opts) {
   function clickHtml(click) {
     const inner = `<span class="click-mark" aria-hidden="true">🔘</span><span class="sr-only">${escAttr(tr("chat.clicked"))} </span>${escAttr(click.label)}`;
     const of = typeof click.of === "string" && /^[0-9a-f]{32}$/.test(click.of) ? click.of : null;
-    return `<div class="click-chip">${of
+    return `<div class="click-chip" data-trust="thread-control">${of
       ? `<button type="button" class="click-link" data-act="showButtons" data-arg="${escAttr(of)}" title="${escAttr(tr("chat.clickShow"))}">${inner}</button>`
       : `<span class="click-text">${inner}</span>`}</div>`;
+  }
+  function trialNow() { try { const t = opts.serverNow ? opts.serverNow() : Date.now(); return Number.isFinite(t) ? t : Infinity; } catch { return Infinity; } }
+  function trialHtml(offer, time, message) {
+    const expired = trialNow() >= offer.expiresAt, available = !PUBLIC_LINK() && !expired && opts.canTryEffect?.(message) === true;
+    const button = available ? `<button type="button" class="btn btn-sm effect-trial-start" data-act="effectTrial" data-arg="${escAttr(msgKey(message))}">${escAttr(tr("chat.effectTrialStart"))}</button>` : "";
+    return `<div class="msg status-line"><div class="meta">${time}</div><div class="body"><div class="effect-trial-offer" data-trust="thread-control"><strong>${escAttr(tr("chat.effectTrial"))}: ${escAttr(offer.title)}</strong><div>${escAttr(tr(expired ? "chat.effectTrialExpired" : "chat.effectTrialLocal"))}</div>${button}</div></div></div>`;
+  }
+  function armTrials() {
+    if (trialTimer !== null) clearTimeout(trialTimer); trialTimer = null;
+    const now = trialNow(), next = msgs.map(x => effectTrialMessage(x)).filter(x => x && x.expiresAt > now).reduce((n, x) => Math.min(n, x.expiresAt), Infinity);
+    if (Number.isFinite(next)) trialTimer = setTimeout(() => { trialTimer = null; render(msgs); }, Math.max(1, Math.min(2147483647, next - now)));
   }
   /**
    * #1672: a status line (another instance's message, a daemon notice) is muted, read-only plain text — never Markdown,
@@ -112,11 +126,11 @@ export function createThread(list, scroller, opts) {
     const lines = R().lineCount(text);
     const manyLines = lines > STATUS_FOLD_LINES;
     const more = manyLines || text.length > STATUS_FOLD_CHARS
-      ? `<button type="button" class="st-more" data-act="toggleFold"${manyLines ? ` data-lines="${escAttr(lines)}"` : ""}>${escAttr(manyLines ? trf("chat.showAll", lines) : tr("chat.showMore"))}</button>`
+      ? `<button data-trust="thread-control" type="button" class="st-more" data-act="toggleFold"${manyLines ? ` data-lines="${escAttr(lines)}"` : ""}>${escAttr(manyLines ? trf("chat.showAll", lines) : tr("chat.showMore"))}</button>`
       : "";
-    const tools = `<div class="msg-tools"><button type="button" class="chip-btn icon-only" data-act="copyMsg" data-arg="${escAttr(msgKey(x))}" title="${escAttr(tr("chat.copyMessage"))}" aria-label="${escAttr(tr("chat.copyMessage"))}">${COPY}</button></div>`;
+    const tools = `<div data-trust="thread-control" class="msg-tools"><button type="button" class="chip-btn icon-only" data-act="copyMsg" data-arg="${escAttr(msgKey(x))}" title="${escAttr(tr("chat.copyMessage"))}" aria-label="${escAttr(tr("chat.copyMessage"))}">${COPY}</button></div>`;
     // #1990: the other instance's name opens its chat (an in-app link the router takes: no target).
-    const body = textLinkSegments(text, x.links).map(sg => sg.href ? `<a class="st-link" href="${escAttr(sg.href)}">${escAttr(sg.text)}</a>` : escAttr(sg.text)).join("");
+    const body = textLinkSegments(text, x.links).map(sg => sg.href ? `<a data-trust="link" class="st-link" href="${escAttr(sg.href)}">${escAttr(sg.text)}</a>` : escAttr(sg.text)).join("");
     return `<div class="msg status-line${more ? " folded" : ""}"><div class="meta">${time}</div><div class="body"><div class="st-text">${body}</div>${more}</div>${tools}</div>`;
   }
   /**
@@ -133,7 +147,7 @@ export function createThread(list, scroller, opts) {
       return `<button type="button" class="btn btn-sm rb-btn${chosen ? " chosen" : ""}" data-act="replyButton" data-arg="${escAttr(`${b.id}:${i}`)}"${off ? " disabled" : ""}>${escAttr(chosen ? `✓ ${label}` : label)}</button>`;
     }).join("");
     const note = b.state === "chosen" ? trf("chat.rbChosen", b.by || "") : b.state === "expired" ? tr("chat.rbExpired") : "";
-    return `<div class="rb-row" role="group" aria-label="${escAttr(tr("chat.rbGroup"))}">${items}${note ? `<span class="rb-note">${escAttr(note)}</span>` : ""}</div>`;
+    return `<div data-trust="reply" class="rb-row" role="group" aria-label="${escAttr(tr("chat.rbGroup"))}">${items}${note ? `<span class="rb-note">${escAttr(note)}</span>` : ""}</div>`;
   }
   /**
    * #1823: a poll. Anyone here may click while it is open; the page marks its own vote (opts.pollMine), which no one else
@@ -154,9 +168,9 @@ export function createThread(list, scroller, opts) {
       ? escAttr(trf("chat.pollClosed", p.answered))
       : `${escAttr(trf("chat.pollAnswered", p.answered))} · ⏳ <span class="poll-left" data-deadline="${escAttr(p.deadline)}" title="${escAttr(tr("chat.pollLeft"))}"></span>`;
     const voters = closed && Array.isArray(p.voters)
-      ? `<ul class="poll-voters" aria-label="${escAttr(tr("chat.pollVoters"))}">${b.labels.map((label, i) => `<li>${escAttr(`${label}: ${(p.voters[i] || []).join(", ") || "—"}`)}</li>`).join("")}</ul>`
+      ? `<ul data-trust="reply" class="poll-voters" aria-label="${escAttr(tr("chat.pollVoters"))}">${b.labels.map((label, i) => `<li>${escAttr(`${label}: ${(p.voters[i] || []).join(", ") || "—"}`)}</li>`).join("")}</ul>`
       : "";
-    return `<div class="rb-row poll" role="group" aria-label="${escAttr(tr("chat.pollGroup"))}">${items}<span class="rb-note">${status}</span></div>${voters}`;
+    return `<div data-trust="reply" class="rb-row poll" role="group" aria-label="${escAttr(tr("chat.pollGroup"))}">${items}<span class="rb-note">${status}</span></div>${voters}`;
   }
   /** #1823: the time left on this node's open polls, now. */
   function pollLeft(node) {
@@ -190,7 +204,7 @@ export function createThread(list, scroller, opts) {
     const doc = list.ownerDocument;
     for (const pre of root.querySelectorAll(".md pre")) {
       const box = doc.createElement("div"); box.className = "codeblock";
-      const head = doc.createElement("div"); head.className = "cb-head";
+      const head = doc.createElement("div"); head.className = "cb-head"; head.setAttribute("data-trust", "thread-control");
       const lang = doc.createElement("span"); lang.className = "cb-lang"; lang.textContent = pre.dataset.lang || "text";
       const wrap = doc.createElement("button"); wrap.type = "button"; wrap.className = "chip-btn"; wrap.dataset.act = "toggleWrap"; wrap.textContent = tr("chat.wrap");
       const copy = doc.createElement("button"); copy.type = "button"; copy.className = "chip-btn"; copy.dataset.act = "copyCode"; copy.textContent = tr("chat.copy");
@@ -199,7 +213,7 @@ export function createThread(list, scroller, opts) {
       const lines = R().lineCount(pre.textContent);
       if (lines > R().CODE_FOLD_LINES) {
         box.classList.add("folded");
-        const more = doc.createElement("button"); more.type = "button"; more.className = "cb-more"; more.dataset.act = "toggleFold";
+        const more = doc.createElement("button"); more.type = "button"; more.className = "cb-more"; more.setAttribute("data-trust", "thread-control"); more.dataset.act = "toggleFold";
         more.dataset.lines = String(lines); more.textContent = trf("chat.showAll", lines);
         box.append(more);
       }
@@ -217,7 +231,7 @@ export function createThread(list, scroller, opts) {
       if (!fence) continue;
       ph.textContent = "";
       if (ph.classList.contains("truncated") || !fence.terminated) {
-        const note = doc.createElement("div"); note.className = "pv-note"; note.textContent = tr("chat.pvTruncated"); ph.append(note);
+        const note = doc.createElement("div"); note.className = "pv-note"; note.setAttribute("data-trust", "thread-control"); note.textContent = tr("chat.pvTruncated"); ph.append(note);
         continue;
       }
       buildCard(ph, x, `${msgKey(x)}:f${n}`, { n, code: fence.code }, stoppedKeys);
@@ -247,12 +261,12 @@ export function createThread(list, scroller, opts) {
     const doc = list.ownerDocument;
     const el = (tag, cls, text) => { const e = doc.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
     ph.textContent = "";
-    const head = el("div", "tc-head");
+    const head = el("div", "tc-head"); head.setAttribute("data-trust", "thread-control");
     const label = el("span", "tc-label", att.name);
     const show = el("button", "btn btn-sm tc-show", tr("chat.tcShow")); show.type = "button";
     const dl = el("a", "btn btn-sm tc-dl", tr("chat.tcDownload")); dl.href = `/ui/file/${att.id}`; dl.setAttribute("download", att.name);
     head.append(label, show, dl);
-    const note = el("div", "pv-note");
+    const note = el("div", "pv-note"); note.setAttribute("data-trust", "thread-control");
     const body = el("div", "tc-body"); body.hidden = true;
     ph.append(head, note, body);
     let text = null, reading = false, all = false;
@@ -265,7 +279,8 @@ export function createThread(list, scroller, opts) {
       // Formatting is built only within TEXT_PREVIEW_NODES: the markup is measured as a string first, never as DOM.
       const plain = () => {
         const pre = el("pre", "tc-pre"), code = el("code", null, src);
-        pre.append(code); body.append(el("div", "pv-note", tr("chat.tcPlain")), pre);
+        const note = el("div", "pv-note", tr("chat.tcPlain")); note.setAttribute("data-trust", "thread-control");
+        pre.append(code); body.append(note, pre);
       };
       if (type === "md") {
         const html = R().renderMarkdown(src);
@@ -285,7 +300,7 @@ export function createThread(list, scroller, opts) {
         }
       }
       if (cut) {
-        const more = el("button", "btn btn-sm tc-more", trf("chat.tcShowAll", lines.length)); more.type = "button";
+        const more = el("button", "btn btn-sm tc-more", trf("chat.tcShowAll", lines.length)); more.setAttribute("data-trust", "thread-control"); more.type = "button";
         more.onclick = () => { all = true; draw(); };
         body.append(more);
       }
@@ -346,7 +361,7 @@ export function createThread(list, scroller, opts) {
     const el = (tag, cls, text) => { const e = doc.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
     const att = source.att || null;
     let code = att ? null : source.code;
-    const head = el("div", "pv-head");
+    const head = el("div", "pv-head"); head.setAttribute("data-trust", "thread-control");
     const label = el("span", "pv-label", att ? `${tr("chat.pvHtml")} · ${att.name}` : tr("chat.pvHtml"));
     const run = el("button", "btn btn-sm pv-run", tr("chat.pvPreview")); run.type = "button";
     const stopB = el("button", "btn btn-sm pv-stop", tr("chat.pvStop")); stopB.type = "button"; stopB.hidden = true;
@@ -356,15 +371,15 @@ export function createThread(list, scroller, opts) {
     const panel = opts.panel || null;
     const toPanel = panel ? el("button", "btn btn-sm btn-ghost pv-open", tr("chat.pvOpenPanel")) : null;
     if (toPanel) toPanel.type = "button";
-    const menu = el("details", "pv-menu");
+    const menu = el("details", "pv-menu"); menu.setAttribute("data-trust", "preview-menu");
     const sum = el("summary", null, "⋯"); sum.title = tr("chat.pvMenu"); sum.setAttribute("aria-label", tr("chat.pvMenu"));
     const optB = el("button", "chip-btn pv-opt"); optB.type = "button";
     const neverB = el("button", "chip-btn pv-never"); neverB.type = "button";
     menu.append(sum, optB, neverB);
     head.append(label, run, stopB, ...(toPanel ? [toPanel] : []), ...(dl ? [dl] : []), menu);
-    const note = el("div", "pv-note");
+    const note = el("div", "pv-note"); note.setAttribute("data-trust", "thread-control");
     // #1568: the banner, with its "I understand" (hidden until the next sign-in; the frame's border stays).
-    const banner = el("div", "pv-banner"); banner.hidden = true;
+    const banner = el("div", "pv-banner"); banner.setAttribute("data-trust", "thread-control"); banner.hidden = true;
     const ack = el("button", "btn btn-sm btn-ghost pv-ack", P().bannerAckLabel()); ack.type = "button"; ack.title = P().bannerAckTitle();
     banner.append(el("span", "pv-banner-text", P().banner()), ack);
     const holder = el("div", "pv-holder");
@@ -496,6 +511,7 @@ export function createThread(list, scroller, opts) {
   function render(next, renderOpts = {}) {
     const stick = pinned || nearBottom();
     msgs = next || [];
+    armTrials();
     if (!msgs.length) {
       for (const v of nodes.values()) stopIn(v.node);
       nodes.clear();
@@ -534,7 +550,7 @@ export function createThread(list, scroller, opts) {
         const stopped = have ? stopIn(have.node) : [];
         const node = msgNode(html, x, stopped);
         if (have) have.node.replaceWith(node); else added++;
-        have = { html, node, x }; nodes.set(key, have);
+        have = { html, node, x, trialButton: node.querySelector(".effect-trial-offer > button.effect-trial-start") }; nodes.set(key, have);
       } else { have.x = x; timeLabel(have.node); }
       const want = prev ? prev.nextSibling : list.firstChild;
       // A node already in the list is being moved: its preview stops first. A new node (still in its template) has none.
@@ -608,12 +624,19 @@ export function createThread(list, scroller, opts) {
     else if (act === "replyButton") {
       const m = /^([0-9a-f]{32}):(\d{1,2})$/.exec(el.dataset.arg || "");
       if (m && opts.clickReplyButton) opts.clickReplyButton(m[1], Number(m[2]));
+    } else if (act === "effectTrial") {
+      // Only the current host-produced keyed card and a real local click can request admission. No token is read from DOM.
+      const key = el.dataset.arg, row = msgs.find(x => msgKey(x) === key), owner = nodes.get(key), node = owner?.node, offer = effectTrialMessage(row);
+      if (PUBLIC_LINK() || e.defaultPrevented || e.isTrusted !== true || owner?.trialButton !== el || el.className !== "btn btn-sm effect-trial-start" || !node?.contains(el) || el.closest(".effect-trial-offer")?.getAttribute("data-trust") !== "thread-control"
+        || !offer || trialNow() >= offer.expiresAt || opts.canTryEffect?.(row) !== true) return;
+      opts.startEffectTrial?.(row);
     } else if (act === "showButtons") { const x = msgs.find(y => y.buttons && y.buttons.id === el.dataset.arg); if (x) reveal(msgKey(x)); }
   }
 
   /** The thread goes (the chat left, or another instance opened): every preview in it stops first. */
   function dispose() {
     disposed = true;
+    if (trialTimer !== null) clearTimeout(trialTimer); trialTimer = null;
     if (ro) ro.disconnect();
     if (P()) P().stopAll("leave");
     nodes.clear();

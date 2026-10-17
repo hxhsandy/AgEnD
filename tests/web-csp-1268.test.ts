@@ -185,7 +185,7 @@ describe("the app builds its markup from templates and props; the thread's strin
     // The whole listener: from its start to its closing brace (not a fixed number of characters).
     const at = THREAD.indexOf("function onClick(e)");
     const handled = [...THREAD.slice(at, THREAD.indexOf("\n  }\n", at)).matchAll(/act === "(\w+)"/g)].map(m => m[1]!).sort();
-    expect(named).toEqual(["copyCode", "copyMsg", "replyButton", "showButtons", "toggleFold", "toggleWrap"]);   // #1266: replyButton; a click chip's link: showButtons
+    expect(named).toEqual(["copyCode", "copyMsg", "effectTrial", "replyButton", "showButtons", "toggleFold", "toggleWrap"]);   // #1266: replyButton; a click chip's link: showButtons
     expect(handled).toEqual(named);
     expect(THREAD).toContain('e.target.closest("[data-act]")');
   });

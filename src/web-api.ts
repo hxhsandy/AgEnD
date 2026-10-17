@@ -6,6 +6,18 @@ import type { SettingsExecution } from "./settings-transaction.js";
 import type { PaneContextSource } from "./pane-context-cache.js";
 import { settingsRequestExecution, settingsWrite, isSettingsReplay } from "./settings-request-capability.js";
 import { readBoundedWebBody } from "./web-body.js";
+import type { OwnerCssStore } from "./web-owner-css-store.js";
+import type { ModStore } from "./web-mod-store.js";
+import { MOD_MAX_BYTES } from "./web-mod-bundle.js";
+import { buildModBundle, type ModExportParts } from "./web-mod-export.js";
+import { AGENT_WIDGET_SLOTS, checkWidgetData, checkWidgetSpec } from "./web-widget.js";
+import { checkOwnerCss, ownerCssAssetRefs } from "./web-owner-css.js";
+import { canonicalText } from "./web-theme.js";
+import type { WebEffectService } from "./web-effect-service.js";
+import type { EffectTrialActor } from "./web-effect-trials.js";
+import { EFFECT_WIRE_LIMIT } from "./web-effect-upload.js";
+import type { ThemeStore } from "./web-theme-store.js";
+import type { WebAppearance } from "./web-appearance.js";
 import { gatewayRequestContext } from "./web-request-context.js";
 import { permitWebContinuation } from "./web-continuation.js";
 /**
@@ -35,9 +47,9 @@ import { dashboardOriginFor, type PreviewAvailability } from "./web-preview.js";
 import { newWebMessageId, parseLastEventId, type WebChatHistory } from "./web-chat-history.js";
 import { attachmentDelivery, createPartFile, displayName, fileTooLargeText, INLINE_MIME, isFileId, MEDIA_RANGE_MAX, publicAttachment, removeQuietly, UPLOAD_LIMITS, UPLOAD_MAX_MS, UPLOAD_STALL_MS, UploadSniffer, uploadLimits, wellFormed, type ServedFile, type UploadEntry, type WebFileLedger } from "./web-upload.js";
 import { getAgendHome } from "./paths.js";
-import type { WebSessionStore } from "./web-session.js";
-import { OPERATOR, type WebPrefsStore } from "./web-prefs.js";
-import { WEB_NAME_FALLBACK, type WebAccount } from "./web-profile.js";
+import type { WebSessionStore, SessionRecord } from "./web-session.js";
+import { OPERATOR, isOwnerEffectKey, type WebPrefsStore } from "./web-prefs.js";
+import { WEB_NAME_FALLBACK, type WebAccount, webPersonKey } from "./web-profile.js";
 import { commitTeamCreate, commitTeamUpdate } from "./outbound-handlers.js";
 import { parseMentionQuery, type MentionNames, type MentionQuery } from "./web-mentions.js";
 import { authorizeExplicitInstanceRemoval } from "./instance-removal.js";
@@ -222,6 +234,21 @@ export interface WebApiContext {
   readonly sseHeartbeatMs?: number;
   /** #1665: the web preferences kept on the host (one bucket: the operator's); absent: /ui/prefs is not offered. */
   readonly webPrefs?: WebPrefsStore;
+  /** #1629 r4 §3: each person's own CSS (human sessions only; never the public link, never an agent). */
+  readonly ownerCss?: OwnerCssStore;
+  /** #1629: every instance's theme (web-themes.json), read by the page; a person's reset and lock. */
+  readonly themeStore?: ThemeStore;
+  readonly webAppearance?: WebAppearance;
+  /** #1629 r4-5: installed mods and a person's staged import. */
+  readonly mods?: ModStore;
+  /** #1629 B2: session-only effect library, runtime resources and reported host profiles. */
+  readonly effectService?: WebEffectService;
+  /** #1629 r4-5: an instance's card text as shown (a person's fields over the agent's), for a mod's export. */
+  modCardText?(name: string): { tagline?: string; bio?: string };
+  /** #1629 r4-5c: an effect this person may export (their own claim, or human-shared); null for anyone else's. */
+  modPlacedEffect?(person: string, id: string): { name: string; files: ReadonlyMap<string, Uint8Array> } | null;
+  /** A fleet.yaml instance (own key) or a ClassicBot room, now. */
+  isKnownInstance?(name: string): boolean;
   startInstance(name: string, config: unknown, topicMode: boolean): Promise<void>;
   stopInstance(name: string): Promise<{ backgroundWorkEnded: boolean }>;
   /** The fleet prompts open on the dashboard (web track C4); absent: none are offered. */
@@ -304,6 +331,415 @@ function stillAuthorized(req: IncomingMessage, res: ServerResponse, url: URL, ct
   if (isWebRequestAuthorized(req, url, ctx.webToken, ctx.webSessions, { touch: false })) return true;
   json(res, 401, { error: WEB_TOKEN_INVALID_MESSAGE });
   return false;
+}
+
+/**
+ * #1629 r4 §3: the owner-CSS routes (see their call site). `who()`, asked first and again after any body: the person a
+ * signed-in human session is, or the status to answer.
+ */
+function handleOwnerCss(req: IncomingMessage, res: ServerResponse, url: URL, ctx: WebApiContext, path: string, method: string): boolean {
+  const store = ctx.ownerCss;
+  if (!store) { json(res, 404, { error: "Owner CSS is not kept on this fleet" }); return true; }
+  const reading = method === "GET" || method === "HEAD";
+  if (gatewayRequestContext(req)) { json(res, reading ? 404 : 403, { error: "owner_css_not_over_public_link" }); return true; }
+  const who = (): { person: string } | { status: number; error: string } => {
+    const verdict = evaluateWebRequest(req as unknown as WebGateRequest, url, ctx.webToken ?? null, ctx.webSessions, { touch: false });
+    if (verdict.kind !== "allow") return { status: 401, error: WEB_TOKEN_INVALID_MESSAGE };
+    if (verdict.via !== "session" || !verdict.session) return { status: 403, error: "owner_css_needs_a_signed_in_person" };
+    if (!reading && verdict.session.tier !== "admin") return { status: 403, error: "owner_css_read_only" };
+    return { person: webPersonKey(verdict.session.owner) };
+  };
+  const first = who();
+  if ("status" in first) { json(res, first.status, { error: first.error }); return true; }
+  const again = (): string | null => {
+    if (!permitWebContinuation(req, res, ctx)) return null;
+    const now = who();
+    if ("status" in now) { json(res, now.status, { error: now.error }); return null; }
+    if (now.person !== first.person) { json(res, 409, { error: "owner_css_person_changed" }); return null; }
+    return now.person;
+  };
+  const announce = () => ctx.emitSseEvent("status", ctx.getUiStatus());   // their other devices see the new prefs rev
+  const fail = (err: unknown) => {
+    ctx.logger.error({ err: (err as Error).message }, "Owner CSS request failed");
+    try { json(res, 500, { error: "Owner CSS request failed" }); } catch { /* already answered */ }
+  };
+
+  if (path === "/ui/owner-css.css" && method === "GET") {
+    const v = url.searchParams.get("v");
+    const sha = v ?? store.state(first.person).active;
+    const text = sha ? store.served(first.person, sha) : null;
+    if (text === null) { json(res, 404, { error: "no owner CSS" }); return true; }
+    res.writeHead(200, {
+      "Content-Type": "text/css; charset=utf-8", "X-Content-Type-Options": "nosniff",
+      // Keyed by its sha (?v): a version's text never changes. Without ?v it is whatever is in force now.
+      "Cache-Control": v ? "private, max-age=31536000, immutable" : "private, no-store",
+    });
+    res.end(text);
+    return true;
+  }
+  const assetPath = /^\/ui\/owner-css\/asset\/([0-9a-f]{32})$/.exec(path);
+  if (assetPath && method === "GET") {
+    const asset = store.asset(first.person, assetPath[1]!);
+    if (!asset) { json(res, 404, { error: "no such asset" }); return true; }
+    res.writeHead(200, {
+      "Content-Type": asset.mime, "X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=31536000, immutable",
+      "Content-Security-Policy": "default-src 'none'; sandbox",
+    });
+    res.end(asset.bytes);
+    return true;
+  }
+  if (path === "/ui/owner-css/state" && method === "GET") { json(res, 200, store.state(first.person)); return true; }
+  if (assetPath && method === "DELETE") {
+    const removed = store.removeAsset(first.person, assetPath[1]!);
+    json(res, removed.ok ? 200 : removed.status, removed.ok ? { ok: true } : { error: removed.error });
+    return true;
+  }
+  if (method !== "POST" || !["/ui/owner-css", "/ui/owner-css/keep", "/ui/owner-css/revert", "/ui/owner-css/restore", "/ui/owner-css/asset"].includes(path)) {
+    json(res, 404, { error: "not found" });
+    return true;
+  }
+  (async () => {
+    if (path === "/ui/owner-css/asset") {
+      let bytes: Buffer;
+      try { bytes = await readBoundedWebBody(req, 1024 * 1024); } catch { json(res, 413, { error: "asset_quota", detail: "at most 1 MiB" }); return; }
+      const person = again();
+      if (!person) return;
+      const added = store.addAsset(person, bytes);
+      if (!added.ok) { json(res, added.status, { error: added.error, ...(added.detail ? { detail: added.detail } : {}) }); return; }
+      json(res, 200, { id: added.id, kind: added.kind, bytes: added.bytes });
+      return;
+    }
+    let body: Record<string, unknown>;
+    try { body = await parseBody(req); } catch { json(res, 400, { error: "Invalid JSON" }); return; }
+    const person = again();
+    if (!person) return;
+    if (!body || typeof body !== "object" || Array.isArray(body)) { json(res, 400, { error: "an object" }); return; }
+    if (path === "/ui/owner-css") {
+      const saved = store.save(person, body.text);
+      if (!saved.ok) { json(res, saved.status, { error: saved.error, ...(saved.detail ? { detail: saved.detail } : {}) }); return; }
+      announce();
+      json(res, 200, { sha: saved.sha, previous: saved.previous, trial: saved.trial });
+    } else if (path === "/ui/owner-css/keep") {
+      const kept = store.keep(person, body.trial);
+      if (!kept.ok) { json(res, kept.status, { error: kept.error }); return; }
+      announce();                                                         // the person's other devices drop their bar
+      json(res, 200, { active: kept.active });
+    } else if (path === "/ui/owner-css/revert") {
+      // Exactly this trial, while it still is one: a trial kept (or ended) on another device meanwhile stays (409).
+      const reverted = store.revertTrial(person, body.trial);
+      if (!reverted.ok) { json(res, reverted.status, { error: reverted.error }); return; }
+      announce();
+      json(res, 200, { active: reverted.active });
+    } else {
+      const restored = store.restore(person, body.sha);
+      if (!restored.ok) { json(res, restored.status, { error: restored.error }); return; }
+      announce();
+      json(res, 200, { active: restored.active });
+    }
+  })().catch(fail);
+  return true;
+}
+
+/** #1629: static current-placement posters, separate from the local human-only runtime API. */
+function handleEffectPosters(res: ServerResponse, url: URL, ctx: WebApiContext, path: string, method: string): boolean {
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  const image = /^\/ui\/effect-posters\/([0-9a-f]{32})\.png$/.exec(path);
+  const names = [...url.searchParams.keys()], instance = url.searchParams.get("instance");
+  if (method !== "GET" || path !== "/ui/effect-posters" && !image || names.length !== 1 || names[0] !== "instance" || !instance || instance.length > 128) {
+    json(res, 404, { error: "not_found" }); return true;
+  }
+  const service = ctx.effectService;
+  if (!service) { json(res, 404, { error: "effects_unavailable" }); return true; }
+  if (image) {
+    const r = service.placedPoster(image[1]!, instance);
+    if (!r.ok) json(res, 404, { error: "not_found" });
+    else { res.writeHead(200, { "Content-Type": "image/png", "Content-Security-Policy": "default-src 'none'; sandbox" }); res.end(r.bytes); }
+  } else {
+    const result = service.posterPlacements(instance);
+    json(res, result.error === "themes_unreadable" ? 503 : result.error ? 404 : 200, result);
+  }
+  return true;
+}
+
+/** #1629 Try: separate local-admin routes. These never borrow ordinary read-tier/placement authority. */
+function handleEffectTrials(req: IncomingMessage, res: ServerResponse, url: URL, ctx: WebApiContext, path: string, method: string): boolean {
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  const reading = method === "GET";
+  if (gatewayRequestContext(req)) { json(res, reading ? 404 : 403, { error: "trials_not_over_public_link" }); return true; }
+  const who = (): { actor: Omit<EffectTrialActor, "ownerCss"> & { ownerCss: "off" | "on" | "unknown" }; record: SessionRecord; sessions: WebSessionStore | null | undefined } | { error: string; status: number } => {
+    const sessions = ctx.webSessions;
+    const v = evaluateWebRequest(req as unknown as WebGateRequest, url, ctx.webToken ?? null, sessions, { touch: false });
+    if (v.kind !== "allow") return { error: WEB_TOKEN_INVALID_MESSAGE, status: 401 } as const;
+    if (v.via !== "session" || v.session.tier !== "admin" || v.session.surface !== "local") return { error: "trials_need_a_local_admin", status: 403 } as const;
+    const person = webPersonKey(v.session.owner);
+    let css: "off" | "on" | "unknown" = "unknown";
+    try { const value = ctx.ownerCss?.effectState(person); if (value === "off" || value === "on") css = value; } catch { /* unavailable is never off */ }
+    // CSS remains a checked runtime value. The authority refuses anything except off on start/read.
+    const actor = Object.freeze({ via: "session" as const, surface: "local" as const, tier: "admin" as const, sessionHash: v.session.idHash, epoch: v.session.handle, person, ownerCss: css });
+    return { actor, record: v.session, sessions };
+  };
+  const first = who(); if ("error" in first) { json(res, first.status, { error: first.error }); return true; }
+  const service = ctx.effectService; if (!service) { json(res, 404, { error: "trials_unavailable" }); return true; }
+  const start = path === "/ui/effect-trials/start";
+  const route = /^\/ui\/effect-trials\/([0-9a-f]{32})\/(resource|poster\.png|profile|stop)$/.exec(path);
+  const resource = reading && route && ["resource", "poster.png", "profile"].includes(route[2]!);
+  const stop = method === "POST" && route?.[2] === "stop";
+  if (!(resource || stop || method === "POST" && start)) { json(res, 404, { error: "not_found" }); return true; }
+  const allowed = resource ? ["ownerEpoch", "instance"] : ["ownerEpoch"];
+  if ([...url.searchParams.keys()].some(k => !allowed.includes(k)) || allowed.some(k => url.searchParams.getAll(k).length !== 1)
+    || url.searchParams.get("ownerEpoch") !== first.actor.epoch) { json(res, reading ? 404 : 409, { error: reading ? "not_found" : "trials_person_changed" }); return true; }
+  const instance = url.searchParams.get("instance") ?? "";
+  const answer = (result: Record<string, unknown>) => json(res, result.error ? result.error === "not_found" ? 404
+    : ["profiles_unreadable", "profiles_busy", "profiles_write_failed"].includes(String(result.error)) ? 503 : 400 : 200, result);
+  if (resource) {
+    if (route[2] === "poster.png") {
+      const result = service.trialPoster(route[1]!, instance, first.actor);
+      if (!result.ok) json(res, 404, { error: "not_found" });
+      else { res.writeHead(200, { "Content-Type": "image/png", "Content-Security-Policy": "default-src 'none'; sandbox" }); res.end(result.bytes); }
+    } else answer(route[2] === "profile" ? service.trialProfile(route[1]!, instance, first.actor) : service.trialResource(route[1]!, instance, first.actor));
+    return true;
+  }
+  (async () => {
+    let bytes: Buffer;
+    try { bytes = await readBoundedWebBody(req, 16 * 1024); } catch { json(res, 413, { error: "trial_body_bound" }); return; }
+    if (!permitWebContinuation(req, res, ctx)) return;
+    const now = who(); if ("error" in now) { json(res, now.status, { error: now.error }); return; }
+    if (now.record !== first.record || now.sessions !== first.sessions || now.actor.sessionHash !== first.actor.sessionHash
+      || now.actor.person !== first.actor.person || now.actor.epoch !== first.actor.epoch) { json(res, 409, { error: "trials_person_changed" }); return; }
+    let body: unknown; try { body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { json(res, 400, { error: "trial_json" }); return; }
+    if (start) {
+      const parsed = z.strictObject({ offer: z.string().regex(/^[0-9a-f]{32}$/), instance: z.string().min(1).max(128) }).safeParse(body);
+      if (!parsed.success) { json(res, 400, { error: "trial_args" }); return; }
+      answer(service.trialStart(parsed.data.offer, parsed.data.instance, now.actor));
+    } else {
+      if (!z.strictObject({}).safeParse(body).success) { json(res, 400, { error: "trial_args" }); return; }
+      answer(service.trialStop(route![1]!, now.actor));
+    }
+  })().catch(() => { try { json(res, 500, { error: "trial_request_failed" }); } catch { /* response ended */ } });
+  return true;
+}
+
+/** #1629 B2: effect routes require a human session; route bodies never supply an actor or reference holder. */
+function handleEffects(req: IncomingMessage, res: ServerResponse, url: URL, ctx: WebApiContext, path: string, method: string): boolean {
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  const reading = method === "GET";
+  // Reports are bounded untrusted diagnostics, not an appearance or admission write (r2 §6).
+  const profilePost = method === "POST" && /^\/ui\/effects\/profile\/[0-9a-f]{32}$/.test(path);
+  if (gatewayRequestContext(req)) { json(res, reading ? 404 : 403, { error: "effects_not_over_public_link" }); return true; }
+  const who = (): { person: string; canWrite: boolean; epoch: string } | { status: number; error: string } => {
+    const verdict = evaluateWebRequest(req as unknown as WebGateRequest, url, ctx.webToken ?? null, ctx.webSessions, { touch: false });
+    if (verdict.kind !== "allow") return { status: 401, error: WEB_TOKEN_INVALID_MESSAGE };
+    if (verdict.via !== "session" || !verdict.session) return { status: 403, error: "effects_need_a_signed_in_person" };
+    if (!reading && !profilePost && verdict.session.tier !== "admin") return { status: 403, error: "effects_read_only" };
+    return { person: webPersonKey(verdict.session.owner), canWrite: verdict.session.tier === "admin", epoch: verdict.session.handle };
+  };
+  const first = who(); if ("status" in first) { json(res, first.status, { error: first.error }); return true; }
+  const service = ctx.effectService; if (!service) { json(res, 404, { error: "effects_unavailable" }); return true; }
+  const unavailable = new Set(["themes_unreadable", "profiles_unreadable", "library_unreadable", "references_unreadable", "library_busy", "profiles_busy", "profiles_write_failed", "library_write_failed", "prefs_unreadable"]);
+  const answer = (result: Record<string, unknown>) => json(res, typeof result.error === "string" ? result.error === "not_found" ? 404 : result.error === "profile_rate_limited" ? 429 : unavailable.has(result.error) ? 503 : 400 : 200, result);
+  const idPath = /^\/ui\/effects\/(resource|profile)\/([0-9a-f]{32})$/.exec(path);
+  const instance = url.searchParams.get("instance") ?? undefined, slot = url.searchParams.get("slot");
+  if (slot !== null && instance !== undefined) { json(res, 404, { error: "not_found" }); return true; }
+  const runtimeRead = reading && (slot !== null || path === "/ui/effects/owner" || path === "/ui/effects/placements" || idPath?.[1] === "resource" || instance !== undefined && /^\/ui\/effects\/image\//.test(path));
+  if ((runtimeRead || profilePost) && (url.searchParams.getAll("ownerEpoch").length !== 1 || url.searchParams.get("ownerEpoch") !== first.epoch)) {
+    const privateResource = reading && (slot !== null || idPath?.[1] === "resource" || /^\/ui\/effects\/image\//.test(path));
+    json(res, privateResource ? 404 : 409, { error: privateResource ? "not_found" : "effects_person_changed" }); return true;
+  }
+  if (reading) {
+    const image = /^\/ui\/effects\/image\/([0-9a-f]{32})\/(poster|cursor)\.png$/.exec(path);
+    if (image) {
+      const r = slot === null ? service.image(first.person, image[1]!, image[2] as "poster" | "cursor", instance) : service.ownerImage(first.person, image[1]!, image[2] as "poster" | "cursor", slot);
+      if (!r.ok) json(res, 404, { error: "not_found" });
+      else { res.writeHead(200, { "Content-Type": "image/png", "Content-Security-Policy": "default-src 'none'; sandbox" }); res.end(r.bytes); }
+      return true;
+    }
+    if (path === "/ui/effects") answer({ ...service.list(first.person), canWrite: first.canWrite });
+    else if (path === "/ui/effects/owner" && instance === undefined && slot === null) answer(service.ownerSelections(first.person));
+    else if (path === "/ui/effects/placements" && instance !== undefined) answer(service.placements(first.person, instance));
+    else if (idPath?.[1] === "resource") answer(slot === null ? service.resource(first.person, idPath[2]!, instance) : service.ownerResource(first.person, idPath[2]!, slot));
+    else if (idPath?.[1] === "profile" && instance === undefined) answer(service.profile(first.person, idPath[2]!));
+    else json(res, 404, { error: "not_found" });
+    return true;
+  }
+  const deletion = /^\/ui\/effects\/([0-9a-f]{32})$/.exec(path);
+  if (method === "DELETE" && deletion) { answer(service.delete(first.person, deletion[1]!)); return true; }
+  if (method !== "POST" || !["/ui/effects/upload", "/ui/effects/apply", "/ui/effects/remove", "/ui/effects/share"].includes(path) && idPath?.[1] !== "profile") { json(res, 404, { error: "not_found" }); return true; }
+  (async () => {
+    let bytes: Buffer;
+    try { bytes = await readBoundedWebBody(req, path === "/ui/effects/upload" ? EFFECT_WIRE_LIMIT : 16 * 1024); }
+    catch { json(res, 413, { error: "effect_body_bound" }); return; }
+    if (!permitWebContinuation(req, res, ctx)) return;
+    const now = who(); if ("status" in now) { json(res, now.status, { error: now.error }); return; }
+    if (now.person !== first.person || now.epoch !== first.epoch) { json(res, 409, { error: "effects_person_changed" }); return; }
+    if (path === "/ui/effects/upload") { answer(service.upload(now.person, bytes)); return; }
+    let body: unknown; try { body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { json(res, 400, { error: "effect_json" }); return; }
+    if (path === "/ui/effects/apply") answer(service.apply(now.person, body));
+    else if (path === "/ui/effects/remove") answer(service.remove(now.person, body));
+    else if (path === "/ui/effects/share") answer(service.share(now.person, body));
+    else answer(service.report(now.person, idPath![2]!, body, instance));
+  })().catch(() => { try { json(res, 500, { error: "effect_request_failed" }); } catch { /* response ended */ } });
+  return true;
+}
+
+/**
+ * #1629 r4 §4 (r4-5): mods — a person's import (stage, then commit), uninstall and export. Every route is a signed-in
+ * session's, writes an admin's: never the CLI's header token (the way an agent could reach it) and never the public link
+ * (absent from its manifest, and refused here too). `who()` is asked first and again once a body is in.
+ */
+function handleMods(req: IncomingMessage, res: ServerResponse, url: URL, ctx: WebApiContext, path: string, method: string): boolean {
+  const mods = ctx.mods;
+  if (!mods) { json(res, 404, { error: "Mods are not kept on this fleet" }); return true; }
+  const reading = method === "GET";
+  if (gatewayRequestContext(req)) { json(res, reading ? 404 : 403, { error: "mods_not_over_public_link" }); return true; }
+  const who = (): { person: string } | { status: number; error: string } => {
+    const verdict = evaluateWebRequest(req as unknown as WebGateRequest, url, ctx.webToken ?? null, ctx.webSessions, { touch: false });
+    if (verdict.kind !== "allow") return { status: 401, error: WEB_TOKEN_INVALID_MESSAGE };
+    if (verdict.via !== "session" || !verdict.session) return { status: 403, error: "mods_need_a_signed_in_session" };
+    if (!reading && verdict.session.tier !== "admin") return { status: 403, error: "mods_need_an_admin_session" };
+    return { person: webPersonKey(verdict.session.owner) };
+  };
+  const first = who();
+  if ("status" in first) { json(res, first.status, { error: first.error }); return true; }
+  const again = (): string | null => {
+    if (!permitWebContinuation(req, res, ctx)) return null;
+    const now = who();
+    if ("status" in now) { json(res, now.status, { error: now.error }); return null; }
+    if (now.person !== first.person) { json(res, 409, { error: "mods_person_changed" }); return null; }
+    return now.person;
+  };
+  const answer = (r: { ok: boolean; status?: number; error?: string; detail?: string; problems?: unknown }, body: unknown) => {
+    if (r.ok) json(res, 200, body);
+    else json(res, r.status ?? 500, { error: r.error, ...(r.detail ? { detail: r.detail } : {}), ...(r.problems ? { problems: r.problems } : {}) });
+  };
+  const fail = (err: unknown) => {
+    ctx.logger.error({ err: (err as Error).message }, "Mod request failed");
+    try { json(res, 500, { error: "Mod request failed" }); } catch { /* already answered */ }
+  };
+
+  if (path === "/ui/mods" && method === "GET") { json(res, 200, { ...mods.list(), staged: mods.staged(first.person), proposals: mods.proposals() }); return true; }
+  // A staged mod's picture (this session's person's stage only): the plan shows the actual pictures before install.
+  const stagedPic = /^\/ui\/mods\/staged\/([0-9a-f]{32})$/.exec(path);
+  if (stagedPic && method === "GET") {
+    const pic = mods.stagedPicture(first.person, stagedPic[1]!);
+    if (!pic) { json(res, 404, { error: "No such image" }); return true; }
+    res.writeHead(200, { "Content-Type": pic.mime, "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store", "Content-Security-Policy": "default-src 'none'; sandbox" });
+    res.end(Buffer.from(pic.bytes));
+    return true;
+  }
+  const fileMatch = /^\/ui\/mods\/file\/([0-9a-f]{32})$/.exec(path);
+  if (fileMatch && method === "GET") {
+    const text = mods.bundleText(fileMatch[1]!);
+    const rec = mods.list().mods.find(m => m.id === fileMatch[1]);
+    if (text === null || !rec) { json(res, 404, { error: "no_such_mod" }); return true; }
+    // The file is the installed bundle, effects and all — also effects its import left out, which nobody installed.
+    // So the export ACL judges what the file carries, not what was installed: it downloads only when this person may
+    // read every effect in it (their own claim on that content, or a shared one). A file without effects is any admin's.
+    const fx = mods.bundleEffects(fileMatch[1]!);
+    if (fx === "unknown" || (fx ?? []).some(id => !ctx.modPlacedEffect?.(first.person, id))) { json(res, 403, { error: "mod_effects_not_yours", detail: "this mod's file carries effects that are not yours to share: export your own look instead" }); return true; }
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store",
+      "Content-Disposition": `attachment; filename="${rec.name}-${rec.version}.agendmod.json"` });
+    res.end(text);
+    return true;
+  }
+  if (method !== "POST" || !["/ui/mods/stage", "/ui/mods/abort", "/ui/mods/commit", "/ui/mods/uninstall", "/ui/mods/export", "/ui/mods/proposal/stage", "/ui/mods/proposal/dismiss"].includes(path)) {
+    json(res, 404, { error: "not found" });
+    return true;
+  }
+  (async () => {
+    if (path === "/ui/mods/stage") {
+      // Too large by its own declared length: answered before a byte is read (the body is drained, not cut off).
+      if (Number(req.headers["content-length"]) > MOD_MAX_BYTES) { req.resume(); json(res, 413, { error: "mod_too_large", detail: `at most ${MOD_MAX_BYTES / 1024 / 1024} MiB` }); return; }
+      let raw: Buffer;
+      try { raw = await readBoundedWebBody(req, MOD_MAX_BYTES); } catch { json(res, 413, { error: "mod_too_large", detail: `at most ${MOD_MAX_BYTES / 1024 / 1024} MiB` }); return; }
+      const person = again();
+      if (!person) return;
+      let text: string;
+      try { text = new TextDecoder("utf-8", { fatal: true }).decode(raw); } catch { json(res, 400, { error: "mod_invalid", problems: [{ path: "", problem: "not UTF-8" }] }); return; }
+      const r = mods.stage(person, text);
+      answer(r, r.ok ? { stage: r.stage, plan: r.plan, plan_hash: r.plan_hash } : null);
+      return;
+    }
+    let body: Record<string, unknown>;
+    try { body = await parseBody(req); } catch { json(res, 400, { error: "Invalid JSON" }); return; }
+    const person = again();
+    if (!person) return;
+    if (!body || typeof body !== "object" || Array.isArray(body)) { json(res, 400, { error: "an object" }); return; }
+    if (path === "/ui/mods/abort") { const r = mods.abort(person, body.stage); answer(r, { ok: true }); return; }
+    // r4-5b: an agent's proposal, opened into the usual review (staged as this person's), or dismissed.
+    if (path === "/ui/mods/proposal/stage") { const r = mods.stageProposal(person, body.instance); answer(r, r.ok ? { stage: r.stage, plan: r.plan, plan_hash: r.plan_hash } : null); return; }
+    if (path === "/ui/mods/proposal/dismiss") { const r = mods.dismiss(body.instance); answer(r, { ok: true }); return; }
+    if (path === "/ui/mods/commit") {
+      const r = mods.commit(person, body);
+      if (r.ok) ctx.emitSseEvent("status", ctx.getUiStatus());   // themes_rev and prefs_rev moved: every page re-reads
+      answer(r, r.ok ? { id: r.id, applied: r.applied, ...(r.css ? { css: r.css } : {}) } : null);
+      return;
+    }
+    if (path === "/ui/mods/uninstall") { const r = mods.uninstall(body.id); answer(r, r.ok ? { ok: true, released: r.released } : null); return; }
+    // Export: what is in force now, as a bundle file.
+    const r = exportMod(ctx, person, body);
+    if (!r.ok) { json(res, r.status, { error: r.error, ...(r.detail ? { detail: r.detail } : {}) }); return; }
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store",
+      "Content-Disposition": `attachment; filename="${r.filename}"`, "X-AgEnD-Effects-Omitted": String(r.omitted) });
+    res.end(r.text);
+  })().catch(fail);
+  return true;
+}
+
+/** A person's export: an instance's look (theme, identity, its widgets), their sidebar widget and their own CSS. */
+export function exportMod(ctx: WebApiContext, person: string, body: Record<string, unknown>): { ok: true; text: string; filename: string; omitted: number } | { ok: false; status: number; error: string; detail?: string } {
+  const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+  const inc = isObj(body.include) ? body.include : null;
+  if (!inc) return { ok: false, status: 400, error: "include" };
+  const meta = { name: body.name, version: body.version, title: body.title };
+  if (typeof meta.name !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(meta.name)) return { ok: false, status: 400, error: "name", detail: "a-z, 0-9 and - (1..64)" };
+  if (typeof meta.version !== "string" || !/^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/.test(meta.version)) return { ok: false, status: 400, error: "version", detail: "MAJOR.MINOR.PATCH" };
+  // The importer's own rule (#1897 review): what is exported always imports.
+  const title = canonicalText(meta.title, 1, 60);
+  if (title === null) return { ok: false, status: 400, error: "title", detail: "1..60 characters on one line" };
+  const parts: ModExportParts = {};
+  let omitted = 0;
+  const wantsInstance = inc.theme === true || inc.identity === true || (isObj(inc.widgets) && AGENT_WIDGET_SLOTS.some(s => (inc.widgets as Record<string, unknown>)[s] === true));
+  let name: string | null = null;
+  if (wantsInstance) {
+    if (typeof body.instance !== "string" || !ctx.isKnownInstance?.(body.instance) || !ctx.themeStore) return { ok: false, status: 400, error: "instance" };
+    name = body.instance;
+  }
+  if (name && ctx.themeStore) {
+    const store = ctx.themeStore;
+    const rec = store.get(name);
+    if (inc.theme === true) {
+      // The effects the theme places travel with it, as the library keeps them (a person may export what is placed).
+      // Only effects this person may carry away travel (Sol's ACL); the rest are counted, never packaged.
+      const effects = rec.placements.effects.flatMap(p => { const e = ctx.modPlacedEffect?.(person, p.id); if (!e) { omitted++; return []; } return [{ name: e.name, files: e.files, params: p.params ?? {} }]; });
+      parts.theme = { theme: rec.theme, picture: id => { const a = rec.assets.find(x => x.id === id); const b = store.asset(name!, id); return a && b ? { bytes: b.bytes, kind: a.kind } : null; }, effects };
+    }
+    if (inc.identity === true) parts.identity = ctx.modCardText?.(name) ?? {};
+    for (const slot of AGENT_WIDGET_SLOTS) {
+      const w = rec.placements.widgets[slot];
+      if (isObj(inc.widgets) && inc.widgets[slot] === true && w) (parts.widgets ??= {})[slot] = { spec: w.spec, data: w.data };
+    }
+  }
+  if (isObj(inc.widgets) && inc.widgets.sidebar === true && ctx.webPrefs) {
+    const v = ctx.webPrefs.read(OPERATOR).values["widget.sidebar"] as { spec?: unknown; data?: unknown } | undefined;
+    const spec = v ? checkWidgetSpec(v.spec, "sidebar") : null;
+    const data = spec?.ok ? checkWidgetData(v!.data, spec.value) : null;
+    if (spec?.ok && data?.ok) (parts.widgets ??= {}).sidebar = { spec: spec.value, data: { ...data.value } };
+  }
+  if (inc.ownerCss === true && ctx.ownerCss) {
+    const state = ctx.ownerCss.state(person);
+    const checked = state.text ? checkOwnerCss(state.text, new Set(state.assets.map(a => a.id))) : null;
+    if (state.text && checked?.ok) {
+      // Only the assets this text names travel (read from its tokens: url("\\61sset:<id>") names one too).
+      const named = ownerCssAssetRefs(checked.tokens);
+      const assets = state.assets.filter(a => named.has(a.id)).flatMap(a => { const b = ctx.ownerCss!.asset(person, a.id); return b ? [{ id: a.id, bytes: b.bytes, kind: a.kind }] : []; });
+      parts.ownerCss = { text: state.text, assets };
+    }
+  }
+  const built = buildModBundle({ name: meta.name, version: meta.version, title }, parts);
+  return built.ok ? { ...built, omitted } : { ok: false, status: built.error === "nothing_to_export" ? 400 : 409, error: built.error };
 }
 
 /** #1827: a web person as the web chat shows them to agents and chats. */
@@ -620,6 +1056,64 @@ export function handleWebRequest(
     return true;
   }
 
+  // ── #1629: agents' themes — read by every page (the public link included: it views them), changed by a person ──
+  // GET /ui/themes: { rev, themes, locked, widgets } when the status frame's themes_rev moves (passive, web-auth.ts).
+  // GET /ui/img/theme/<instance>/<id>: a theme's picture (same headers as #1630's images; the id is the content hash).
+  // POST /ui/themes/<instance>/reset | lock | widget (r4-4: { slot } — take an agent's widget out): a person's, from an admin session — never the CLI token, never the public
+  // link (absent from its manifest, and refused here too).
+  if (method === "GET" && path === "/ui/themes") {
+    const store = ctx.themeStore;
+    if (!store) { json(res, 404, { error: "Themes are not kept on this fleet" }); return true; }
+    json(res, 200, { rev: store.rev(), themes: store.themes(), locked: store.lockedNames(), widgets: store.widgets() });
+    return true;
+  }
+  const themeImage = path.match(/^\/ui\/img\/theme\/([^/]+)\/([0-9a-f]{32})$/);
+  if (method === "GET" && themeImage) {
+    let name: string;
+    try { name = decodeURIComponent(themeImage[1]!); } catch { json(res, 404, { error: "No such image" }); return true; }
+    const image = ctx.themeStore?.asset(name, themeImage[2]!) ?? null;
+    if (!image) { json(res, 404, { error: "No such image" }); return true; }
+    res.setHeader("Content-Type", image.mime);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Cache-Control", "private, max-age=86400");
+    res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
+    res.writeHead(200);
+    res.end(image.bytes);
+    return true;
+  }
+  const themeWrite = path.match(/^\/ui\/themes\/([^/]+)\/(reset|lock|widget)$/);
+  if (method === "POST" && themeWrite) {
+    const service = ctx.webAppearance;
+    if (!service) { json(res, 404, { error: "Themes are not kept on this fleet" }); return true; }
+    if (gatewayRequestContext(req)) { json(res, 403, { error: "theme_not_over_public_link" }); return true; }
+    let name: string;
+    try { name = decodeURIComponent(themeWrite[1]!); } catch { json(res, 400, { error: "instance" }); return true; }
+    const who = (): number => {
+      const verdict = evaluateWebRequest(req as unknown as WebGateRequest, url, ctx.webToken ?? null, ctx.webSessions, { touch: false });
+      if (verdict.kind !== "allow") return 401;
+      return verdict.via === "session" && verdict.session?.tier === "admin" ? 200 : 403;
+    };
+    const first = who();
+    if (first !== 200) { json(res, first, { error: first === 401 ? WEB_TOKEN_INVALID_MESSAGE : "theme_needs_an_admin_session" }); return true; }
+    (async () => {
+      let body: Record<string, unknown> = {};
+      try { body = await parseBody(req); } catch { json(res, 400, { error: "Invalid JSON" }); return; }
+      if (!permitWebContinuation(req, res, ctx)) return;
+      const now = who();
+      if (now !== 200) { json(res, now, { error: now === 401 ? WEB_TOKEN_INVALID_MESSAGE : "theme_needs_an_admin_session" }); return; }
+      if (!ctx.isKnownInstance?.(name)) { json(res, 404, { error: "unknown instance" }); return; }
+      const r = themeWrite[2] === "reset" ? service.humanReset(name)
+        : themeWrite[2] === "widget" ? service.humanRemoveWidget(name, body.slot)
+        : typeof body.locked === "boolean" ? service.humanLock(name, body.locked) : { error: "locked: true or false", status: 400 };
+      if (typeof r.error === "string") { json(res, typeof r.status === "number" ? r.status : 503, { error: r.error }); return; }
+      json(res, 200, r);
+    })().catch(err => {
+      ctx.logger.error({ err: (err as Error).message }, "Theme reset/lock failed");
+      try { json(res, 500, { error: "Theme change failed" }); } catch { /* already answered */ }
+    });
+    return true;
+  }
+
   // ── #1630: avatars and Discord server emoji, same-origin (the page never loads a platform's CDN; img-src stays 'self') ──
 
   const imageMatch = path.match(/^\/ui\/img\/(bot|avatar|emoji)\/([^/]+)$/);
@@ -761,28 +1255,20 @@ export function handleWebRequest(
     return true;
   }
 
-  // #1665: the web preferences that follow the person between devices. Read by any page of the panel, the public link
-  // included (it reads what is in force); written only by a signed-in admin session or the CLI's header token — never
-  // over the public link (absent from its route manifest, and refused here too), never by a read-only session.
+  // Host preferences preserve their scope; only five declared owner slots use the current human session bucket.
   if (path === "/ui/prefs" && method === "GET") {
     if (!ctx.webPrefs) { json(res, 404, { error: "Preferences are not kept on this fleet" }); return true; }
-    json(res, 200, ctx.webPrefs.read(OPERATOR));
-    return true;
+    const viewer = prefsViewer(req, url, ctx); if (!viewer) { json(res, 401, { error: WEB_TOKEN_INVALID_MESSAGE }); return true; }
+    res.setHeader("Cache-Control", "private, no-store");
+    json(res, 200, prefsView(ctx.webPrefs, viewer)); return true;
   }
   if (path === "/ui/prefs" && method === "POST") {
     const prefs = ctx.webPrefs;
     if (!prefs) { json(res, 404, { error: "Preferences are not kept on this fleet" }); return true; }
     if (gatewayRequestContext(req)) { json(res, 403, { error: "prefs_not_over_public_link" }); return true; }
-    // Who may write, asked now and again once the body is in: a session revoked or expired, or a token rotated, while
-    // the body was on its way writes nothing and announces nothing.
-    const writer = (): number => {
-      const verdict = evaluateWebRequest(req as unknown as WebGateRequest, url, ctx.webToken ?? null, ctx.webSessions, { touch: false });
-      if (verdict.kind !== "allow") return 401;
-      return verdict.via === "session" && verdict.session?.tier !== "admin" ? 403 : 200;
-    };
-    const refuse = (code: number) => json(res, code, code === 401 ? { error: WEB_TOKEN_INVALID_MESSAGE } : { error: "prefs_read_only" });
-    const first = writer();
-    if (first !== 200) { refuse(first); return true; }
+    const refuse = (viewer: PrefsViewer | null) => json(res, viewer ? 403 : 401, { error: viewer ? "prefs_read_only" : WEB_TOKEN_INVALID_MESSAGE });
+    const first = prefsViewer(req, url, ctx);
+    if (!first?.canWrite) { refuse(first); return true; }
     (async () => {
       let body: Record<string, unknown>;
       try { body = await parseBody(req); } catch { json(res, 400, { error: "Invalid JSON" }); return; }
@@ -790,20 +1276,46 @@ export function handleWebRequest(
       if (!body || typeof body !== "object" || Array.isArray(body)) { json(res, 400, { error: "set required" }); return; }
       const parsed = prefs.parsePatch(body.set);
       if (!parsed.ok) { json(res, 400, { error: parsed.error }); return; }
-      const now = writer();
-      if (now !== 200) { refuse(now); return; }
-      const onlyIfUnset = body.onlyIfUnset === true;
-      const written = prefs.write(OPERATOR, parsed.patch, { onlyIfUnset });
+      const now = prefsViewer(req, url, ctx);
+      if (!now?.canWrite) { refuse(now); return; }
+      if (now.person !== first.person || now.epoch !== first.epoch || now.via !== first.via) { json(res, 409, { error: "prefs_person_changed" }); return; }
+      const personal = [...parsed.patch.keys()].some(isOwnerEffectKey);
+      if (personal && now.person === null) { json(res, 403, { error: "prefs_need_a_signed_in_person" }); return; }
+      // A scope marker rejects a queued old page after a different login, including the same person's new session.
+      // It supplies neither identity nor authority; the current verified session still chooses the bucket.
+      if (personal && body.ownerEpoch !== now.epoch) { json(res, 409, { error: "prefs_person_changed" }); return; }
+      const before = prefs.readForViewer(now.person);
+      const written = prefs.writeForViewer(now.person, parsed.patch, { onlyIfUnset: body.onlyIfUnset === true,
+        validateEffect: (person, key, id) => ctx.effectService ? ctx.effectService.validateOwnerSelection(person, key, id) : "effects_unavailable" });
       if (!written.ok) { json(res, written.status, { error: written.error }); return; }
-      // Another device sees the new rev in the next status frame — at once on the live stream.
+      const dropped = written.changed.filter(isOwnerEffectKey).flatMap(key => typeof before.values[key] === "string" && before.values[key] !== written.view.values[key] ? [before.values[key] as string] : []);
+      if (dropped.length) ctx.effectService?.collectOwnerReplaced(dropped);
       if (written.changed.length) ctx.emitSseEvent("status", ctx.getUiStatus());
-      json(res, 200, { ...written.view, changed: written.changed });
+      json(res, 200, { ...written.view, ...prefsScope(now), changed: written.changed });
     })().catch(err => {
       ctx.logger.error({ err: (err as Error).message }, "Saving web preferences failed");
       try { json(res, 500, { error: "Saving preferences failed" }); } catch { /* already answered */ }
     });
     return true;
   }
+
+  // #1629 r4 §3: owner CSS — one person's own stylesheet, for their own screens. Every route is a signed-in human's
+  // session: never the CLI's header token (no person, and the way an agent could reach it), never the public link
+  // (absent from its manifest, and refused here too), reads included. The stylesheet and its assets are that session's
+  // person's only: no name or identity in any URL.
+  if (path === "/ui/owner-css.css" || path === "/ui/owner-css" || path.startsWith("/ui/owner-css/")) {
+    return handleOwnerCss(req, res, url, ctx, path, method);
+  }
+
+  // #1629 r4-5: mods — a person's import, uninstall and export (handleMods: sessions only, never the public link).
+  if (path === "/ui/mods" || path.startsWith("/ui/mods/")) return handleMods(req, res, url, ctx, path, method);
+
+  // Posters remain behind the common session gate, with a closed GET-only public manifest.
+  if (path === "/ui/effect-posters" || path.startsWith("/ui/effect-posters/")) return handleEffectPosters(res, url, ctx, path, method);
+
+  // Canvas effects are absent from the public gateway manifest and independently refused above.
+  if (path === "/ui/effect-trials" || path.startsWith("/ui/effect-trials/")) return handleEffectTrials(req, res, url, ctx, path, method);
+  if (path === "/ui/effects" || path.startsWith("/ui/effects/")) return handleEffects(req, res, url, ctx, path, method);
 
   // #1386: Acknowledge a "Needs you" delivery item — a session write (CSRF, checked by the gate) or the CLI's header
   // token. Who did it is recorded by principal: the session's public handle, never the session id or a credential.
@@ -1639,6 +2151,10 @@ export interface AppShellContext {
   readonly fleetConfig?: { web?: { usage_panel?: boolean; log_tab?: boolean; upload_max_file_mb?: number; upload_max_total_mb?: number } } | null;
   /** #1665: the host's theme and language go into the page itself, so a device paints them before any script reads. */
   readonly webPrefs?: WebPrefsStore;
+  /** #1629 r4 §3: which owner CSS this load's person has in force (data-owner-css), for a signed-in human session only. */
+  readonly ownerCss?: OwnerCssStore;
+  readonly webToken?: string | null;
+  readonly webSessions?: WebApiContext["webSessions"];
 }
 export type AppShellMode = "full" | "view-only";
 
@@ -1713,16 +2229,42 @@ function serveMediaRange(req: IncomingMessage, res: ServerResponse, files: WebFi
  * or replays a tour already seen, a new device included. Only for the signed-in app (the public link reads what is in
  * force too); the anonymous View reader and the sign-in page keep the browser's own.
  */
-function shellHtmlTag(ctx: AppShellContext, mode: AppShellMode): string {
+type PrefsViewer = { person: string | null; epoch: string | null; scope: "none" | "person" | "operator"; canWrite: boolean; via: string };
+function prefsViewer(req: IncomingMessage, url: URL, ctx: Partial<Pick<WebApiContext, "webToken" | "webSessions">>): PrefsViewer | null {
+  const v = evaluateWebRequest(req as unknown as WebGateRequest, url, ctx.webToken ?? null, ctx.webSessions, { touch: false });
+  if (v.kind !== "allow") return null;
+  if (!gatewayRequestContext(req) && v.via === "session" && v.session) {
+    const person = webPersonKey(v.session.owner);
+    return { person, epoch: v.session.handle, scope: person === OPERATOR ? "operator" : "person", canWrite: v.session.tier === "admin", via: "session" };
+  }
+  return { person: null, epoch: null, scope: "none", canWrite: v.via !== "session" || v.session?.tier === "admin", via: v.via };
+}
+const prefsScope = (v: PrefsViewer | null) => ({ ownerScope: v?.scope ?? "none", ownerEpoch: v?.epoch ?? null });
+const prefsView = (prefs: WebPrefsStore, v: PrefsViewer | null) => ({ ...prefs.readForViewer(v?.person ?? null), ...prefsScope(v) });
+function shellHtmlTag(ctx: AppShellContext, mode: AppShellMode, viewer: PrefsViewer | null): string {
   if (mode !== "full" || !ctx.webPrefs) return '<html lang="en">';
-  const view = ctx.webPrefs.read(OPERATOR);
+  const view = prefsView(ctx.webPrefs, viewer);
   const lang = view.values.lang === "zh-TW" ? "zh-Hant" : "en";
   const attr = (v: string) => v.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
-  return `<html lang="${lang}" data-prefs="${attr(JSON.stringify({ rev: view.rev, values: view.values }))}">`;
+  return `<html lang="${lang}" data-prefs="${attr(JSON.stringify(view))}">`;
 }
 
-function shellBodyTag(req: IncomingMessage, ctx: AppShellContext, mode: AppShellMode): string {
+/**
+ * #1629 r4 §3: the owner CSS this load links (its sha), or null. Only the full app of a signed-in human session — never
+ * the public link, the anonymous View reader, the CLI's header token or the sign-in and setup pages (other panels).
+ */
+function shellOwnerCss(ctx: AppShellContext, mode: AppShellMode, viewer: PrefsViewer | null): string | null {
+  return mode === "full" && viewer?.person !== null && viewer?.person !== undefined && ctx.ownerCss ? ctx.ownerCss.active(viewer.person) : null;
+}
+
+function shellBodyTag(req: IncomingMessage, ctx: AppShellContext, mode: AppShellMode, viewer: PrefsViewer | null): string {
   const p = shellPreview(req, ctx, mode);
+  const ownerCss = shellOwnerCss(ctx, mode, viewer);
+  let ownerCssState: "off" | "on" | "unknown" = "unknown";
+  if (mode === "full" && viewer?.person != null && ctx.ownerCss) {
+    ownerCssState = ctx.ownerCss.effectState(viewer.person);
+    if (ownerCssState === "off" && ownerCss !== null || ownerCssState === "on" && ownerCss === null) ownerCssState = "unknown";
+  }
   const attr = (v: string | null | undefined) => String(v ?? "").replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
   return `<body data-mode="${mode}"${mode === "full" && gatewayRequestContext(req) ? ' data-web-transport="poll"' : ""} data-dashboard-origin="${attr(p?.dashboardOrigin)}" data-preview-origin="${attr(p?.previewOrigin)}"`
     + ` data-preview-boot="${attr(p?.previewOrigin ? p.boot : "")}" data-preview-reason="${attr(p ? p.reason : "Previews are not available on this fleet.")}"`
@@ -1739,6 +2281,8 @@ function shellBodyTag(req: IncomingMessage, ctx: AppShellContext, mode: AppShell
     + ` data-upload-limits="${attr(JSON.stringify(uploadLimits(ctx.fleetConfig?.web, { publicLink: gatewayRequestContext(req) !== undefined })))}"`
     // #1770: the fleet's zone (chat-logs' and fleet.log's), in which the chat reads its message times and days.
     + ` data-fleet-tz="${attr(resolveTz())}"`
+    // #1629 r4 §3: the person's owner CSS in force (a sha), linked by the page unless this device or this load says not.
+    + ` data-owner-css-state="${ownerCssState}"${ownerCss ? ` data-owner-css="${attr(ownerCss)}"` : ""}`
     // #1589: the public link shows attachments as downloads only (no inline text or media): its scope is unchanged.
     + `${gatewayRequestContext(req) ? ' data-public-link="1"' : ""}>`;
 }
@@ -1747,6 +2291,7 @@ function shellBodyTag(req: IncomingMessage, ctx: AppShellContext, mode: AppShell
 export function serveAppShell(req: IncomingMessage, res: ServerResponse, ctx: AppShellContext, mode: AppShellMode): void {
   try {
     const html = readFileSync(join(__dirname, "ui", "app.html"), "utf-8");
+    const viewer = mode === "full" ? prefsViewer(req, new URL(req.url ?? "/", "http://localhost"), ctx) : null;
     const p = shellPreview(req, ctx, mode);
     // #1589: media plays only from this listener's own file route (path-scoped, like frame-src), at the address this page
     // was loaded from (a Host the host guard accepted); never on the public link, nor where no chat is shown.
@@ -1755,8 +2300,9 @@ export function serveAppShell(req: IncomingMessage, res: ServerResponse, ctx: Ap
     const mediaSrc = own ? `${own}/ui/file/` : "'none'";
     // A public-link page frames what its exposure's preview names (the quick-tunnel wildcard: its host is not known when
     // the page may load); every other page frames exactly the origin this load chose (#1723).
-    const frameSrc = p && "frameSrc" in p ? p.frameSrc : p?.previewOrigin ? `${p.previewOrigin}/frame` : null;
-    sendPanelHtml(res, html.replace('<html lang="en">', shellHtmlTag(ctx, mode)).replace("<body>", shellBodyTag(req, ctx, mode)), 200, {}, { ...(frameSrc ? { frameSrc } : {}), mediaSrc });
+    const frameSrc = p && "frameSrc" in p ? p.frameSrc : p?.previewOrigin
+      ? `${p.previewOrigin}/frame${mode === "full" && !gatewayRequestContext(req) ? ` ${p.previewOrigin}/effect` : ""}` : null;
+    sendPanelHtml(res, html.replace('<html lang="en">', shellHtmlTag(ctx, mode, viewer)).replace("<body>", shellBodyTag(req, ctx, mode, viewer)), 200, {}, { ...(frameSrc ? { frameSrc } : {}), mediaSrc });
   } catch {
     json(res, 500, { error: "app.html not found" });
   }

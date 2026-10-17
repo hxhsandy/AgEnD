@@ -14,6 +14,10 @@ import { gatewayRequestContext } from "./web-request-context.js";
  *   GET  /api/avatar/:instance  → avatar image
  *   POST /api/avatar/:instance  → upload avatar               (signed in)
  *   DELETE /api/avatar/:instance → remove the uploaded avatar (signed in; #1630 follow-up)
+ *   GET  /api/card/:instance    → the identity card as drawn: the person's fields over the agent's (#1629 r4 §1)
+ *   GET  /api/card/:instance/:slot → its portrait or banner (slot = portrait | banner)
+ *   POST|DELETE /api/card/:instance/:slot → the person's picture  (signed in; the public link too, r4.1 Q2)
+ *   DELETE /api/card/:instance  → "Clear card": the person's fields  (signed in; the public link too)
  *   GET/POST /api/sort-order    → sidebar order               (POST: signed in)
  *
  * Auth: reads follow `web.view_access` — `open` (the default; the page is a
@@ -41,6 +45,10 @@ import { getTmuxSession } from "./config.js";
 import { getTmuxSocketName } from "./paths.js";
 import { evaluateWebRequest, type WebGateRequest } from "./web-auth.js";
 import type { WebSessionStore } from "./web-session.js";
+import { CARD_SLOTS, type CardSlot, HumanCardStore, resolveCard } from "./web-card.js";
+import { IdentityColorStore } from "./web-identity-color.js";
+import { effectiveAppearanceLimits } from "./web-appearance-limits.js";
+import type { ThemeCard } from "./web-theme.js";
 
 const execFileP = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -62,6 +70,10 @@ export interface ViewApiContext {
   resolveInstanceModel?(name: string): { model: string };
   /** #1306: the preview origin chosen for a signed-in shell load (the same hook web-api.ts uses). */
   previewForUi?: AppShellContext["previewForUi"];
+  /** #1629 r4 §1: the agent's side of the identity card (theme.card) and its pictures. */
+  readonly themeStore?: { get(name: string): { theme: { card?: ThemeCard } }; asset(name: string, id: string): { bytes: Buffer; mime: string } | null };
+  /** #1958: a profile, card or colour write landed — every open page repaints (a status frame), not only the writer's. */
+  identityChanged?(): void;
 }
 
 interface ProfileRow {
@@ -107,6 +119,34 @@ export function profileIdentities(dataDir: string): Map<string, Pick<ProfileRow,
     const rows = profileDb(dataDir).prepare("SELECT instance_name, display_name, description, role, avatar_path FROM instance_profile").all() as ProfileRow[];
     return new Map(rows.map(r => [r.instance_name, r]));
   } catch { return new Map(); }
+}
+
+/** The person's side of the identity card (#1629 r4 §1), in profiles.db's own table. */
+let _cards: { dir: string; store: HumanCardStore } | null = null;
+function cardStore(ctx: { dataDir: string }): HumanCardStore {
+  if (_cards?.dir !== ctx.dataDir) _cards = { dir: ctx.dataDir, store: new HumanCardStore(ctx.dataDir, () => profileDb(ctx.dataDir)) };
+  return _cards.store;
+}
+/** #1958: the people's identity colours, in profiles.db's own table (instance_color). */
+let _colors: { dir: string; store: IdentityColorStore } | null = null;
+function colorStore(ctx: { dataDir: string }): IdentityColorStore {
+  if (_colors?.dir !== ctx.dataDir) _colors = { dir: ctx.dataDir, store: new IdentityColorStore(() => profileDb(ctx.dataDir)) };
+  return _colors.store;
+}
+/** Every person-picked colour, for a status read (never creates profiles.db or its table). */
+export function identityColors(dataDir: string): ReturnType<typeof IdentityColorStore.all> {
+  return IdentityColorStore.all(dataDir, () => profileDb(dataDir));
+}
+/** The card picture drawn for `slot`: the person's, else the agent's (the same rule as the card's JSON). */
+export function cardPicture(ctx: { dataDir: string; themeStore?: ViewApiContext["themeStore"] }, name: string, slot: CardSlot): { bytes: Buffer; mime: string } | null {
+  const own = cardStore(ctx).picture(name, slot);
+  if (own) return { bytes: own.bytes, mime: own.mime };
+  const agentId = ctx.themeStore?.get(name).theme.card?.[slot];
+  return agentId ? ctx.themeStore?.asset(name, agentId) ?? null : null;
+}
+/** Every person-set card, for a status read (never creates profiles.db or its table). */
+export function humanCards(dataDir: string): ReturnType<typeof HumanCardStore.all> {
+  return HumanCardStore.all(dataDir, () => profileDb(dataDir));
 }
 
 // Lazy per-dataDir SQLite handle for instance profiles.
@@ -233,6 +273,7 @@ export function isViewPath(path: string): boolean {
     || path === "/api/profiles"
     || path.startsWith("/api/profile/")
     || path.startsWith("/api/avatar/")
+    || path.startsWith("/api/card/")
     || path === "/api/sort-order";
 }
 
@@ -308,6 +349,7 @@ export function handleViewRequest(
       effort: string | null;
       effort_source: string | null;
       display_name?: string;
+      card_v?: string;
     }> };
     const live = new Map(ui.instances.map(i => [i.name, i]));
     const db = profileDb(ctx.dataDir);
@@ -346,6 +388,8 @@ export function handleViewRequest(
         avatar_path: p?.avatar_path ?? null,
         description: identity.description,
         has_avatar: !!p?.avatar_path,
+        // #1629 r4 §1: the identity card's version (the status frame's): View reads the card when it moves.
+        ...(l?.card_v ? { card_v: l.card_v } : {}),
       };
     });
     json(res, 200, roster);
@@ -398,7 +442,9 @@ export function handleViewRequest(
       const db = profileDb(ctx.dataDir);
       const row = (db.prepare("SELECT * FROM instance_profile WHERE instance_name = ?").get(name) as ProfileRow | undefined)
         ?? { instance_name: name, display_name: null, avatar_path: null, role: null, description: null, updated_at: 0 };
-      json(res, 200, row);
+      // #1958: the person's choice (null fields: not chosen — the agent's, the bot's, the host's or the automatic one shows).
+      const pick = colorStore(ctx).get(name);
+      json(res, 200, { ...row, color: pick.color, color_show: pick.show });
       return true;
     }
 
@@ -418,16 +464,103 @@ export function handleViewRequest(
           if (v !== null && typeof v !== "string") { json(res, 400, { error: `${key} must be a string` }); return; }
           set.push([key, typeof v === "string" && v.trim() ? v : null]);
         }
-        if (!set.length) { json(res, 200, { ok: true }); return; }
+        // #1629 r4 §1: the card's tagline and bio (the person's — they win over the agent's, field by field). Checked
+        // before anything is written, so a bad one changes nothing.
+        const cardText: { tagline?: unknown; bio?: unknown } = {};
+        if (Object.hasOwn(body, "card_tagline")) cardText.tagline = body.card_tagline;
+        if (Object.hasOwn(body, "card_bio")) cardText.bio = body.card_bio;
+        // #1958: the identity colour (a preset or #rrggbb; null or "" resets it) and where it shows (color_show: a list
+        // of name / bar / ring, [] for nowhere; null resets it) — checked before anything is written.
+        const identity: { color?: unknown; show?: unknown } = {};
+        if (Object.hasOwn(body, "color")) identity.color = body.color;
+        if (Object.hasOwn(body, "color_show")) identity.show = body.color_show;
+        const idCheck = colorStore(ctx).check(identity);
+        if (!idCheck.ok) { json(res, idCheck.status, { error: idCheck.error, detail: idCheck.detail }); return; }
+        const texts = cardText.tagline !== undefined || cardText.bio !== undefined;
+        const ids = identity.color !== undefined || identity.show !== undefined;
+        if (!texts && !ids && !set.length) { json(res, 200, { ok: true }); return; }
+        // Fable #1966 P3: the card text, the identity choice and the profile row in one transaction (all profiles.db):
+        // a write that fails takes the others back with it, so the answer is never "failed" with part of it applied.
         const db = profileDb(ctx.dataDir);
-        // Column names come only from the fixed list above; avatar_path is the avatar route's — never touched here.
-        const cols = set.map(([k]) => k);
-        db.prepare(`INSERT INTO instance_profile (instance_name, ${cols.join(", ")}, updated_at)
-          VALUES (@n, ${cols.map(c => `@${c}`).join(", ")}, @t)
-          ON CONFLICT(instance_name) DO UPDATE SET ${cols.map(c => `${c} = excluded.${c}`).join(", ")}, updated_at = excluded.updated_at`)
-          .run({ n: name, t: Date.now(), ...Object.fromEntries(set) });
+        // Prism #2003 P2-2: the stores' tables are made before the transaction, so a rollback never leaves this cached
+        // handle believing in tables it does not have.
+        if (texts) cardStore(ctx).get(name);
+        if (ids) colorStore(ctx).get(name);
+        let refused: { status: number; error: string; detail?: string } | null = null;
+        const rollback = new Error("rollback");
+        try {
+          db.transaction(() => {
+            if (texts) { const cw = cardStore(ctx).setText(name, cardText); if (!cw.ok) { refused = cw; throw rollback; } }
+            if (ids) { const w = colorStore(ctx).set(name, identity); if (!w.ok) { refused = w; throw rollback; } }
+            if (set.length) {
+              // Column names come only from the fixed list above; avatar_path is the avatar route's — never touched here.
+              const cols = set.map(([k]) => k);
+              db.prepare(`INSERT INTO instance_profile (instance_name, ${cols.join(", ")}, updated_at)
+                VALUES (@n, ${cols.map(c => `@${c}`).join(", ")}, @t)
+                ON CONFLICT(instance_name) DO UPDATE SET ${cols.map(c => `${c} = excluded.${c}`).join(", ")}, updated_at = excluded.updated_at`)
+                .run({ n: name, t: Date.now(), ...Object.fromEntries(set) });
+            }
+          })();
+        } catch (err) {
+          const r = refused as { status: number; error: string; detail?: string } | null;
+          if (err === rollback && r) { json(res, r.status, { error: r.error, ...(r.detail ? { detail: r.detail } : {}) }); return; }
+          json(res, 503, { error: "profile_write_failed", detail: (err as Error).message });
+          return;
+        }
+        try { ctx.identityChanged?.(); } catch { /* the next status frame carries it */ }
         json(res, 200, { ok: true });
       }).catch(err => json(res, 400, { error: (err as Error).message }));
+      return true;
+    }
+    json(res, 405, { error: "method not allowed" });
+    return true;
+  }
+
+  // ── /api/card/:instance[/:slot] (#1629 r4 §1, r4.1 Q2) ──
+  if (path.startsWith("/api/card/")) {
+    const m = /^\/api\/card\/([^/]+)(?:\/(portrait|banner))?$/.exec(path);
+    let name = "";
+    try { name = m ? decodeURIComponent(m[1]!) : ""; } catch { name = ""; }
+    if (!m || !knownInstance(ctx, name)) { json(res, 404, { error: "unknown instance" }); return true; }
+    const slot = m[2] as CardSlot | undefined;
+    const store = cardStore(ctx);
+    if (method === "GET" && !slot) {
+      // The limits in force ride along, so View's editor can fit a picture before it is sent (r4.1 Q3 (b)).
+      const limits = effectiveAppearanceLimits(ctx.fleetConfig?.web?.appearance).limits;
+      const slot = (l: { maxWidth: number; maxHeight: number; maxBytes: number }) => ({ max_width: l.maxWidth, max_height: l.maxHeight, max_bytes: l.maxBytes });
+      json(res, 200, { ...resolveCard(name, store.get(name), ctx.themeStore?.get(name).theme.card), limits: { portrait: slot(limits.portrait), banner: slot(limits.banner) } });
+      return true;
+    }
+    if (method === "GET" && slot) {
+      const pic = cardPicture(ctx, name, slot);
+      if (!pic) { json(res, 404, { error: "no picture" }); return true; }
+      res.writeHead(200, { "Content-Type": pic.mime, "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox", "Cache-Control": "no-cache" });
+      res.end(pic.bytes);
+      return true;
+    }
+    if (method === "POST" && slot) {
+      const limits = effectiveAppearanceLimits(ctx.fleetConfig?.web?.appearance).limits;
+      readBody(req, limits[slot].maxBytes + 1).then(buf => {
+        if (!permitWebContinuation(req, res, ctx)) return;
+        if (buf.length === 0) { json(res, 400, { error: "empty body" }); return; }
+        // The limits in force when it is stored, not when the upload began (#1889 review): the body cap above only
+        // bounded what was received.
+        const w = store.setPicture(name, slot, buf, effectiveAppearanceLimits(ctx.fleetConfig?.web?.appearance).limits);
+        if (!w.ok) { json(res, w.status, { error: w.error, ...(w.detail ? { detail: w.detail } : {}) }); return; }
+        json(res, 200, { ok: true, id: w.id });
+      }).catch(err => json(res, 413, { error: "card_too_large", detail: (err as Error).message }));
+      return true;
+    }
+    if (method === "DELETE" && slot) {
+      const w = store.removePicture(name, slot);
+      if (!w.ok) { json(res, w.status, { error: w.error }); return true; }
+      json(res, 200, { ok: true, removed: w.removed });
+      return true;
+    }
+    if (method === "DELETE" && !slot) {
+      const w = store.clear(name);
+      if (!w.ok) { json(res, w.status, { error: w.error }); return true; }
+      json(res, 200, { ok: true });
       return true;
     }
     json(res, 405, { error: "method not allowed" });

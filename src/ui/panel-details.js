@@ -16,6 +16,10 @@ import { settingsPath } from "/assets/app-route.js";
 import { InstanceSwitch } from "/assets/instance-switch.js";
 import { HeaderTools } from "/assets/header-tools.js";
 import { Menu } from "/assets/ui-menu.js";
+import { themeMenuItems, themesStore } from "/assets/app-themes.js";
+import { colorMenuItem } from "/assets/identity-color.js";
+import { IdentityCard, useCard } from "/assets/identity-card.js";
+import { AgentWidget, instanceBinds, widgetFor } from "/assets/agent-widget.js";
 import { Empty, ErrorState, Skeleton } from "/assets/ui-states.js";
 import { toast } from "/assets/ui-toast.js";
 import "./chat-strings.js";
@@ -27,10 +31,10 @@ export function DetailsPanel({ route, navKey }) {
   const name = route.instance;
   const inst = app.instances.find((i) => i.name === name) || null;
   useEffect(() => { setTitle(`${name} · ${t("app.details")}`); }, [name, navKey]);
-  if (!app.ready) return html`<div class="panel p-details"><${PanelHeader} title=${name} /><div class="panel-body"><${Skeleton} lines=${6} /></div></div>`;
+  if (!app.ready) return html`<div data-effect-panel="details" class="panel p-details"><${PanelHeader} title=${name} /><div data-trust="panel-content" class="panel-body"><${Skeleton} lines=${6} /></div></div>`;
   if (!inst) {
-    return html`<div class="panel p-details"><${PanelHeader} title=${name} />
-      <div class="panel-body center"><${Empty} icon="alert" title=${t("chat.notFound", name)} hint=${t("chat.notFoundHint")}
+    return html`<div data-effect-panel="details" class="panel p-details"><${PanelHeader} title=${name} />
+      <div data-trust="panel-content" class="panel-body center"><${Empty} icon="alert" title=${t("chat.notFound", name)} hint=${t("chat.notFoundHint")}
         action=${html`<button type="button" class="btn only-narrow" onClick=${openDrawer}>${t("chat.backToList")}</button>`} /></div></div>`;
   }
   return html`<${DetailsView} key=${name} name=${name} inst=${inst} navKey=${navKey} exec=${app.exec[name]}
@@ -38,7 +42,10 @@ export function DetailsPanel({ route, navKey }) {
 }
 
 function DetailsView({ name, inst, navKey, exec, awaiting }) {
+  useStore(themesStore);   // #1629: Lock / Unlock follows the themes as read
   const lease = useLease(`details:${name}`);
+  // #1629 r4 §1: the identity card at the top, read when the status frame's card_v moves.
+  const card = useCard(name, inst.card_v);
   const [d, setD] = useState(null);
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState("");
@@ -92,6 +99,8 @@ function DetailsView({ name, inst, navKey, exec, awaiting }) {
     { key: "edit", label: t("chat.dEditInSettings"), icon: "settings", onSelect: editInSettings },
     st === "running" ? { key: "pause", label: t("chat.dPause"), icon: "pause", disabled: !!busy, onSelect: () => pauseWake("pause") } : null,
     st === "paused" ? { key: "wake", label: t("chat.dWake"), icon: "play", disabled: !!busy, onSelect: () => pauseWake("wake") } : null,
+    colorMenuItem(name, inst),   // #1958
+    ...themeMenuItems(name),   // #1629
   ] : [
     { key: "edit", label: t("chat.dEditInSettings"), icon: "settings", onSelect: editInSettings },
     st === "running" ? null : st === "paused" ? null : { key: "start", label: t("chat.start"), icon: "play", disabled: !!busy, onSelect: () => lifecycle("start") },
@@ -99,6 +108,9 @@ function DetailsView({ name, inst, navKey, exec, awaiting }) {
     st === "running" ? { key: "stop", label: t("chat.stopInstance"), icon: "stop", disabled: !!busy, onSelect: () => lifecycle("stop") } : null,
     st === "running" ? { key: "pause", label: t("chat.dPause"), icon: "pause", disabled: !!busy, onSelect: () => pauseWake("pause") } : null,
     st === "paused" ? { key: "wake", label: t("chat.dWake"), icon: "play", disabled: !!busy, onSelect: () => pauseWake("wake") } : null,
+    colorMenuItem(name, inst),   // #1958: its identity colour (the public link too)
+    // #1629: a person's Lock and Reset of this agent's own web theme (not over the public link).
+    ...themeMenuItems(name),
   ];
 
   const cls = statusClass(inst, exec, awaiting);
@@ -141,8 +153,9 @@ function DetailsView({ name, inst, navKey, exec, awaiting }) {
         <span class="mono muted">${a.timestamp ? new Date(`${a.timestamp.replace(" ", "T")}Z`).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}</span>
         <span class="ev">${a.event}</span> ${a.summary || ""}</div>`) : html`<p class="note">${t("chat.dNoActivity")}</p>`}</section>`;
   }
-  return html`<div class="panel p-details">
+  return html`<div data-effect-panel="details" class="panel p-details">
     <${PanelHeader} title=${name} sub=${sub} nav=${html`<${InstanceSwitch} name=${name} current="details" />`}><${HeaderTools} navKey=${navKey} /><${Menu} items=${items} label=${t("app.more")} /></${PanelHeader}>
-    <div class="panel-body"><div class="col" ref=${body}>${busy ? html`<p class="note" role="status">${t("chat.dWorking")}</p>` : null}${content}</div></div>
+    <div data-trust="panel-content" class="panel-body"><div class="col" ref=${body}>${busy ? html`<p class="note" role="status">${t("chat.dWorking")}</p>` : null}<${IdentityCard} name=${name} card=${card} />
+      <${AgentWidget} slot="details" widget=${widgetFor(name, "details")} binds=${instanceBinds(inst, exec, awaiting)} />${content}</div></div>
   </div>`;
 }

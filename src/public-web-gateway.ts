@@ -25,9 +25,18 @@ export function isPublicWebRoute(method: string, path: string): boolean {
   // write, which the page no longer makes, is not offered on the public link either.
   if (method === "POST" && /^\/api\/(profile|avatar)\/[^/]+$/.test(path)) return true;
   if (method === "DELETE" && /^\/api\/avatar\/[^/]+$/.test(path)) return true;   // #1630 follow-up: removing it, as uploading it
+  // #1629 r4.1 Q2: the identity card follows the profile and avatar (the person's card, read and edited here); the
+  // agent's theme, its reset and lock stay off this list.
+  if (reads && /^\/api\/card\/[^/]+(?:\/(?:portrait|banner))?$/.test(path)) return true;
+  if ((method === "POST" || method === "DELETE") && /^\/api\/card\/[^/]+\/(?:portrait|banner)$/.test(path)) return true;
+  if (method === "DELETE" && /^\/api\/card\/[^/]+$/.test(path)) return true;   // Clear card
   if (method === "POST" && (/^\/stop\/[^/]+$/.test(path) || /^\/api\/instance\/[^/]+\/start$/.test(path))) return true;
   if (method === "GET" && /^\/ui\/js\/[a-z0-9_-]+\.js$/.test(path)) return true;
   if (method === "GET" && /^\/ui\/(backends|poll|history|file\/[^/]+|prompts|instance\/[^/]+|instances|tasks(?:\/[^/]+)?|schedules(?:\/[^/]+)?|teams(?:\/[^/]+)?|config|org|cache|prefs|preview-status|steps)$/.test(path)) return true;
+  // #1629: agents' themes and their pictures, read-only — the public link views themes; reset and lock are not here.
+  if (method === "GET" && (path === "/ui/themes" || /^\/ui\/img\/theme\/[^/]+\/[0-9a-f]{32}$/.test(path))) return true;
+  // #1629: static posters only. Runtime resources, library, personal slots and writes stay closed.
+  if (method === "GET" && (path === "/ui/effect-posters" || /^\/ui\/effect-posters\/[0-9a-f]{32}\.png$/.test(path))) return true;
   // #1630: avatars and server emoji, read-only — nothing a signed-in public user cannot already see in the page.
   if (method === "GET" && /^\/ui\/(?:img\/(?:bot|avatar|emoji)\/[^/]+|emojis|mentions)$/.test(path)) return true;
   if (method === "POST" && /^\/ui\/(send|upload|prompt|reply-button|command|needs\/ack|cancel\/[^/]+|stop\/[^/]+|start\/[^/]+|instances\/[^/]+\/delete|restart\/[^/]+|instances|tasks|config)$/.test(path)) return true;

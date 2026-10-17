@@ -1178,3 +1178,56 @@ The sidebar, chat header and Needs-you list each show who an instance is. What s
 Bot avatars and the custom emoji of the fleet's Discord servers are fetched on the host with the bot's own token, kept in `~/.agend/cache/` (refreshed at most once a day; a failed refresh keeps the last copy), and served by the dashboard to signed-in sessions, including the temporary public link, read-only. The page never loads images from Discord or Telegram. Discord server emoji in web chat are served the same way. The status-emoji editor in Settings uses the same cached route too, and the panels' content policy no longer allows any remote image source. In the Settings editor, an emoji from a server the fleet's bots are not in shows as its `:name:`.
 
 Clearing the display name in View's **Edit profile** now removes the override — the name the agent set with `set_display_name` (or the instance name) shows again. Display names cleared before this release recover too.
+## Agents' look on the web: themes, identity cards, widgets, custom CSS and mods (#1629)
+
+Four things change how the dashboard looks, each with its own owner:
+
+- **An agent's theme** (its own chat only): colours for light and dark, an accent, bubble corners and border, a font, a background picture, its own picture and ring colour, and the words it shows while working. The agent sets it with `set_web_theme` and `set_web_theme_asset`; a person can **Lock** or **Reset** it from the chat's or Details' **⋯** menu. While a viewer shows agents' themes, an agent's theme picture comes right after a picture uploaded in **View** in the identity order above.
+- **An identity card** per instance: a portrait, a banner, a tagline and a bio, on Details, in View and folded into the chat. The agent sets its own; a person's field from **Edit profile** wins over the agent's, field by field.
+- **Widgets**: small panels of facts (numbers, progress, a line of text, a list, a badge, a sparkline) drawn by the dashboard's own components from a short spec and values — never HTML, script or CSS. An agent places one in its own chat header and one on its own Details page with `set_web_widget`. Your own goes in the sidebar (Settings → Web appearance), with the fleet's counts.
+- **Your own custom CSS** (Settings → Web appearance): a stylesheet for your own screens only.
+
+What a viewer sees is theirs to choose: **Settings → Web appearance → Show agents' themes, effects and widgets** turns agents' themes and widgets off on all their devices, and `?safe=1` loads any page without themes or custom CSS. Agents can check how they appear with `get_web_appearance` and draw it with `preview_web_appearance`; the `web-appearance` skill walks them through it.
+
+A **mod** is one file that carries such a look: a theme with its pictures, card text, widgets, effects and custom CSS. **Settings → Web appearance → Mods** imports one in two steps, showing everything in it first and applying only the parts you tick, all at once. Custom CSS from a file is never ticked for you. The same card exports a look as a file.
+
+`web.themes.agent_edit: false` refuses every agent's appearance change; `web.appearance` sets the card's upload limits. The details are in [Web dashboard](web-dashboard.md): "Custom CSS", "Agents' themes", "Identity cards", "Widgets" and "Mods".
+
+### Owner effect preferences (2.3 development)
+
+The backend now keeps five owner effect selections (`fx.sidebar`, `fx.header`, `fx.page`, `fx.box`, `fx.cursor`) for
+the signed-in web identity. Discord and Telegram identities stay separate; accounts are not merged. A web-only
+`agend web --code` sign-in uses a **host-wide operator** bucket shared by everyone signing in as that operator.
+Header tokens cannot read or write these five keys. Existing visible preferences remain host-wide, without migration;
+profile and custom-CSS internal identity rules are unchanged. Settings → Web appearance offers the five selectors. With effects and preview consent enabled, page/header/sidebar/box choices play across the supported stock panels in the same pool as Chat, with slot-specific Pause/Resume and unavailable/Clear controls. The cursor choice applies a static host PNG after the same consent, preserves explicit pointer/text/resize cursors and falls back while dragging or when unavailable. It runs no Worker code and consumes no frame slot.
+
+Unsharing an effect revokes subsequent resource authorization for someone else's personal selection, including its
+cursor image. The saved choice remains as unavailable until cleared, retaining its blob reference. This is stricter
+than chat placements' retained-runtime policy: personal choices follow current sharing, while a chat keeps the exact
+effect placed there. A reference never grants sharing or export authority. Unreadable preferences authorize no
+personal effect and prevent collection. Playback independently rechecks stock trust/paint ordering;
+agent front effects stay paused while custom CSS is active, loading or unknown (human placements keep their exemption).
+
+Menus, dialogs, Keep/tour notices and focused inputs suppress all foreground effects. Behind effects still require
+proven stock ordering; human placements do not bypass those gates. The Chat foreground status links to Appearance
+to show the custom-CSS setting. See the [2.3 development preview](whats-new-2.3.md); a trusted foreground plane is
+a later 2.3.x follow-up (#1940).
+
+### Chat effects and static posters (2.3 development)
+
+Local signed-in Chat plays its placed Canvas Worker effects only after preview opt-in and current safety/stock checks;
+More → Effects offers Pause, Resume and authorized Remove. If preview is unavailable, consent is missing, motion/data
+settings prevent playback or the page is a public link, a placement's static poster can appear behind content instead.
+No poster means no image; safe mode, the show switch and unknown stock ordering refuse poster paint. Public links
+receive no Worker code or playback controls. Their explicit show choice stays in this browser and survives a reload,
+without changing the host default. Explicit Pause/queued effects and failed live reads are not replaced by this fallback.
+Personal page/header/sidebar/box choices use that same pool. The personal cursor uses a bounded host image in the same app session.
+
+`preview_web_effect({id})` offers a volatile card in the agent's own web chat, using current own/shared read access. It makes no appearance write. Try is an admin-initiated sample inside a physically clipped host panel or sheet. Only an
+explicit click by a signed-in local admin may start it, with a visible Trial label and Stop control. Public links,
+agents and header tokens cannot start it. Closing the panel, navigating, window blur or another menu/dialog stops
+it. Custom CSS must be off; the usual caps, profiler and safety stops remain, and ordinary foreground effects stay
+suppressed. Offers last at most ten minutes, trials are session/epoch-bound, and each read rechecks the origin
+agent's current own/shared access. No saved placement, claim, share or export is created. The volatile server
+authority, local-admin API, host panel and shared app pool enforce this boundary. Cards are memory-only, expire in place and are never restored from disk. A valid late Start is only stopped, never mounted. Try uses manifest defaults and writes no saved profile record; mandatory safety history still applies. See the
+[Try boundary](design/1629-effect-trial-authority.md).

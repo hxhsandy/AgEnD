@@ -23,6 +23,9 @@ import { TranscriptTurnLedger, type TranscriptTurnEvent } from "./transcript-tur
 import { credentialProfileStoreHome, resolveCredentialProfile } from "./backend/credential-profile.js";
 import { resolveToolSet } from "./tool-permissions.js";
 import { getAgendHome } from "./paths.js";
+import { readAgentEffect, sendEffectInParts } from "./web-effect-upload.js";
+import { readAgentFile } from "./agent-file-read.js";
+import { ASSET_UPLOAD_MAX_BYTES, MOD_FILE, MOD_MAX_PARTS, MOD_UPLOAD_MAX_BYTES, receiveFiles, receivePreview, sendAssetInParts, writeModFile, writePreview } from "./web-asset-parts.js";
 import { LOGIN_FLOWS } from "./login-flows.js";
 import { ProgressAccumulator, summarizeProgress } from "./tool-progress.js";
 import { assembleSystemPrompt, resolveWorkflowText, type PromptFileContext } from "./prompt-file-ref.js";
@@ -88,6 +91,26 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Tool routing sets — module-level to avoid re-creation on every handleToolCall
+/** #1629: the caller's own web theme tools, each its own typed IPC message (one tool per type, for the permission check). */
+const WEB_THEME_IPC: Readonly<Record<string, string>> = Object.freeze({
+  get_web_theme: "fleet_get_web_theme", set_web_theme: "fleet_set_web_theme",
+  set_web_theme_asset: "fleet_set_web_theme_asset", reset_web_theme: "fleet_reset_web_theme",
+  // r4 §1: how it appears — read-only; a preview's files are written here, on the agent's side.
+  get_web_appearance: "fleet_get_web_appearance", preview_web_appearance: "fleet_preview_web_appearance",
+  // r4-4: its own declarative widgets.
+  set_web_widget: "fleet_set_web_widget", remove_web_widget: "fleet_remove_web_widget",
+  // r4-5b: mods — an export's file is written here, a proposal's file read here (on the agent's side).
+  export_web_mod: "fleet_export_web_mod", propose_web_mod: "fleet_propose_web_mod",
+  upload_web_effect: "fleet_upload_web_effect",
+  list_web_effects: "fleet_list_web_effects",
+  preview_web_effect: "fleet_preview_web_effect",
+  profile_web_effect: "fleet_profile_web_effect",
+  apply_web_effect: "fleet_apply_web_effect",
+  remove_web_effect: "fleet_remove_web_effect",
+  delete_web_effect: "fleet_delete_web_effect",
+});
+/** The largest picture any slot may take (a card slot's ceiling; the fleet checks the limit in force): read no more. */
+const WEB_THEME_ASSET_MAX_BYTES = ASSET_UPLOAD_MAX_BYTES;
 const CROSS_INSTANCE_TOOLS = new Set(["send_to_instance", "broadcast", "list_instances", "start_instance", "restart_instance", "create_instance", "delete_instance", "replace_instance", "request_information", "delegate_task", "report_result", "delivery_status", "describe_instance"]);
 const SCHEDULE_TOOLS = new Set(["create_schedule", "list_schedules", "update_schedule", "delete_schedule"]);
 const DECISION_TOOLS = new Set(["post_decision", "list_decisions", "update_decision"]);
@@ -1317,7 +1340,7 @@ export class BlockingProcessDetector {
 /** Response types the fleet sends back for tool calls the daemon forwarded. */
 const FLEET_RESPONSE_TYPES = new Set([
   "fleet_schedule_response", "fleet_outbound_response", "fleet_decision_response", "fleet_task_response",
-  "fleet_display_name_response", "fleet_description_response", "fleet_persona_emoji_response",
+  "fleet_display_name_response", "fleet_description_response", "fleet_persona_emoji_response", "fleet_web_theme_response",
 ]);
 
 export class Daemon extends EventEmitter {
@@ -9983,6 +10006,108 @@ export class Daemon extends EventEmitter {
         meta: { instance_name: this.name },
         fleetRequestId: fleetReqId,
       });
+      return;
+    }
+
+    // #1629: the caller's own web theme. set_web_theme_asset's file is read HERE, on the agent's side (in its working
+    // directory, no symlink, size-capped): the fleet receives bytes, never a workspace path.
+    if (Object.hasOwn(WEB_THEME_IPC, tool)) {
+      // Answered exactly once, whatever happens on the way (#1887 review: a throw here once left the call unanswered).
+      let answered = false;
+      const reply = (result: unknown, error?: string) => { if (answered) return; answered = true; respond(result, error); };
+      // One fleet request; resolves with its answer, or an error string (never rejects).
+      const ask = (payload: Record<string, unknown>) => new Promise<{ result: unknown; error?: string }>((resolve) => {
+        const fleetReqId = `theme_${++this.fleetRequestSeq}_${requestId}`;
+        const timeout = setTimeout(() => {
+          this.pendingIpcRequests.delete(fleetReqId);
+          resolve({ result: null, error: `${tool} timed out` });
+        }, daemonBudgetMs(tool));
+        this.pendingIpcRequests.set(fleetReqId, (respMsg) => {
+          clearTimeout(timeout);
+          resolve({ result: respMsg.result, error: respMsg.error as string | undefined });
+        });
+        this.ipcServer?.broadcast({ type: WEB_THEME_IPC[tool], payload, meta: { instance_name: this.name }, fleetRequestId: fleetReqId });
+      });
+      void (async () => {
+        if (tool === "preview_web_appearance") {
+          // The fleet builds the SVGs (whole, or in parts); they are written here, in the working directory.
+          const first = await ask({ ...(args.modes !== undefined ? { modes: args.modes } : {}) });
+          if (first.error) { reply(null, first.error); return; }
+          let failed: string | undefined;
+          const got = await receivePreview((first.result && typeof first.result === "object" ? first.result : {}) as Record<string, unknown>, async (payload) => {
+            const r = await ask(payload);
+            if (r.error) { failed = r.error; return { error: r.error }; }
+            return (r.result && typeof r.result === "object" ? r.result : {}) as Record<string, unknown>;
+          });
+          if (failed) { reply(null, failed); return; }
+          if ("error" in got) { reply(got, undefined); return; }
+          const written = await writePreview(got.files, { workspace: this.config.working_directory, stateDir: getAgendHome() });
+          if ("error" in written) { reply(null, `preview_web_appearance: ${written.error}`); return; }
+          reply(written, undefined);
+          return;
+        }
+        if (tool === "export_web_mod") {
+          // The fleet builds the file (whole, or in parts); it is written here, in the working directory.
+          const first = await ask(args);
+          if (first.error) { reply(null, first.error); return; }
+          let failed: string | undefined;
+          const firstResult = (first.result && typeof first.result === "object" ? first.result : {}) as Record<string, unknown>;
+          const got = await receiveFiles(firstResult, async (payload) => {
+            const r = await ask(payload);
+            if (r.error) { failed = r.error; return { error: r.error }; }
+            return (r.result && typeof r.result === "object" ? r.result : {}) as Record<string, unknown>;
+          }, { name: MOD_FILE, idKey: "transfer", what: "export", maxParts: MOD_MAX_PARTS });
+          if (failed) { reply(null, failed); return; }
+          if ("error" in got) { reply(got, undefined); return; }
+          const written = await writeModFile(got.files, { workspace: this.config.working_directory, stateDir: getAgendHome() });
+          if ("error" in written) { reply(null, `export_web_mod: ${written.error}`); return; }
+          reply({ ...written, ...(firstResult.effects_omitted ? { effects_omitted: firstResult.effects_omitted } : {}) }, undefined);
+          return;
+        }
+        if (tool === "propose_web_mod") {
+          const read = await readAgentFile(args.file, { workspace: this.config.working_directory, stateDir: getAgendHome(), maxBytes: MOD_UPLOAD_MAX_BYTES });
+          const named = typeof args.file === "string" ? args.file.slice(0, 200) : "the file argument";
+          if (!read.ok) { reply(null, `propose_web_mod: ${named} — ${read.reason}`); return; }
+          let failed: string | undefined;
+          const answer = await sendAssetInParts("mod", read.bytes, async (payload) => {
+            const r = await ask(payload);
+            if (r.error) { failed = r.error; return { error: r.error }; }
+            return (r.result && typeof r.result === "object" ? r.result : {}) as Record<string, unknown>;
+          });
+          reply(failed ? null : answer, failed);
+          return;
+        }
+        if (tool === "upload_web_effect") {
+          const owner = { fence:this.launchFenceEpoch, spawn:this.spawnGeneration, boot:this.bootId, ipc:this.ipcServer };
+          const current = () => !!owner.ipc && owner.ipc === this.ipcServer && owner.fence === this.launchFenceEpoch && owner.spawn === this.spawnGeneration && owner.boot === this.bootId && !this.deliveryWritesStopping && !this.startupAborted;
+          if (!current()) { reply(null,"upload_web_effect: launch no longer current"); return; }
+          const read = await readAgentEffect(args.dir, { workspace: this.config.working_directory, stateDir: getAgendHome() });
+          if (!current()) { reply(null,"upload_web_effect: launch no longer current"); return; }
+          if (!read.ok) { reply(null, `upload_web_effect: ${read.reason}`); return; }
+          let failed: string | undefined;
+          const answer = await sendEffectInParts(read.files, async payload => {
+            if (!current()) { failed="upload_web_effect: launch no longer current"; return {error:failed}; }
+            const r = await ask(payload);
+            if (r.error) { failed = r.error; return { error:r.error }; }
+            return (r.result && typeof r.result === "object" ? r.result : {}) as Record<string,unknown>;
+          });
+          reply(failed ? null : answer, failed);
+          return;
+        }
+        if (tool !== "set_web_theme_asset") { const r = await ask(args); reply(r.result, r.error); return; }
+        const read = await readAgentFile(args.file, { workspace: this.config.working_directory, stateDir: getAgendHome(), maxBytes: WEB_THEME_ASSET_MAX_BYTES });
+        // The path as the agent gave it — only a string is shown (an object from raw JSON args is never coerced).
+        const named = typeof args.file === "string" ? args.file.slice(0, 200) : "the file argument";
+        if (!read.ok) { reply(null, `set_web_theme_asset: ${named} — ${read.reason}`); return; }
+        // A picture larger than one IPC message goes up in parts (r4 §1: a card portrait may be megabytes).
+        let failed: string | undefined;
+        const answer = await sendAssetInParts(args.slot, read.bytes, async (payload) => {
+          const r = await ask(payload);
+          if (r.error) { failed = r.error; return { error: r.error }; }
+          return (r.result && typeof r.result === "object" ? r.result : {}) as Record<string, unknown>;
+        });
+        reply(failed ? null : answer, failed);
+      })().catch((err: unknown) => reply(null, `${tool} failed: ${err instanceof Error ? err.message : "error"}`));
       return;
     }
 

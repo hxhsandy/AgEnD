@@ -190,7 +190,19 @@ import { LogService, type LogAnswer, type LogQuery, type LogSource } from "./log
 import { WebChatHistory, WEB_CHAT_TEXT_MAX, isWebMessageId, newWebMessageId, type WebChatAttachment } from "./web-chat-history.js";
 import { WebChatDiskStore } from "./web-chat-store.js";
 import { SeenUsers, resolveMentions, type MentionNames, type MentionQuery, type MentionSource } from "./web-mentions.js";
-import { WebPrefsStore } from "./web-prefs.js";
+import { OPERATOR, WebPrefsStore } from "./web-prefs.js";
+import { agendVersion } from "./agent-whats-new.js";
+import { OwnerCssStore } from "./web-owner-css-store.js";
+import { ThemeStore } from "./web-theme-store.js";
+import { WebAppearance } from "./web-appearance.js";
+import { WebEffectLibrary } from "./web-effect-library.js";
+import { WebEffectTrials } from "./web-effect-trials.js";
+import { WebEffectService } from "./web-effect-service.js";
+import { WebEffectProfiles } from "./web-effect-profiles.js";
+import { WebEffectTools, WEB_EFFECT_TOOLS } from "./web-effect-tools.js";
+import { resolveEffectParams } from "./web-effect.js";
+import { cw1EffectChecker } from "./web-mod-bundle.js";
+import { effectiveAppearanceLimits } from "./web-appearance-limits.js";
 import { WEB_NAME_FALLBACK, safeWebName, validateWebName, webNameInUse, webPersonKey, type WebAccount } from "./web-profile.js";
 import type { WebPerson as WebPersonView } from "./web-api.js";
 import { ReplyButtonStore, parseReplyButtons, replyButtonClickText, replyButtonsFallbackText, REPLY_BUTTON_PREFIX } from "./reply-buttons.js";
@@ -198,7 +210,13 @@ import { ReplyButtonsController, type ReplyButtonsView } from "./reply-buttons-c
 import { parsePoll, type PollRender } from "./reply-polls.js";
 import { isUploadRequest, limitRequestReceive, publicAttachment, sweepOrphanedUploads, UPLOAD_REQUEST_TIMEOUT_MS, uploadLimits, WebFileLedger } from "./web-upload.js";
 import { REPLY_FILES_MAX_BYTES, snapshotReplyFile, sweepReplySnapshots, webFilesDir } from "./web-reply-files.js";
-import { handleViewRequest, isViewPath, profileIdentities, resolveInstanceIdentity } from "./view-api.js";
+import { cardPicture, handleViewRequest, humanCards, identityColors, isViewPath, profileIdentities, resolveInstanceIdentity } from "./view-api.js";
+import { autoIdentityColor } from "./web-identity-color.js";
+import { AppearanceTools } from "./web-appearance-tools.js";
+import type { FrameEntry } from "./web-appearance-view.js";
+import { cardVersion, resolveCard } from "./web-card.js";
+import { ModStore } from "./web-mod-store.js";
+import { AgentMods } from "./web-mod-agent.js";
 import { downloadStickerImage } from "./channel/sticker-download.js";
 import { WebImageCache, imageMimeForFile, WEB_IMAGE_MAX_AGE_MS, WEB_IMAGE_MAX_BYTES, WEB_IMAGE_RETRY_MS, type CachedImage } from "./web-images.js";
 import { accentColor, avatarFor, ownBotConnections, type AvatarDescriptor } from "./instance-avatar.js";
@@ -1295,6 +1313,163 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     for (const ch of this.classicChannels?.getAll() ?? []) if (low(ch.instanceName) === lowered || low(ch.displayName) === lowered) return true;
     for (const w of this.worlds.values()) if (w.botUsername && low(w.botUsername) === lowered) return true;
     return false;
+  }
+
+  private themeStoreInstance?: ThemeStore;
+  private webAppearanceService?: WebAppearance;
+  /** #1629: every instance's theme, placements, assets and lock (web-themes.json). */
+  get themeStore(): ThemeStore {
+    // r4.1 Q3 (b): the card's limits are read from fleet.yaml at each upload (a change applies without a restart).
+    return (this.themeStoreInstance ??= new ThemeStore(this.dataDir, { limits: () => effectiveAppearanceLimits(this.fleetConfig?.web?.appearance).limits, effectsDropped: ids => this.effectLibrary.collectUnreferenced(ids) }));
+  }
+  /** #1629: the theme tools, a person's reset and lock, and the one appearance rate limiter (shared with effects). */
+  get webAppearance(): WebAppearance {
+    return (this.webAppearanceService ??= new WebAppearance(this.themeStore, () => this.fleetConfig?.web ?? null,
+      () => { try { this.emitSseEvent("status", this.getUiStatus()); } catch { /* the next frame carries the rev */ } }));
+  }
+
+  private effectLibraryInstance?: WebEffectLibrary;
+  private effectTrialsInstance?: WebEffectTrials;
+  /** Lazy, single-owner storage. Register every host reference source before any operation can collect. */
+  get effectLibrary(): WebEffectLibrary {
+    if (!this.effectLibraryInstance) {
+      const library = new WebEffectLibrary(this.dataDir);
+      // Providers are lazy; publish only after every registration succeeds.
+      library.registerReferenceSource("themes", () => {
+        if (!this.themeStore.readable()) throw new Error("themes_unreadable");
+        return this.themeStore.placedEffects().flatMap(row => row.ids.map(id => ({ id, holder: `instance:${row.name}` })));
+      });
+      library.registerReferenceSource("prefs", () => this.webPrefs.ownerEffectReferences());
+      library.registerReferenceSource("mods", () => {
+        const mods = this.mods.list();
+        if (mods.unreadable) throw new Error("mods_unreadable");
+        return mods.mods.flatMap(mod => mod.effects.map(effect => ({ id: effect.id, holder: `mod:${mod.id}` })));
+      });
+      this.effectTrialsInstance = new WebEffectTrials({ library, known: name => this.isKnownInstance(name) });
+      this.effectLibraryInstance = library;
+    }
+    return this.effectLibraryInstance;
+  }
+  /** Volatile Try offers and session-bound runs share this library. */
+  get effectTrials(): WebEffectTrials { if (!this.effectTrialsInstance) void this.effectLibrary; return this.effectTrialsInstance!; }
+
+  private effectProfilesInstance?: WebEffectProfiles;
+  get effectProfiles(): WebEffectProfiles { return (this.effectProfilesInstance ??= new WebEffectProfiles(this.dataDir)); }
+  private effectServiceInstance?: WebEffectService;
+  get effectService(): WebEffectService {
+    return (this.effectServiceInstance ??= new WebEffectService({ library: this.effectLibrary, themes: this.themeStore, profiles: this.effectProfiles, prefs: this.webPrefs, trials: this.effectTrials,
+      known: name => this.isKnownInstance(name), changed: () => { try { this.emitSseEvent("status", this.getUiStatus()); } catch { /* next status carries revision */ } } }));
+  }
+
+  private effectToolsService?: WebEffectTools;
+  /** Caller identity is supplied only by the owned IPC connection / verified agent endpoint token. */
+  get effectTools(): WebEffectTools {
+    return (this.effectToolsService ??= new WebEffectTools({
+      library: this.effectLibrary, limiter: this.webAppearance.limiter,
+      authorize: (name, buckets) => !this.isKnownInstance(name) ? { error: "unknown_instance" } : this.webAppearance.authorizeEffect(name, buckets),
+      placed: name => this.themeStore.get(name).placements.effects,
+      place: (name, effects) => {
+        const before = this.themeStore.get(name).placements.effects;
+        const explicit = new Set(effects.filter(e => typeof e !== "string").map(e => e.id));
+        const w = this.themeStore.setPlacements(name, { effects }, "agent", what => {
+          // An unchanged human/private placement may be retained, never exposed or newly acquired by an agent.
+          const r = explicit.has(what.id) ? this.effectLibrary.read(what.id, { kind: "agent", id: name })
+            : this.effectLibrary.readReferenced(what.id, `instance:${name}`);
+          if (!r.ok) return r.error;
+          const params = explicit.has(what.id) ? what.params : before.find(e => e.id === what.id)?.params;
+          return resolveEffectParams(r.entry.manifest, params ?? {}).ok ? null : "effect_params";
+        });
+        return w.ok ? { ok: true, rev: w.rev } : { ok: false, error: w.error };
+      },
+      changed: () => { try { this.emitSseEvent("status", this.getUiStatus()); } catch { /* later status carries placements */ } },
+      // A nonmutating own/shared offer is not an appearance write. Only an explicit local-admin click may start it.
+      preview: async (instance, id) => {
+        const result = this.effectTrials.offer(instance, id);
+        if (!result.ok) return { error: "not_found" };
+        const present = this.webChatHistory.list(instance).some(row => row.effectTrial?.offer === result.offer.offer);
+        if (!present && !this.publishEffectTrial(instance, result.offer)) return { error: "trial_unavailable" };
+        return { id, status: "offered", expiresAt: result.offer.expiresAt, message: "A trial card is in your web chat. A signed-in local admin can start it; nothing was applied." };
+      },
+      profiles: id => this.effectProfiles.read(id),
+      profileSummary: id => this.effectService.profileSummary(id),
+      profileSummaries: ids => this.effectService.profileSummaries(ids),
+    }));
+  }
+
+  private appearanceToolsService?: AppearanceTools;
+  /** #1629 r4 §1: get_web_appearance / preview_web_appearance — the caller's own look, resolved as the page resolves it. */
+  get appearanceTools(): AppearanceTools {
+    return (this.appearanceToolsService ??= new AppearanceTools({
+      frame: (name) => ((this.getUiStatus() as { instances: FrameEntry[] }).instances.find(i => i.name === name) ?? { name }),
+      theme: (name) => { const r = this.themeStore.get(name); return { theme: r.theme, locked: r.locked, widgets: r.placements.widgets }; },
+      card: (name) => resolveCard(name, humanCards(this.dataDir).get(name), this.themeStore.get(name).theme.card),
+      // #1958: the host's identity-colour settings, as the page reads them (an unreadable prefs file: the defaults).
+      colorPrefs: () => { try { const v = this.webPrefs.read(OPERATOR).values as Record<string, unknown>; return { show: v["color.show"], off: v["color.off"] === true }; } catch { return {}; } },
+      cardPicture: (name, slot) => cardPicture(this as unknown as { dataDir: string; themeStore: ThemeStore }, name, slot),
+      themeAsset: (name, id) => this.themeStore.asset(name, id),
+      profileAvatar: (name) => this.webImage("avatar", name),
+      botAvatar: (_name, key) => this.webImage("bot", key),
+      themeAnswer: (name) => this.webAppearance.getTheme(name) as { agent_edit?: unknown; limits?: unknown },
+    }));
+  }
+
+  /** #1958: a profile, card or colour write (view-api.ts) landed: every open page gets a fresh status frame. */
+  identityChanged(): void {
+    try { this.emitSseEvent("status", this.getUiStatus()); } catch { /* the next frame carries it */ }
+  }
+
+  /** A fleet.yaml instance (own key) or a ClassicBot room, now (#1629: a person's reset/lock names one). */
+  isKnownInstance(name: string): boolean {
+    return Object.hasOwn(this.fleetConfig?.instances ?? {}, name) || (this.classicChannels?.getAll() ?? []).some((ch) => ch.instanceName === name);
+  }
+
+  private modStore?: ModStore;
+  /**
+   * #1629 r4-5 / B2: installed mods use the same validated library and scoped holder claims as direct uploads.
+   */
+  get mods(): ModStore {
+    return (this.modStore ??= new ModStore(this.dataDir, {
+      themes: this.themeStore,
+      prefs: this.webPrefs,
+      ownerCss: this.ownerCss,
+      effects: this.effectLibrary,
+      context: () => ({ agendVersion: agendVersion(), limits: this.themeStore.limits(), effects: cw1EffectChecker() }),
+      isKnownInstance: (name) => this.isKnownInstance(name),
+      prefsIdentity: OPERATOR,
+    }));
+  }
+  private agentModsService?: AgentMods;
+  /** #1629 r4-5b: export_web_mod / propose_web_mod — the caller's own look as a file, and a proposal for a person. */
+  get agentMods(): AgentMods {
+    return (this.agentModsService ??= new AgentMods({
+      themes: this.themeStore, mods: this.mods, limiter: this.webAppearance.limiter,
+      webConfig: () => this.fleetConfig?.web ?? null,
+      // The mod store's own: a proposal is checked exactly as the person's import of it will be.
+      context: () => this.mods.checkContext(),
+      readOwnEffect: (instance, id) => { const r = this.effectLibrary.read(id, { kind: "agent", id: instance }); return r.ok ? { name: r.entry.manifest.name, files: r.entry.files } : null; },
+      notice: (instance, text) => { try { this.emitSseEvent("message", { instance, sender: instance, role: "status", text, ts: new Date().toISOString() }); } catch { /* the page reads it from Settings too */ } },
+      changed: () => { try { this.emitSseEvent("status", this.getUiStatus()); } catch { /* the next frame */ } },
+    }));
+  }
+  /**
+   * #1629 r4-5c: an effect as this person may carry it away in an export — their own claim, or one a person shared —
+   * read with their principal (Sol's ACL). Being able to view or run a placed effect never grants packaging someone
+   * else's private claim: the library's reference read is runtime access, not an export path. Null: not theirs.
+   */
+  modPlacedEffect(person: string, id: string): { name: string; files: ReadonlyMap<string, Uint8Array> } | null {
+    const r = this.effectLibrary.read(id, { kind: "human", id: person });
+    return r.ok ? { name: r.entry.manifest.name, files: r.entry.files } : null;
+  }
+  /** #1629 r4-5: an instance's card text as every viewer sees it (a person's fields over the agent's). */
+  modCardText(name: string): { tagline?: string; bio?: string } {
+    const card = resolveCard(name, humanCards(this.dataDir).get(name), this.themeStore.get(name).theme.card);
+    return { ...(card.tagline ? { tagline: card.tagline.text } : {}), ...(card.bio ? { bio: card.bio.text } : {}) };
+  }
+
+  private ownerCssStore?: OwnerCssStore;
+  /** #1629 r4 §3: each person's own CSS; which version is in force is their `css.active` in the web preferences. */
+  get ownerCss(): OwnerCssStore {
+    return (this.ownerCssStore ??= new OwnerCssStore(this.dataDir, this.webPrefs));
   }
 
   get webPrefs(): WebPrefsStore {
@@ -9497,6 +9672,16 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
 
   private dispatchTypedIpc(name: string, msg: Record<string, unknown>): void {
     const type = String(msg.type);
+    if (type.startsWith("fleet_") && WEB_EFFECT_TOOLS.has(type.slice(6))) {
+      const ipc = this.instanceIpcClients.get(name), fleetRequestId = msg.fleetRequestId;
+      if (!ipc || typeof fleetRequestId !== "string") return;
+      void this.handleWebThemeHttp(name, type.slice(6), (msg.payload ?? {}) as Record<string, unknown>).then(result => {
+        if (this.instanceIpcClients.get(name) === ipc) ipc.send({ type: "fleet_web_theme_response", fleetRequestId, result });
+      }, err => {
+        if (this.instanceIpcClients.get(name) === ipc) ipc.send({ type: "fleet_web_theme_response", fleetRequestId, error: err instanceof Error ? err.message : "Effect operation failed" });
+      }).catch(err => this.logger.debug({ err }, "Effect tool response could not be written"));
+      return;
+    }
     if (type.startsWith("fleet_schedule_")) { this.handleScheduleCrud(name, msg); return; }
     if (type.startsWith("fleet_decision_")) { this.handleDecisionCrud(name, msg); return; }
     if (type === "fleet_task") { this.handleTaskCrud(name, msg); return; }
@@ -9504,6 +9689,34 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     if (type === "fleet_set_description") { this.handleSetDescription(name, msg); return; }
     if (type === "fleet_list_emojis" || type === "fleet_set_persona_emoji" || type === "fleet_preview_emojis"
       || type === "fleet_list_stickers" || type === "fleet_preview_stickers") { this.handlePersonaEmoji(name, msg); return; }
+    if (type === "fleet_get_web_theme" || type === "fleet_set_web_theme" || type === "fleet_set_web_theme_asset" || type === "fleet_reset_web_theme"
+      || type === "fleet_get_web_appearance" || type === "fleet_preview_web_appearance"
+      || type === "fleet_set_web_widget" || type === "fleet_remove_web_widget"
+      || type === "fleet_export_web_mod" || type === "fleet_propose_web_mod") {
+      this.handleWebTheme(name, msg); return;
+    }
+  }
+
+  /**
+   * #1629: the caller's own web theme over IPC (the agent endpoint calls the same service). `name` is the instance this
+   * IPC connection belongs to — never anything the message says. A refusal is a result the agent reads (its `error`
+   * and what to do), not a transport error.
+   */
+  private handleWebTheme(instanceName: string, msg: Record<string, unknown>): void {
+    const fleetRequestId = msg.fleetRequestId as string;
+    const ipc = this.instanceIpcClients.get(instanceName);
+    if (!ipc) return;
+    const tool = String(msg.type).replace(/^fleet_/, "");
+    try {
+      const args = (msg.payload ?? {}) as Record<string, unknown>;
+      const result = tool === "get_web_appearance" || tool === "preview_web_appearance"
+        ? this.appearanceTools.handle(instanceName, tool, args)
+        : tool === "export_web_mod" || tool === "propose_web_mod" ? this.agentMods.handle(instanceName, tool, args)
+        : this.webAppearance.handleTool(instanceName, tool, args);
+      ipc.send({ type: "fleet_web_theme_response", fleetRequestId, result });
+    } catch (err) {
+      ipc.send({ type: "fleet_web_theme_response", fleetRequestId, error: (err as Error).message });
+    }
   }
 
   /** `list_emojis` / `set_persona_emoji` / `preview_emojis` / `list_stickers` / `preview_stickers` over IPC; the agent endpoint calls the same methods. */
@@ -9924,6 +10137,17 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
 
   async handleSetPersonaEmojiHttp(instance: string, args: Record<string, unknown>): Promise<unknown> {
     return this.setPersonaEmoji(instance, args);
+  }
+
+  /** #1629: `agend-agent theme …` — the same service as the tools; `instance` is the token's. */
+  async handleWebThemeHttp(instance: string, tool: string, args: Record<string, unknown>): Promise<unknown> {
+    if (WEB_EFFECT_TOOLS.has(tool)) {
+      if (!this.isKnownInstance(instance)) return { error: "unknown_instance" };
+      return this.effectTools.handle(instance, tool, args);
+    }
+    if (tool === "get_web_appearance" || tool === "preview_web_appearance") return this.appearanceTools.handle(instance, tool, args);
+    if (tool === "export_web_mod" || tool === "propose_web_mod") return this.agentMods.handle(instance, tool, args);
+    return this.webAppearance.handleTool(instance, tool, args);
   }
 
   async handlePreviewEmojisHttp(instance: string, args: Record<string, unknown>): Promise<unknown> {
@@ -10661,6 +10885,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     this.compactWatchService?.forget(name);
     // #1664: and it is nobody's favorite any more (every device sees that at its next status frame).
     try { this.webPrefs.forgetInstance(name); } catch (err) { this.logger.warn({ err: (err as Error).message, name }, "Dropping a removed instance from web favorites failed"); }
+    try { this.themeStore.forget(name); this.webAppearance.forget(name); this.appearanceTools.forget(name); this.effectToolsService?.forget(name); this.mods.forgetInstance(name); this.agentMods.forget(name); } catch (err) { this.logger.warn({ err: (err as Error).message, name }, "Dropping a removed instance's web theme failed"); }
 
     // Clean up statusline watcher + instance directory
     this.statuslineWatcher.unwatch(name);
@@ -10927,7 +11152,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
    * One instance's avatar and ring for the status frame. Synchronous: what is cached now; fetches run behind. The bot
    * is its own, else the one it speaks through (#1867) — one cache entry per bot, so a shared bot is fetched once.
    */
-  private webIdentityImage(name: string, displayName: string | null, profileAvatar: string | null | undefined, bots: { own: Map<string, string>; speaking: Map<string, string> }): { avatar: AvatarDescriptor; accent?: string } {
+  private webIdentityImage(name: string, displayName: string | null, profileAvatar: string | null | undefined, bots: { own: Map<string, string>; speaking: Map<string, string> }): { avatar: AvatarDescriptor; accent?: string; themeAvatar?: AvatarDescriptor; themeAccent?: string; roleColor?: string; agentColor?: string; agentShow?: string[] } {
     let profileVersion: string | null = null;
     if (profileAvatar && imageMimeForFile(profileAvatar)) {
       try { profileVersion = Math.floor(statSync(join(this.dataDir, "avatars", basename(profileAvatar))).mtimeMs).toString(36); } catch { /* removed */ }
@@ -10940,10 +11165,22 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     const avatar = avatarFor({ name, displayName, profileVersion, bot: bot && connection ? { connection, version: bot.version } : null,
       personaEmoji: (cfg?.status_emojis as Record<string, unknown> | undefined)?.delivered });
     // The ring belongs to an own bot's face: only when that is what is shown (a shared bot's would ring everyone alike).
-    const accent = !profileVersion && bot && ownConnection && owner
+    // #1958: the own bot's colour is also the identity colour's role tier — whatever face is shown (never a shared bot's).
+    const roleColor = ownConnection && owner
       ? this.webAccent(ownConnection, owner, cfg ? (cfg.topic_id == null ? undefined : String(cfg.topic_id)) : this.classicChannels?.getChannelIdByInstance(name))
       : null;
-    return accent ? { avatar, accent } : { avatar };
+    const accent = !profileVersion && bot && ownConnection && owner ? roleColor : null;
+    // #1629 (first design §5, r2 (d)): the agent's theme may name its own picture and ring colour. Both come below a
+    // person's upload (never when there is one) and ride beside the theme-free face: a viewer who turned agents'
+    // themes off (fx.show), or a safe-mode load, shows `avatar` and `accent` as before.
+    let theme: ReturnType<ThemeStore["get"]>["theme"] = { v: 1 };
+    try { theme = this.themeStore.get(name).theme; } catch { /* unreadable themes: none */ }
+    const themeAvatar: AvatarDescriptor | undefined = !profileVersion && theme.avatar ? { kind: "image", src: `/ui/img/theme/${encodeURIComponent(name)}/${theme.avatar}` } : undefined;
+    const themeAccent = !profileVersion && theme.accent ? theme.accent : undefined;
+    return { avatar, ...(accent ? { accent } : {}), ...(themeAvatar ? { themeAvatar } : {}), ...(themeAccent ? { themeAccent } : {}),
+      // #1958: the agent's own identity colour (theme.identity.color, else its accent) and where it would show it.
+      ...(roleColor ? { roleColor } : {}), ...(theme.identity?.color ?? theme.accent ? { agentColor: theme.identity?.color ?? theme.accent } : {}),
+      ...(theme.identity?.show ? { agentShow: theme.identity.show } : {}) };
   }
   /**
    * GET /ui/img/bot|avatar/<key>: what is cached, never a fetch. Only a connection some instance or room speaks
@@ -15186,6 +15423,14 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     return room ? `room:${room.channelId}:${room.adapterId ?? ""}` : null;
   }
 
+  /** The only Try-card publisher: no arbitrary SSE sender/role can manufacture this metadata. */
+  private publishEffectTrial(instance: string, offer: unknown): boolean {
+    const row = this.webChatHistory.recordEffectTrial(instance, offer, new Date().toISOString());
+    if (!row) return false;
+    broadcastSseEvent(this.sseClients, "message", row, err => this.logger.debug({ err }, "SSE client write failed; evicting"), this.webChatHistory.cursorOf(row));
+    return true;
+  }
+
   /** Push an SSE event to all connected Web UI clients. */
   emitSseEvent(event: string, data: unknown): void {
     // #1386: a prompt opened or closed, or an instance's state moved — "Needs you" may have changed.
@@ -15204,6 +15449,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         links: m.links,
       });
       broadcastSseEvent(this.sseClients, event, recorded, onError, this.webChatHistory.cursorOf(recorded));
+      // #1629: live-only receipt after the recorded agent reply. Never persist/replay it or give it an SSE cursor.
+      if (recorded.role === "agent") broadcastSseEvent(this.sseClients, "agent_reply_live", { v: 1, boot: recorded.boot, id: recorded.id, instance: recorded.instance }, onError);
       return;
     }
     // #1266: a reply's buttons ended — the history shows it too (a later load, the public link's poll).
@@ -17926,6 +18173,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     if (!Object.hasOwn(this.fleetConfig?.instances ?? {}, ch.instanceName)
         && !this.classicChannels.getAll().some((c) => c.instanceName === ch.instanceName)) {
       try { this.webPrefs.forgetInstance(ch.instanceName); } catch (err) { this.logger.warn({ err: (err as Error).message, instanceName: ch.instanceName }, "Dropping a removed room from web favorites failed"); }
+      try { this.themeStore.forget(ch.instanceName); this.webAppearance.limiter.forget(ch.instanceName); this.effectToolsService?.forget(ch.instanceName); } catch (err) { this.logger.warn({ err: (err as Error).message, instanceName: ch.instanceName }, "Dropping a removed room's web theme failed"); }
     }
 
     this.instanceWorldBinding.delete(ch.instanceName);
@@ -20522,6 +20770,9 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     // /api/profiles (resolveInstanceIdentity) — the sidebar groups, searches and labels with it on every page.
     const classicRooms = new Map((this.classicChannels?.getAll() ?? []).map(ch => [ch.instanceName, ch]));
     const profiles = profileIdentities(this.dataDir);
+    // #1629 r4 §1: the identity card's version per instance (the page reads the card when it moves).
+    const cards = humanCards(this.dataDir);
+    const colors = identityColors(this.dataDir);
     // #1630: decorative — whatever goes wrong deciding an avatar never costs the frame (every instance gets its first character).
     let bots = { own: new Map<string, string>(), speaking: new Map<string, string>() };
     try { bots = this.webBots(); } catch (err) { this.logger.debug({ err }, "bots unreadable (getUiStatus)"); }
@@ -20563,7 +20814,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
       const effort_source = (effortStrategy === "unsupported" || isAgy) ? null : effortResolved.source;
       const identity = resolveInstanceIdentity({ cfg: this.fleetConfig?.instances[name], classic: classicRooms.get(name), profile: profiles.get(name) });
       const compact = this.compactWatchService?.view(name) ?? null;
-      let image: { avatar: AvatarDescriptor; accent?: string };
+      let image: { avatar: AvatarDescriptor; accent?: string; themeAvatar?: AvatarDescriptor; themeAccent?: string; roleColor?: string; agentColor?: string; agentShow?: string[] };
       try { image = this.webIdentityImage(name, identity.display_name, profiles.get(name)?.avatar_path, bots); }
       catch (err) { this.logger.debug({ err, name }, "avatar unreadable (getUiStatus)"); image = { avatar: avatarFor({ name, displayName: identity.display_name }) }; }
       return {
@@ -20571,6 +20822,15 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
         display_name: identity.display_name || undefined,
         avatar: image.avatar,
         ...(image.accent ? { accent: image.accent } : {}),
+        // #1629: the agent's theme's picture and ring colour, for viewers who show agents' themes.
+        ...(image.themeAvatar ? { theme_avatar: image.themeAvatar } : {}),
+        ...(image.themeAccent ? { theme_accent: image.themeAccent } : {}),
+        ...(() => { try { const v = cardVersion(resolveCard(name, cards.get(name), this.themeStore.get(name).theme.card)); return v ? { card_v: v } : {}; } catch { return {}; } })(),
+        // #1958: the identity colour's tiers (the page resolves them: the agent's only while it shows agents' themes).
+        color: { ...(colors.get(name)?.color ? { person: colors.get(name)!.color! } : {}), ...(image.agentColor ? { agent: image.agentColor } : {}),
+          ...(image.roleColor ? { role: image.roleColor } : {}), auto: autoIdentityColor(name) },
+        // #1958 decision 2: where it shows — a person's choice for this instance, the agent's; else the viewer's host default.
+        color_show: { ...(colors.get(name)?.show ? { person: colors.get(name)!.show! } : {}), ...(image.agentShow ? { agent: image.agentShow } : {}) },
         description: identity.description || undefined,
         role: identity.role || undefined,
         tags: identity.tags,
@@ -20597,6 +20857,8 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
       connections: (this.fleetConfig?.channels ?? (this.fleetConfig?.channel ? [this.fleetConfig.channel] : [])).length,
       // #1665: the host preferences' revision — a page that has another re-reads /ui/prefs (no values in this frame).
       prefs_rev: this.webPrefs.rev(),
+      // #1629: the themes' revision — the page re-reads GET /ui/themes when it moves.
+      themes_rev: this.themeStore.rev(),
       // #1685: host memory pressure while it slows or holds new agents (the dashboard's indicator; macOS elevated is
       // shown here rather than in chat). null when normal, unknown or advisory.
       host_memory: this.hostMemoryIndicator(),

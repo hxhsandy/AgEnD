@@ -27,6 +27,9 @@ import { Dialog } from "./ui-dialog.js";
 import { Empty, ErrorState, Skeleton } from "./ui-states.js";
 import { Icon } from "./ui-icons.js";
 import "./view-strings.js";
+import { checkCard, fitPicture, IdentityCard, useCard } from "./identity-card.js";
+import { confirmDialog } from "./ui-confirm.js";
+import { openColorDialog } from "./identity-color.js";
 
 /** view.* text with named values: tn("paneFailed", { name, status }). */
 function tn(key, values = {}) {
@@ -180,15 +183,15 @@ export function ViewPanel({ route, navKey }) {
     <button type="button" class="icon-btn" onClick=${() => setDialog("help")} aria-label=${tn("helpButton")} title=${tn("helpButton")}><${Icon} name="info" /></button>`;
 
   let body;
-  if (v.error && !v.roster.length) body = html`<div class="panel-body center"><${ErrorState} message=${tn("rosterFailedShort")} onRetry=${() => navigate(location.pathname, { replace: true })} /></div>`;
-  else if (!v.loaded) body = html`<div class="panel-body"><${Skeleton} lines=${6} /></div>`;
-  else if (!v.roster.length) body = html`<div class="panel-body center"><${Empty} icon="view" title=${tn("noInstances")} /></div>`;
-  else if (!name) body = html`<div class="panel-body"><${Skeleton} lines=${6} /></div>`;
-  else if (!it) body = html`<div class="panel-body center"><${Empty} icon="alert" title=${tn("notFound", { name })} hint=${tn("notFoundHint")} /></div>`;
+  if (v.error && !v.roster.length) body = html`<div data-trust="panel-content" class="panel-body center"><${ErrorState} message=${tn("rosterFailedShort")} onRetry=${() => navigate(location.pathname, { replace: true })} /></div>`;
+  else if (!v.loaded) body = html`<div data-trust="panel-content" class="panel-body"><${Skeleton} lines=${6} /></div>`;
+  else if (!v.roster.length) body = html`<div data-trust="panel-content" class="panel-body center"><${Empty} icon="view" title=${tn("noInstances")} /></div>`;
+  else if (!name) body = html`<div data-trust="panel-content" class="panel-body"><${Skeleton} lines=${6} /></div>`;
+  else if (!it) body = html`<div data-trust="panel-content" class="panel-body center"><${Empty} icon="alert" title=${tn("notFound", { name })} hint=${tn("notFoundHint")} /></div>`;
   else body = html`<${Terminal} key=${name} name=${name} lease=${lease} density=${density} />
     <${Card} it=${it} viewOnly=${viewOnly} onEdit=${() => setDialog("edit")} />`;
 
-  return html`<div class="panel p-view">
+  return html`<div data-effect-panel="view" class="panel p-view">
     <${PanelHeader} title=${it ? (it.display_name || it.instance_name) : tn("title")}
       sub=${it ? html`<span class="status"><span class=${`dot ${it.status === "running" ? "ok" : it.status === "crashed" ? "bad" : "off"}`} aria-hidden="true"></span>${tn(STATUS_KEYS[it.status] || "statusUnknown")}</span>` : null}
       nav=${it && !viewOnly ? html`<${InstanceSwitch} name=${name} current="view" />` : null}>${actions}</${PanelHeader}>
@@ -266,7 +269,7 @@ function Terminal({ name, lease, density }) {
       lease.hold(() => ro.disconnect());
     }
   }, [lease, name]);
-  return html`<div class="v-term" ref=${term}>${problem ? html`<p class="v-term-note" role="status">${problem}</p>` : null}<pre ref=${pre} class="v-pre"></pre></div>`;
+  return html`<div data-trust="panel-content" class="v-term" ref=${term}>${problem ? html`<p class="v-term-note" role="status">${problem}</p>` : null}<pre ref=${pre} class="v-pre"></pre></div>`;
 }
 
 // The advance of one monospace cell as a fraction of font-size, measured once on this page.
@@ -296,7 +299,9 @@ function Card({ it, viewOnly, onEdit }) {
   const initial = (it.display_name || it.instance_name || "?").trim().charAt(0) || "?";
   const ctx = it.context_pct != null ? ` · ctx ${Math.round(it.context_pct)}%` : "";
   const toggle = () => { const next = !open; setOpen(next); store("agend_view_card_expanded", next ? "1" : "0"); };
-  return html`<section class=${`v-card${open ? " open" : ""}`} aria-label=${it.display_name || it.instance_name}>
+  // #1629 r4 §1: the identity card, above the profile row while it is expanded.
+  const card = useCard(it.instance_name, it.card_v);
+  return html`${open && card ? html`<div data-trust="panel-content" class="v-id"><${IdentityCard} name=${it.instance_name} card=${card} /></div>` : null}<section data-trust="panel-content" class=${`v-card${open ? " open" : ""}`} aria-label=${it.display_name || it.instance_name}>
     <div class="v-avatar">${it.has_avatar ? html`<img ref=${avatar} alt="" />` : html`<span class="v-initial" aria-hidden="true">${initial}</span>`}</div>
     <div class="v-card-body">
       <div class="v-card-line"><strong>${it.display_name || it.instance_name}</strong>${it.role ? html`<span class="v-role">${it.role}</span>` : null}</div>
@@ -320,6 +325,28 @@ function EditProfile({ it, onClose }) {
   // #1630 follow-up: the uploaded picture is removed on Save (Cancel keeps it); a newly picked file wins over removing.
   const [removePic, setRemovePic] = useState(false);
   const file = useRef(null);
+  // #1629 r4 §1 / r4.1: the identity card's own fields — this person's (theirs win over the agent's, field by field).
+  // Read when the dialog opens: what is drawn now, whose each field is, and the upload limits in force.
+  const [card, setCard] = useState(null);
+  const [cardText, setCardText] = useState({ tagline: "", bio: "" });
+  const [removeCard, setRemoveCard] = useState({ portrait: false, banner: false });
+  const [clearCard, setClearCard] = useState(false);
+  const pics = { portrait: useRef(null), banner: useRef(null) };
+  useEffect(() => {
+    let live = true;
+    // The card's fields stay disabled until this read is in (#1889 review: a draft typed meanwhile was overwritten);
+    // a failed read lets them be edited, starting empty.
+    const none = { mine: { tagline: null, bio: null, portrait: null, banner: null }, limits: null };
+    lease.fetch(`/api/card/${encodeURIComponent(it.instance_name)}`).then((r) => (r.ok ? r.json() : null)).then((body) => {
+      if (!live || !lease.current()) return;
+      if (!body) { setCard(none); return; }
+      const resolved = checkCard(it.instance_name, body);
+      const mine = (k) => (resolved && resolved[k] && resolved[k].by === "human" ? resolved[k] : null);
+      setCard({ mine: { tagline: mine("tagline"), bio: mine("bio"), portrait: mine("portrait"), banner: mine("banner") }, limits: body.limits || null });
+      setCardText({ tagline: mine("tagline") ? mine("tagline").text : "", bio: mine("bio") ? mine("bio").text : "" });
+    }).catch(() => { if (live && lease.current()) setCard(none); });
+    return () => { live = false; };
+  }, []);
   async function save() {
     if (busy) return;
     setBusy(true); setMsg(null);
@@ -329,7 +356,27 @@ function EditProfile({ it, onClose }) {
     const draft = { display_name: f.display, role: f.role, description: f.desc };
     const picked = file.current && file.current.files && file.current.files[0];
     const removing = removePic;
+    // The card: Clear card wins over everything else in it; otherwise only the fields that changed are sent.
+    const clearing = clearCard;
+    const before = card && card.mine ? { tagline: card.mine.tagline ? card.mine.tagline.text : "", bio: card.mine.bio ? card.mine.bio.text : "" } : { tagline: "", bio: "" };
+    if (!clearing) for (const k of ["tagline", "bio"]) if (cardText[k] !== before[k]) draft[`card_${k}`] = cardText[k];
+    const cardPics = {};
     try {
+      // A picture too large is fitted first (after asking) — before anything is written, so declining writes nothing.
+      if (!clearing) for (const slot of ["portrait", "banner"]) {
+        const chosen = pics[slot].current && pics[slot].current.files && pics[slot].current.files[0];
+        if (chosen) {
+          const limit = card && card.limits && card.limits[slot];
+          let blob = chosen;
+          if (limit) {
+            try { blob = await fitPicture(chosen, limit, (w, h, nw, nh) => confirmDialog({ message: tn("resizeAsk", { w, h, nw, nh }), confirmLabel: tn("resizeGo") })); }
+            catch { throw new Error(tn("pictureTooLarge")); }
+          }
+          if (!lease.current()) return;
+          if (!blob) { setBusy(false); return; }
+          cardPics[slot] = blob;
+        } else if (removeCard[slot]) cardPics[slot] = "remove";
+      }
       const r = await fetch(`/api/profile/${name}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(draft) });
       if (!lease.current()) return;
       if (r.status === 401) throw new Error(tn("signInToSave"));
@@ -340,6 +387,18 @@ function EditProfile({ it, onClose }) {
       } else if (removing) {                              // a newly picked file replaces it instead
         const dr = await fetch(`/api/avatar/${name}`, { method: "DELETE" });
         if (!dr.ok) { const e = await dr.json().catch(() => ({})); throw new Error(tn("avatarRemoveFailed", { error: e.error || dr.status })); }
+      }
+      if (!lease.current()) return;
+      if (clearing) {
+        const cr = await fetch(`/api/card/${name}`, { method: "DELETE" });
+        if (!cr.ok) { const e = await cr.json().catch(() => ({})); throw new Error(tn("cardFailed", { error: e.error || cr.status })); }
+      }
+      for (const [slot, what] of Object.entries(cardPics)) {
+        if (!lease.current()) return;
+        const pr = what === "remove"
+          ? await fetch(`/api/card/${name}/${slot}`, { method: "DELETE" })
+          : await fetch(`/api/card/${name}/${slot}`, { method: "POST", headers: { "Content-Type": what.type || "application/octet-stream" }, body: what });
+        if (!pr.ok) { const e = await pr.json().catch(() => ({})); throw new Error(tn("cardFailed", { error: e.detail || e.error || pr.status })); }
       }
       if (!lease.current()) return;
       setBusy(false);
@@ -356,6 +415,20 @@ function EditProfile({ it, onClose }) {
       <label class="field"><span>${tn("avatar")}</span><input ref=${file} type="file" accept="image/png,image/jpeg,image/gif,image/webp" /></label>
       ${it.has_avatar ? html`<div class="field-row"><button type="button" class="btn btn-sm" aria-pressed=${removePic ? "true" : "false"}
         onClick=${() => setRemovePic(!removePic)}>${tn(removePic ? "keepPicture" : "removePicture")}</button>${removePic ? html`<span class="muted">${tn("removePictureNote")}</span>` : null}</div>` : null}
+      <div class="field-row"><button type="button" class="btn btn-sm" onClick=${() => openColorDialog(it.instance_name, (appStore.get().instances || []).find((i) => i.name === it.instance_name))}>${t("color.menu")}</button></div>
+      <h3 class="form-sub">${tn("cardSection")}</h3>
+      <p class="note">${tn("cardLead")}</p>
+      <fieldset class="form" disabled=${clearCard || !card} aria-busy=${card ? "false" : "true"}>
+        <label class="field"><span>${tn("cardTagline")}</span><input value=${cardText.tagline} onInput=${(e) => setCardText({ ...cardText, tagline: e.target.value })} /></label>
+        <label class="field"><span>${tn("cardBio")}</span><textarea rows="4" value=${cardText.bio} onInput=${(e) => setCardText({ ...cardText, bio: e.target.value })}></textarea></label>
+        ${["portrait", "banner"].map((slot) => html`<div key=${slot} class="form">
+          <label class="field"><span>${tn(slot === "portrait" ? "cardPortrait" : "cardBanner")}</span><input ref=${pics[slot]} type="file" accept="image/png,image/jpeg,image/webp" /></label>
+          ${card && card.mine && card.mine[slot] ? html`<div class="field-row"><button type="button" class="btn btn-sm" aria-pressed=${removeCard[slot] ? "true" : "false"}
+            onClick=${() => setRemoveCard({ ...removeCard, [slot]: !removeCard[slot] })}>${tn(removeCard[slot] ? "cardKeep" : "cardRemove")}</button></div>` : null}
+        </div>`)}
+      </fieldset>
+      <div class="field-row"><button type="button" class="btn btn-sm" aria-pressed=${clearCard ? "true" : "false"} onClick=${() => setClearCard(!clearCard)}>${tn(clearCard ? "keepCard" : "clearCard")}</button>
+        ${clearCard ? html`<span class="muted">${tn("clearCardNote")}</span>` : null}</div>
     </fieldset></form>
     ${msg ? html`<p class="err" role="alert">${msg}${msg === tn("signInToSave") ? html` <a class="link" href=${signInHref()}>${t("app.signIn")}</a>` : null}</p>` : null}
   </${Dialog}>`;

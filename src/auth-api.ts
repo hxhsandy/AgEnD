@@ -100,6 +100,23 @@ const ASSETS: Readonly<Record<string, { file: string; type: string }>> = {
     "header-tools.js", "usage-dialog.js", "read-stream.js",
     // #1665: the host-kept preferences and their browser cache.
     "app-prefs.js",
+    // #1629: static session-bound owner preference client; every data route remains session-gated.
+    "owner-effect-prefs.js",
+    // #1629: static host runtime closure; effect data stays behind session/epoch routes.
+    "effect-posters.js", "effect-poster-reader.js",
+    "effect-app-runtime.js", "effect-trial-source.js", "effect-owner-source.js", "effect-owner-regions.js", "effect-chat-runtime.js", "effect-runtime-loader.js", "effect-registry.js", "effect-safety.js",
+    "effect-stock-trust.js", "effect-stock-snapshot.js", "effect-trial-stage.js", "effect-profiles.js", "effect-profiler.js",
+    "effect-baseline.js", "effect-frame.js", "effect-geometry.js", "effect-host-style.js", "effect-cursor.js", "effect-policy.js",
+    // #1629 r4 §3: links the signed-in person's owner CSS (static code; the stylesheet itself is session-gated).
+    "owner-css.js",
+    // #1629: agents' themes on their own chat surfaces (static code; the themes are read behind the gate).
+    "app-themes.js",
+    // #1629 r4 §1: the identity card (Details, the chat header, and View — whose anonymous reader sees cards too).
+    "identity-card.js", "card-strings.js",
+    // #1629 r4-4: widgets drawn by the page's own components (static code; the widgets are read behind the gate).
+    "agent-widget.js",
+    // #1958: identity colours on the page and the Color dialog (static code; the colours come in the status frame).
+    "identity-color.js",
     "preact.module.js", "preact-hooks.module.js", "htm.module.js",
   ].map(name => [name, { file: join("shared", name), type: "text/javascript; charset=utf-8" }])),
   "app.css": { file: join("shared", "app.css"), type: "text/css; charset=utf-8" },

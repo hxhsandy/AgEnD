@@ -142,7 +142,7 @@ describe("the fleet runs it beside the web listener (scratch AGEND_HOME)", () =>
       const r = await raw(h.port, "GET", "/ui", { host: `127.0.0.1:${h.port}`, cookie: h.cookie });
       expect(r.status).toBe(200);
       const csp = String(r.headers["content-security-policy"]);
-      expect(directive(csp, "frame-src")).toBe(`frame-src http://127.0.0.1:${h.pport.port}/frame`);
+      expect(directive(csp, "frame-src")).toBe(`frame-src http://127.0.0.1:${h.pport.port}/frame http://127.0.0.1:${h.pport.port}/effect`);
       expect(directive(csp, "frame-ancestors")).toBe("frame-ancestors 'none'");
       expect(r.headers["x-frame-options"]).toBe("DENY");
       expect(bodyAttrs(r.body)).toEqual({
@@ -153,9 +153,11 @@ describe("the fleet runs it beside the web listener (scratch AGEND_HOME)", () =>
         "data-upload-limits": "{&#34;maxFileBytes&#34;:52428800,&#34;maxFiles&#34;:5,&#34;maxTotalBytes&#34;:104857600}",
         // #1770: the fleet's zone, which the chat reads its times and days in.
         "data-fleet-tz": process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone,
+        // The signed-in scratch fleet has a readable, empty owner-CSS store (#1629).
+        "data-owner-css-state": "off",
       });
       const lh = await raw(h.port, "GET", "/ui", { host: `localhost:${h.port}`, cookie: h.cookie });
-      expect(directive(String(lh.headers["content-security-policy"]), "frame-src")).toBe(`frame-src http://localhost:${h.pport.port}/frame`);
+      expect(directive(String(lh.headers["content-security-policy"]), "frame-src")).toBe(`frame-src http://localhost:${h.pport.port}/frame http://localhost:${h.pport.port}/effect`);
     } finally { h.stop(); }
   });
 
@@ -179,7 +181,7 @@ describe("the fleet runs it beside the web listener (scratch AGEND_HOME)", () =>
   it("/view and /settings signed in carry /ui's preview attributes and frame-src; anonymous /view is view-only with none; sign-in never gets one; every dashboard response keeps DENY and frame-ancestors 'none'", async () => {
     const h = await startFleet();
     try {
-      const frame = `frame-src http://127.0.0.1:${h.pport.port}/frame`;
+      const frame = `frame-src http://127.0.0.1:${h.pport.port}/frame http://127.0.0.1:${h.pport.port}/effect`;
       const ui = await raw(h.port, "GET", "/ui", { host: `127.0.0.1:${h.port}`, cookie: h.cookie, accept: "text/html" });
       for (const p of ["/view", "/view/alpha", "/settings", "/settings/general"]) {
         const r = await raw(h.port, "GET", p, { host: `127.0.0.1:${h.port}`, cookie: h.cookie, accept: "text/html" });

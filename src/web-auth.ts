@@ -387,11 +387,25 @@ const PASSIVE_GET_PATHS: ReadonlySet<string> = new Set(["/ui/poll", "/ui/events"
 const PASSIVE_GET_PANE = /^\/api\/pane\/[^/]+$/;
 /** #1630: the pictures a page draws (avatars, server emoji) and the emoji list are loaded by the page, not done by a person. */
 const PASSIVE_GET_IMAGES = /^\/ui\/(?:img\/(?:bot|avatar|emoji)\/[^/]+|emojis|mentions)$/;   // #1682: mention names too
+/**
+ * #1629 r4 §3: owner CSS the page loads or asks after on its own — the stylesheet and its pictures and fonts, and the
+ * state it re-reads when the person's preferences moved (another device saved, kept or reverted) — not the person.
+ */
+const PASSIVE_GET_OWNER_CSS = /^\/ui\/(?:owner-css\.css|owner-css\/state|owner-css\/asset\/[0-9a-f]{32})$/;
+/** #1629: agents' themes the page re-reads when themes_rev moves, and the pictures they name. */
+const PASSIVE_GET_THEMES = /^\/ui\/(?:themes|img\/theme\/[^/]+\/[0-9a-f]{32})$/;
+/** #1629 r4 §1: an identity card the page re-reads when the frame's card_v moves, and its pictures. */
+const PASSIVE_GET_CARD = /^\/api\/card\/[^/]+(?:\/(?:portrait|banner))?$/;
 const PASSIVE_APPLY_STATUS = /^\/api\/settings\/(?:apply\/[A-Za-z0-9-]+|(?:provider-secrets|secrets)\/[^/]+\/apply\/[A-Za-z0-9_-]+|connections\/[^/]+\/(?:secret|binding)\/apply\/[A-Za-z0-9_-]+)$/;
 
 export function isPassiveWebRead(method: string | undefined, path: string): boolean {
+  // #1629: automatic diagnostic reports are not human activity. This affects touch only: POST still needs CSRF; only the bounded diagnostic route accepts a read-tier session.
+  if (method === "POST" && /^\/ui\/effects\/profile\/[0-9a-f]{32}$/.test(path)) return true;
+  // #1629: Trial Stop is also automatic lifecycle cleanup. This only suppresses idle touch; CSRF/local-admin gates remain.
+  if (method === "POST" && /^\/ui\/effect-trials\/[0-9a-f]{32}\/stop$/.test(path)) return true;
   if ((method ?? "GET") !== "GET") return false;
-  return PASSIVE_GET_PATHS.has(path) || PASSIVE_GET_PANE.test(path) || PASSIVE_GET_IMAGES.test(path) || /^\/api\/settings\/pending(?:\/[0-9a-f]{32})?$/.test(path)
+  return /^\/ui\/effect-trials\/[0-9a-f]{32}\/(?:resource|poster\.png|profile)$/.test(path) || /^\/ui\/effect-posters(?:\/[0-9a-f]{32}\.png)?$/.test(path) || /^\/ui\/effects(?:\/(?:placements|(?:resource|profile)\/[0-9a-f]{32}|image\/[0-9a-f]{32}\/(?:poster|cursor)\.png))?$/.test(path) || PASSIVE_GET_PATHS.has(path) || PASSIVE_GET_PANE.test(path) || PASSIVE_GET_IMAGES.test(path) || PASSIVE_GET_OWNER_CSS.test(path) || PASSIVE_GET_THEMES.test(path) || PASSIVE_GET_CARD.test(path)
+    || /^\/api\/settings\/pending(?:\/[0-9a-f]{32})?$/.test(path)
     // #1490: a page polls an Apply job (and a secret or binding apply) for up to ten minutes while the person waits;
     // that polling is not their activity and must not slide the session's idle expiry (#1373).
     || PASSIVE_APPLY_STATUS.test(path);

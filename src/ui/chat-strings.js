@@ -3,6 +3,8 @@ import { register } from "/assets/app-i18n.js";
 
 register("chat", {
   en: {
+    effectTrial: "Effect trial", effectTrialLocal: "Try requires a local admin, enabled previews and custom CSS off.",
+    effectTrialStart: "Try", effectTrialExpired: "This trial offer has expired.", effectTrialUnavailable: "Trial unavailable: access or playback settings may have changed.",
     cmdConfirm: "Clear", cmdConfirmBackend: "Switch and restart", cmdRunning: "Running /{0}…", cmdNotCommand: "Not a command here — Enter sends it as a message.", cmdDismiss: "Dismiss", cmdCommands: "Commands",
     compactRunning: "Compacting…", compactDone: "✅ Conversation compacted", compactUnknown: "This backend does not report when compaction ends.",
     compactTimeout: "No sign that compaction finished within {0} minutes — check the agent's own chat.",
@@ -90,9 +92,17 @@ register("chat", {
     dBindingNone: "not bound (web only)", dPrimary: "the first connection", dTags: "Tags", dReadOnly: "Read only — change it in Settings.",
     dEditInSettings: "Edit in Settings", dPause: "Pause", dWake: "Wake", dPaused: "{0} paused", dWoken: "{0} is waking up", dActionFailed: "That did not work — try again.",
     dNoActivity: "No activity in the last hour.", dWorking: "Working…",
+    // #1629: a person's control over an agent's own web theme.
+    themeLock: "Lock theme", themeUnlock: "Unlock theme", themeReset: "Reset theme…", themeResetGo: "Reset",
+    themeResetConfirm: "Reset {0}'s theme to the default? Its colours, picture and working label go; a lock stays.",
+    themeResetDone: "{0}'s theme was reset.", themeLocked: "{0}'s theme is locked: the agent can't change it.", themeUnlocked: "{0}'s theme is unlocked.",
+    themeFailed: "The theme was not changed ({0}).",
+    widgetRemoveHeader: "Remove the chat header widget", widgetRemoveDetails: "Remove the Details widget", widgetRemoved: "{0}'s widget was removed.",
     configured: "(configured)", fleetDefault: "(fleet default)",
   },
   "zh-TW": {
+    effectTrial: "效果試播", effectTrialLocal: "需由本機管理員啟用預覽並關閉自訂 CSS，才能試播。",
+    effectTrialStart: "試播", effectTrialExpired: "試播邀請已過期。", effectTrialUnavailable: "無法試播：存取權或播放設定可能已變更。",
     cmdConfirm: "清空", cmdConfirmBackend: "切換並重新啟動", cmdRunning: "執行 /{0} 中…", cmdNotCommand: "這裡沒有這個指令——按 Enter 會當成一般訊息送出。", cmdDismiss: "關閉", cmdCommands: "指令",
     compactRunning: "壓縮中…", compactDone: "✅ 對話已壓縮", compactUnknown: "這個後端不會回報壓縮何時完成。",
     compactTimeout: "{0} 分鐘內沒有看到壓縮完成的紀錄，請到代理自己的對話確認。",
@@ -178,6 +188,11 @@ register("chat", {
     dBindingNone: "未綁定（只用網頁）", dPrimary: "第一個連線", dTags: "標籤", dReadOnly: "這裡只能檢視——請到設定修改。",
     dEditInSettings: "到設定編輯", dPause: "暫停", dWake: "喚醒", dPaused: "{0} 已暫停", dWoken: "{0} 正在喚醒", dActionFailed: "沒有成功，請再試一次。",
     dNoActivity: "最近一小時沒有活動。", dWorking: "處理中…",
+    themeLock: "鎖定主題", themeUnlock: "解除主題鎖定", themeReset: "重設主題…", themeResetGo: "重設",
+    themeResetConfirm: "要把 {0} 的主題重設為預設嗎？顏色、圖片和處理中文字都會移除；鎖定會保留。",
+    themeResetDone: "已重設 {0} 的主題。", themeLocked: "已鎖定 {0} 的主題：agent 無法變更。", themeUnlocked: "已解除 {0} 的主題鎖定。",
+    themeFailed: "主題沒有變更（{0}）。",
+    widgetRemoveHeader: "移除聊天標頭的小工具", widgetRemoveDetails: "移除詳細資料頁的小工具", widgetRemoved: "已移除 {0} 的小工具。",
     configured: "（設定值）", fleetDefault: "（fleet 預設）",
   },
 });

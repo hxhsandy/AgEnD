@@ -2,9 +2,8 @@
  * #1306: the preview listener — where an agent's HTML may run, away from the dashboard's authority.
  * Design: docs/design/1306-inline-html-preview.md (r3, approved).
  *
- * A second loopback listener (default health_port + 1) serves one static document, `GET /frame`: a shim that
- * receives HTML by postMessage only from the dashboard origins it was built with, and writes it into its own
- * opaque, sandboxed document. Everything else is an empty 404. It reads no cookie, no header but Host, and logs
+ * A second loopback listener (default health_port + 1) serves `GET /frame` for HTML previews and local-only `GET /effect` for Canvas Worker effects.
+ * Both accept one payload only from configured dashboard origins. Effect code never runs in the document realm. Everything else is an empty 404. It reads no cookie, no header but Host, and logs
  * nothing about a request. The dashboard decides per /ui load whether a preview origin is reachable from the
  * browser's address (Host only — never X-Forwarded-Host), and the page re-checks that against location.origin.
  *
@@ -15,6 +14,7 @@
 import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { allowedHostNames, hostnameOf, LOOPBACK_HOST_NAMES, type HostGuardConfig } from "./web-host-guard.js";
+import { buildCanvasEffectShim } from "./web-effect-worker.js";
 
 /** The most HTML a preview takes (UTF-8 bytes): the parent refuses more before sending, the shim refuses it too. */
 export const PREVIEW_HTML_MAX_BYTES = 1024 * 1024;
@@ -207,6 +207,9 @@ export function buildShim(bootId: string, origins: readonly string[]): string {
   return `<!doctype html><html><head><meta charset="utf-8"><title>Preview</title></head><body><script>${script}</script></body></html>`;
 }
 
+/** #1629: Canvas Worker-only effect document. No mod HTML runs in this realm. */
+export const buildEffectShim = buildCanvasEffectShim;
+
 export interface PreviewListener {
   readonly server: Server;
   readonly bootId: string;
@@ -217,7 +220,7 @@ export interface PreviewListener {
 }
 
 /**
- * The preview listener: GET /frame (no query) → the shim with the §5.1 headers; anything else → empty 404; a Host
+ * The preview listener: exact GET /frame or /effect → a shim with the §5.1 headers; anything else → empty 404; a Host
  * it does not answer to → empty 403. No X-Frame-Options (it must be framable by the dashboard), no cookie or
  * header parsing beyond Host, nothing logged per request. Built once: the shim and its headers never change.
  */
@@ -226,12 +229,21 @@ export interface PreviewListener {
  * local preview listener and the public link's own preview gateway (#1723), so both serve the very same frame.
  */
 export function previewFrameResponse(bootId: string, origins: readonly string[]): { body: Buffer; headers: Record<string, string> } {
-  const body = Buffer.from(buildShim(bootId, origins), "utf8");
+  return shimResponse(buildShim(bootId, origins), origins);
+}
+
+/** Effects add only local blob script/Worker execution; network/nested contexts remain denied. */
+export function previewEffectResponse(bootId: string, origins: readonly string[]): { body: Buffer; headers: Record<string, string> } {
+  return shimResponse(buildEffectShim(bootId, origins), origins, true);
+}
+
+function shimResponse(html: string, origins: readonly string[], effect = false): { body: Buffer; headers: Record<string, string> } {
+  const body = Buffer.from(html, "utf8");
   return {
     body,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
-      "Content-Security-Policy": previewFrameCsp(origins),
+      "Content-Security-Policy": effect ? previewFrameCsp(origins).replace("script-src 'unsafe-inline'", "script-src 'unsafe-inline' blob:").replace("worker-src 'none'", "worker-src blob:") : previewFrameCsp(origins),
       "Permissions-Policy": PERMISSIONS_POLICY,
       "Referrer-Policy": "no-referrer",
       "Cross-Origin-Resource-Policy": "same-origin",
@@ -253,6 +265,8 @@ export function createPreviewListener(opts: {
   const bootId = opts.bootId ?? randomBytes(16).toString("hex");
   const origins = dashboardOrigins(opts.settings, opts.healthPort, opts.config);
   const { body, headers } = previewFrameResponse(bootId, origins);
+  // Public-link origins may widen /frame, never /effect. Effects remain local-dashboard only.
+  const effect = previewEffectResponse(bootId, origins);
   let widened: { key: string; body: Buffer; headers: Record<string, string> } | null = null;
   const frameFor = (): { body: Buffer; headers: Record<string, string> } => {
     const extra = (opts.extraOrigins?.() ?? []).filter(o => !origins.includes(o));
@@ -272,7 +286,12 @@ export function createPreviewListener(opts: {
     // Host only. The cookie a same-host port receives (cookies are not port-isolated) is never read.
     const host = typeof req.headers.host === "string" ? hostnameOf(req.headers.host) : null;
     if (!host || !hosts.has(host)) return empty(res, 403);
-    if (req.method !== "GET" || req.url !== "/frame") return empty(res, 404);
+    if (req.method !== "GET") return empty(res, 404);
+    if (req.url === "/effect") {
+      res.writeHead(200, effect.headers);
+      return res.end(effect.body);
+    }
+    if (req.url !== "/frame") return empty(res, 404);
     const frame = frameFor();
     res.writeHead(200, frame.headers);
     res.end(frame.body);

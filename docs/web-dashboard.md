@@ -88,7 +88,7 @@ Pick an instance on the left to talk to it. The web chat is **the same conversat
 - The sidebar button at its top hides it (☰ brings it back); the choice is remembered. On a phone the sidebar is a drawer: ☰ opens it — or swipe right across the conversation — and choosing something, tapping outside it, swiping it left or Esc closes it. (A swipe that starts at the very left edge stays the browser's back gesture, and swipes on code, tables, the terminal or the message box are left to them.) A phone also has tabs along the bottom (Chat, Fleet, View, Settings); they make room while the keyboard is open.
 - The header shows the instance's name and state, the **Chat / View / Details** switch, **Text size** and **Usage** (the same two, in the same order, on Chat, View, Details and Fleet). **Text size** goes S → M → L and is one setting for this browser: chosen on any page, it is the size on every page and after a reload. **Usage** is AI subscription usage: on a wide screen (1200 px and up) it is a panel on the right beside the page, hidden until you open it: **Usage** (or the panel's ✕) shows or hides it, remembered on this device; on a narrower screen **Usage** opens it as a dialog. Its **⋯** menu holds **Instance details** (the Details page) and the instance's own actions, and only the ones that fit: **Start** for a stopped instance; **Restart** and **Stop instance** for a running one; **Delete** last, behind typing its name.
 - **Theme** and **Language** (**Settings → Preferences**; on `/view` without signing in, the ☀ button beside **Sign in**, for that browser only): *System* follows each device's light or dark setting; *Light* or *Dark* fixes it. The language applies to every panel.
-- **Each instance in the sidebar** is called by its display name, with its instance name on hover (and under the display name when two instances share one). Its picture is, in this order: the one uploaded in View (**Edit profile**), its own bot's avatar when it has a bot of its own (the General bot counts when General is the only one using it), else the avatar of the bot it talks through (usually the General bot), its persona emoji, or its first letter. An instance's own bot with a colour in its Discord server gets that colour as a ring. The dot on the picture is its state — idle, working, looks stuck, paused (hollow), stopped, crashed or needs you — and says so to a screen reader too. Pictures and server emoji are fetched by AgEnD on this computer and served by the dashboard itself; the page never loads Discord or Telegram. The filter finds an instance by either name.
+- **Each instance in the sidebar** is called by its display name, with its instance name on hover (and under the display name when two instances share one). Its picture is, in this order: the one uploaded in View (**Edit profile**), its own bot's avatar when it has a bot of its own (the General bot counts when General is the only one using it), else the avatar of the bot it talks through (usually the General bot), its persona emoji, or its first letter. Each instance has an [identity colour](#identity-colours), shown by default as a ring around its picture and a bar at the row's left edge. The dot on the picture is its state — idle, working, looks stuck, paused (hollow), stopped, crashed or needs you — and says so to a screen reader too. Pictures and server emoji are fetched by AgEnD on this computer and served by the dashboard itself; the page never loads Discord or Telegram. The filter finds an instance by either name.
   - A display name set in View (**Edit profile**) wins over one the agent sets itself (`set_display_name`). Clearing it in View shows the agent's own name again (or the instance name).
 - The bottom of the sidebar is one row: **Settings** and **Session**. **Settings → Preferences** holds theme, language, HTML previews and the tour.
 - **Favorites (#1664).** Star an instance to pin it in **Favorites** at the top of the sidebar, in the order you starred them. On a desktop the ☆ appears when you hover over or focus a row, and stays on starred ones. On a phone, tap **Edit** above the list. **Edit** also shows ↑ ↓ to reorder favorites. A deleted instance drops out; a paused or stopped one stays. At most 50.
@@ -265,6 +265,100 @@ A fleet with no chat connection yet (web only) shows a card above the Agents and
   - A connection shows **Token set** (with the bot's name while it runs) or **Token missing**, never the token. A new connection starts as soon as Apply runs, without a restart, when AgEnD is already running another connection and nothing else at fleet level changed; the Apply card says "Starting the new connection". A fleet's first connection, or a change to an existing one, still offers **Restart AgEnD**. A token replaced on a connection that is not running starts it the same way; for the first connection it waits for that restart.
 - **A change that needs a fleet admin's confirmation** (see [Confirming sensitive changes](#confirming-sensitive-changes)) shows a card in any panel: what it changes, the time left, and **Withdraw**. Apply waits for it; once it is confirmed the rest goes on, and if it is refused or expires, nothing after it is applied and those changes are staged again (a bot token has to be entered again).
 
+### Identity colours
+
+Each agent has a colour you can find it by in the sidebar.
+- **Where it comes from**, in this order:
+  - a colour a person picked for it;
+  - the agent's own (its theme's `identity.color`, else its accent), while you show agents' themes;
+  - its own bot's colour from its Discord role;
+  - otherwise one of a few soft automatic colours, chosen from its name (two agents may share one).
+- **Where it shows:** its name, a bar at the row's left edge, and the ring around its picture, in any combination. The default is the ring and the bar. A person's choice for an agent wins, then the agent's own, then this host's default.
+- **Changing one agent's:** its **⋯ → Colour…** in the chat or Details, or **Colour…** in View's **Edit profile**.
+  - Pick one of 12 colours (each readable in light and dark) or your own hex colour, and the places it shows.
+  - **Reset** goes back to the agent's, the bot's or the automatic one.
+  - This works over a temporary public link too, like profile edits.
+- **This host's settings,** in **Settings → Web appearance → Identity colours:**
+  - where colours show by default;
+  - **Turn off colours**, which hides every identity colour on this host. The colours people picked are kept and come back when you turn colours on again.
+- **Restore defaults** (Settings → Web appearance) puts this host's appearance settings back to their defaults and turns your custom CSS off. It asks first and says what it resets. The colours people picked, installed mods, uploaded effects and the card limits stay.
+
+### Custom CSS (Settings → Web appearance)
+
+**Appearance** holds your own stylesheet. It applies only to your screens: every device where you are signed in, never anyone else's. It covers Chat, Fleet, Details, Needs you, Log and View.
+
+- **Never on Settings.** Settings is always drawn without your CSS, so you can always undo a stylesheet that hides something.
+- **Never in these places either:**
+  - the sign-in page;
+  - a temporary public link (a different person, who can't reach Settings);
+  - the anonymous `/view` reader.
+- **Save and try.** A saved version is on trial. A bar on every page asks **Keep this custom CSS?** Choose **Keep** within 15 seconds, or it reverts on its own. It also reverts if the tab is closed or the CSS hides the bar.
+- **What it may contain.** At most 64 KiB, and it never loads anything from the internet:
+  - `@import`, `@namespace` and `@charset` are refused.
+  - Any `url()` or `src()` is refused, except `url("asset:<id>")` naming a file under **Assets**.
+  - `image-set()`, `cross-fade()`, `element()`, `paint()`, `expression()`, `behavior`, `-moz-binding`, `javascript:` and `vbscript:` are refused.
+  - The reason for a refusal is shown when you save. What is served is a clean rewrite of what you wrote, never the uploaded bytes.
+- **Assets.** PNG, WebP, JPEG, GIF or WOFF2: up to 16 files and 1 MiB in total. Metadata such as GPS location is removed. **Copy reference** gives you the `url("asset:<id>")` to paste.
+- **Earlier versions.** The last five are kept, and **Use this** puts one back. **Turn off (all devices)** goes back to the stock look.
+- **On this device.** **Turn off custom CSS on this device** affects only this browser, so a phone layout can be fixed on the phone. Add `?safe=1` to any page's address to load it once without custom CSS.
+
+### Agents' themes
+
+An agent can give its own web chat a look: colours for light and dark, an accent, the bubbles' corners and border, a font, a background picture, its own picture, and the words it shows while working. It sets them with the `set_web_theme`, `set_web_theme_asset` and `reset_web_theme` tools (`agend-agent theme` from a shell).
+
+- **Only its own chat.** A theme changes that agent's chat panel and its picture and ring in the sidebar. It never changes the sidebar itself, the header, Settings or any other agent's chat.
+- **Checked twice.** The host stores only values that pass the checks (fixed colour, font and border choices, text that stays readable in both modes). The page checks again before drawing, and drops anything else.
+- **Pictures stay on the host.** They are served from the dashboard itself, with their metadata removed, and never loaded from the internet.
+- **People decide.** In a chat's or Details' **⋯** menu:
+  - **Lock theme** stops the agent changing it. **Unlock theme** allows it again.
+  - **Reset theme…** removes it and keeps a lock in place.
+  - Both need a signed-in admin, and neither is offered over a temporary public link.
+- **Your switch.** **Settings → Web appearance → Show agents' themes, effects and widgets** turns them off on all your devices. Every chat then looks the same, and pictures and ring colours are the bots' again. `?safe=1` also loads a page without them.
+- **Limits.** An agent's changes are at least 30 seconds apart, at most 10 an hour, with at most 3 picture uploads an hour. A picture you uploaded for an agent in its profile wins over its theme's. `web.themes.agent_edit: false` in `fleet.yaml` refuses every agent's changes.
+
+### Identity cards
+
+Each agent can have an identity card: a portrait, a banner, a one-line tagline and a short bio.
+
+- **Who sets it.** The agent sets its own with `set_web_theme` (`card.tagline`, `card.bio`, and `card.portrait` / `card.banner` naming pictures uploaded with `set_web_theme_asset` for those slots). A person sets theirs in View's **Edit profile**. **A person's field wins over the agent's, field by field**: leave a field empty to show the agent's.
+- **Where it shows.** At the top of the agent's **Details**; in **View**, above the profile row while it is expanded; and folded into the agent's chat, under the header. The chat's card is folded until you open it, and that choice is kept on this device.
+- **Size.** Each card has **S / M / L**. **Settings → Web appearance → Identity cards** sets the size for every card on all your devices, and a card's own control sets that card apart. Over a temporary public link the size is kept on that device only.
+- **Text stays text.** The tagline and bio are never markup or links. Pictures are served by the dashboard itself, with metadata such as GPS removed.
+- **Pictures that are too large.** Edit profile offers to shrink a portrait or banner that is over the limits ("This picture is 3000×4000; it will be resized to 1024×1365"). The server checks the result like any upload.
+- **Clear card** removes your tagline, bio, portrait and banner; the agent's own card shows again. A person's **Reset theme…** removes the agent's card and leaves yours. **Lock theme** stops the agent changing its card.
+- **Over a temporary public link** you can edit the card, as you can the profile and picture. Theme reset and lock, and the limits below, stay off it.
+- **How an agent sees itself.** `get_web_appearance` tells an agent how it appears now: its face and where it comes from (profile, theme, bot, emoji or initial), its ring colour, its identity colour and where that comes from (a person's pick, its theme's accent, its own bot's Discord role, or automatic), its card field by field (whose each field is), its theme per mode, whether it is locked, and its limits. `preview_web_appearance` draws that as an SVG per mode in its own working directory (`.agend/appearance/light.svg`, `dark.svg`), with the pictures it shows written beside it (`avatar.png`, `portrait.png`, …) — only its own. From a shell: `agend-agent appearance` and `agend-agent appearance preview [light|dark]`.
+- **Upload limits.** **Settings → Web appearance → Identity card upload limits** (or `web.appearance` in `fleet.yaml`) sets the largest portrait and banner and how many pictures each agent may keep. Defaults: portrait 1024×1536, 1.5 MiB; banner 1600×600, 768 KiB; 8 pictures, 4 MiB per agent. A lower limit applies at once; a higher one waits for a fleet admin's confirmation. A limit applies to new uploads only; pictures already stored stay.
+
+### Widgets
+
+A widget is a small panel of facts drawn by the dashboard itself: numbers, progress bars, a line of text, a short list, a coloured badge, a sparkline. Whoever places it writes only **what to show** (a short JSON spec) and **the values** — never HTML, script, links or CSS. The dashboard draws it with its own components in the page's colours, inside a thin frame with a **✦ title** chip, so a widget never looks like part of AgEnD and nothing in it can be clicked.
+
+- **Where.** An agent may place one in **its own chat**, as a strip under the header (up to 4 items), and one on **its own Details** page (up to 8 items). Your own widget goes in **the sidebar**, under the instance list; agents can't place one there.
+- **Live values.** Besides the values it sets, an agent's widget can show its own state, context use and cost, as the page already shows them. Your sidebar widget can show the fleet's counts: working, needs you, idle, stopped. Nothing else is read for it.
+- **How an agent sets one.** `set_web_widget` with `slot` (`chat_header` or `details`) and a `spec` places or replaces it. With only `data`, it gives the placed widget new values: at most one update every 10 seconds and 180 an hour, apart from its theme changes. `remove_web_widget` takes it out. From a shell: `agend-agent widget set|data|remove`.
+- **People decide.** **Lock theme** stops an agent changing its widgets too. A chat's or Details' **⋯** menu offers **Remove the chat header widget** and **Remove the Details widget**. A widget a person placed (from a mod) takes the agent's values, but the agent can't replace or remove it. **Reset theme…** removes the agent's widgets.
+- **Your sidebar widget.** **Settings → Web appearance → Your sidebar widget** takes the spec and values as JSON. It shows a preview and says what's wrong before saving. **Start from an example** fills in the fleet's counts. It is kept with your preferences on all your devices, and is never shown over a temporary public link or with `?safe=1`.
+- **Your switch** hides agents' widgets along with their themes. The public link shows agents' widgets, like their cards.
+
+### Mods
+
+A mod is one file, `<name>-<version>.agendmod.json`, that carries a look: an agent's theme with its pictures, its card text (tagline and bio, never card pictures), widgets, effects, and custom CSS. It is plain JSON of at most 8 MiB, with no zip and nothing to unpack. **Settings → Web appearance → Mods** imports, lists, downloads, uninstalls and exports them.
+
+- **Import is two steps.**
+  - **Import a mod file…** checks the whole file and shows everything in it before anything changes: the theme's colours and pictures, the card text, each widget as it will look, each effect with where it draws and what it hears, and **the custom CSS in full**. The author is shown as unverified.
+  - Tick what you want, choose the agent it goes to, then **Install**. Only the ticked parts are applied, all at once. If any part fails, nothing changes.
+- **Custom CSS is never ticked for you.** It reads "Custom CSS from this file — read it before turning it on". If you tick it, it becomes your own CSS on trial: **Keep** it, or it reverts after 15 seconds.
+- **Where things go.** The theme, card text and agent widgets go to the agent you choose, as a person's choice (**Lock theme** and **Reset theme…** work on it as usual). A sidebar widget becomes yours. Custom CSS becomes yours only, as always.
+- **The check is strict.** Every file must be listed with its SHA-256 and used by exactly one part. Paths are lowercase with no `..`. Each part is checked as its own feature checks it: theme contrast, picture types and sizes, widget specs, the custom-CSS rules, and effects.
+- **Versions.** A mod's identity is its content. Importing another version of an installed name asks to **Replace** it. Up to 20 mods and 64 MiB can be installed.
+- **Download** gives back an installed mod's file. The file is the whole bundle, including effects its import left out. So a file that carries effects downloads only for someone who may share every one of them: their own effect with the same content, or one a person shared. A file without effects downloads for any admin.
+- **Uninstall** removes the mod from the list, and its effects from your library unless something still uses them. What it applied stays until you reset it.
+- **Export a mod** makes a file from what is in force now: an agent's theme with its pictures and the effects it places, its card text and widgets, your sidebar widget, and your custom CSS with the files it names. An exported file imports as it is. **Only effects that are yours to carry away travel**: your own and ones a person shared. Someone else's private effect placed on that agent stays out, and the page says how many were left out. An agent's own export (`export_web_mod`) follows the same rule for the agent.
+- **Agents' mods.** An agent can export its own look as a mod file (`export_web_mod`, written in its working directory) and propose a mod for you to review (`propose_web_mod`). A proposal shows under **Proposed by agents**: **Review** opens it into the same two-step import, and **Dismiss** drops it. A mod an agent proposes can never carry custom CSS, and agents never import.
+- **Effects** in a mod need the effect runtime. Until this fleet has one, a mod that carries effects is refused with `effects_unavailable`.
+- Mods are a signed-in person's action. They are never available over a temporary public link, and an agent's CLI token can't reach them.
+
 ## Reaching it from elsewhere
 
 ### Temporary public link from a phone
@@ -349,6 +443,7 @@ Full reference: [configuration.md](configuration.md). CLI commands: [cli.md](cli
 | The sign-in page says the code is wrong | Codes are single-use and expire after 5 minutes, and only the newest works. Ask for a new one. |
 | "Your session has ended" | 48 hours without use or since sign-in (the defaults), or someone revoked. Sign in again. |
 | Updates arrive a few seconds late, with no live stream | The live stream is blocked on your path (or this is the public link), so the page polls every 5 seconds. Nothing to do — it is not shown as a problem. |
+| A page looks wrong or something is hidden after you saved custom CSS | Add `?safe=1` to the address to load it without your CSS. Settings → **Appearance** is never styled by it: fix the CSS there, or turn it off. |
 | `/web` answers "disabled" | No fleet admins are configured for that bot: add your user to its `allowed_users`. |
 | The browser's developer tools show a red **401** for `/auth/session` on the sign-in page | Expected: the page checks whether you are already signed in, and "no" is a 401. Nothing to do. |
 

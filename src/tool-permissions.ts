@@ -47,6 +47,15 @@ const WORKER: readonly string[] = [
   // Its own things.
   "task", "post_decision", "set_display_name", "set_description", "list_emojis", "set_persona_emoji", "preview_emojis",
   "list_stickers", "preview_stickers",
+  // Its own web theme (#1629): no target argument — the caller's own, rate-limited, refused while a person locked it.
+  "get_web_theme", "set_web_theme", "set_web_theme_asset", "reset_web_theme",
+  // How it appears on the dashboard (#1629 r4 §1): read-only, its own.
+  "get_web_appearance", "preview_web_appearance",
+  // Its own declarative widgets (#1629 r4-4): no target, the same lock and limits.
+  "set_web_widget", "remove_web_widget",
+  // Mods (#1629 r4-5b): its own look as a file, and proposing one for a person — never importing.
+  "export_web_mod", "propose_web_mod",
+  "upload_web_effect", "list_web_effects", "preview_web_effect", "profile_web_effect", "apply_web_effect", "remove_web_effect", "delete_web_effect",
   // Its own schedules. Present here, but not a free hand: scheduleOpRefusal
   // limits a non-coordinator to schedules that target itself and that it
   // created (#895). The target is the control, not whether the tool is listed.
@@ -96,12 +105,18 @@ export const TOOL_PROFILES: Readonly<Record<ToolSetName, readonly string[]>> = {
     // a dispatcher can choose its own status stamp like any worker.
     "list_emojis", "preview_emojis", "set_persona_emoji",
     "list_stickers", "preview_stickers",
+    // Its own web theme (#1629), like its own status stamp. (The read-only appearance tools stay out: this profile is
+    // the lean one — a dispatcher reads its theme with get_web_theme.)
+    "get_web_theme", "set_web_theme", "set_web_theme_asset", "reset_web_theme",
   ],
   standard: [
     "reply", "react", "edit_message", "close_poll",
     "send_to_instance", "broadcast", "list_instances", "describe_instance", "delivery_status",
     "list_decisions", "post_decision", "task", "set_display_name", "set_description", "list_emojis", "set_persona_emoji", "preview_emojis",
     "list_stickers", "preview_stickers",
+    "get_web_theme", "set_web_theme", "set_web_theme_asset", "reset_web_theme",
+    "get_web_appearance", "preview_web_appearance", "set_web_widget", "remove_web_widget", "export_web_mod", "propose_web_mod",
+    "upload_web_effect", "list_web_effects", "preview_web_effect", "profile_web_effect", "apply_web_effect", "remove_web_effect", "delete_web_effect",
     "validate_config", "get_fleet_status", "get_usage", "get_effort", "get_instance_logs", "get_fleet_config", "kiro_engine_status",
     // Self-scheduling, same scope as worker (#895).
     "create_schedule", "list_schedules", "update_schedule", "delete_schedule",
@@ -217,6 +232,23 @@ export const IPC_TYPE_TOOLS: Readonly<Record<string, string>> = {
   fleet_preview_emojis: "preview_emojis",
   fleet_list_stickers: "list_stickers",
   fleet_preview_stickers: "preview_stickers",
+  fleet_get_web_theme: "get_web_theme",
+  fleet_set_web_theme: "set_web_theme",
+  fleet_set_web_theme_asset: "set_web_theme_asset",
+  fleet_reset_web_theme: "reset_web_theme",
+  fleet_get_web_appearance: "get_web_appearance",
+  fleet_preview_web_appearance: "preview_web_appearance",
+  fleet_set_web_widget: "set_web_widget",
+  fleet_remove_web_widget: "remove_web_widget",
+  fleet_export_web_mod: "export_web_mod",
+  fleet_propose_web_mod: "propose_web_mod",
+  fleet_upload_web_effect: "upload_web_effect",
+  fleet_list_web_effects: "list_web_effects",
+  fleet_preview_web_effect: "preview_web_effect",
+  fleet_profile_web_effect: "profile_web_effect",
+  fleet_apply_web_effect: "apply_web_effect",
+  fleet_remove_web_effect: "remove_web_effect",
+  fleet_delete_web_effect: "delete_web_effect",
 };
 
 /**
@@ -245,6 +277,24 @@ export const EARLY_AGENT_OP_TOOLS: Readonly<Record<string, string>> = {
   "emoji-preview": "preview_emojis",
   stickers: "list_stickers",
   "sticker-preview": "preview_stickers",
+  "theme-get": "get_web_theme",
+  "theme-set": "set_web_theme",
+  "theme-clear": "set_web_theme",
+  "theme-asset": "set_web_theme_asset",
+  "theme-reset": "reset_web_theme",
+  "appearance-get": "get_web_appearance",
+  "appearance-preview": "preview_web_appearance",
+  "widget-set": "set_web_widget",
+  "widget-remove": "remove_web_widget",
+  "mod-export": "export_web_mod",
+  "mod-propose": "propose_web_mod",
+  "effect-upload": "upload_web_effect",
+  "effect-list": "list_web_effects",
+  "effect-preview": "preview_web_effect",
+  "effect-profile": "profile_web_effect",
+  "effect-apply": "apply_web_effect",
+  "effect-remove": "remove_web_effect",
+  "effect-delete": "delete_web_effect",
 };
 
 /**

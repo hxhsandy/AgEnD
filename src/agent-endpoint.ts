@@ -110,6 +110,8 @@ export interface AgentEndpointContext extends OutboundContext {
   handlePreviewStickersHttp(instance: string, args: Record<string, unknown>): Promise<unknown>;
   handleSetPersonaEmojiHttp(instance: string, args: Record<string, unknown>): Promise<unknown>;
   handlePreviewEmojisHttp(instance: string, args: Record<string, unknown>): Promise<unknown>;
+  /** #1629: the caller's own web theme (agend-agent theme …). */
+  handleWebThemeHttp(instance: string, tool: string, args: Record<string, unknown>): Promise<unknown>;
 }
 
 const DURABLE_HTTP_TOOLS = new Set([
@@ -385,6 +387,20 @@ export async function dispatchAgentOperation(
   if (op === "persona-emoji") {
     return ctx.handleSetPersonaEmojiHttp(instance, args);
   }
+  // #1629: agend-agent theme get|set|clear|asset|reset — the caller's own theme only (the token's instance).
+  if (op === "theme-get") return ctx.handleWebThemeHttp(instance, "get_web_theme", {});
+  if (op === "theme-set" || op === "theme-clear") return ctx.handleWebThemeHttp(instance, "set_web_theme", args);
+  if (op === "theme-asset") return ctx.handleWebThemeHttp(instance, "set_web_theme_asset", args);
+  if (op === "theme-reset") return ctx.handleWebThemeHttp(instance, "reset_web_theme", {});
+  if (op === "appearance-get") return ctx.handleWebThemeHttp(instance, "get_web_appearance", {});
+  if (op === "appearance-preview") return ctx.handleWebThemeHttp(instance, "preview_web_appearance", args);
+  if (op === "widget-set") return ctx.handleWebThemeHttp(instance, "set_web_widget", args);
+  if (op === "widget-remove") return ctx.handleWebThemeHttp(instance, "remove_web_widget", args);
+  if (op === "mod-export") return ctx.handleWebThemeHttp(instance, "export_web_mod", args);
+  if (op === "mod-propose") return ctx.handleWebThemeHttp(instance, "propose_web_mod", args);
+  // CW1 effect ops use the token-resolved instance; internal byte parts, never a workspace path.
+  const effectOps: Readonly<Record<string, string>> = { "effect-upload":"upload_web_effect", "effect-list":"list_web_effects", "effect-preview":"preview_web_effect", "effect-profile":"profile_web_effect", "effect-apply":"apply_web_effect", "effect-remove":"remove_web_effect", "effect-delete":"delete_web_effect" };
+  if (Object.hasOwn(effectOps, op)) return ctx.handleWebThemeHttp(instance, effectOps[op]!, args);
   if (op === "emoji-preview") {
     return ctx.handlePreviewEmojisHttp(instance, args);
   }

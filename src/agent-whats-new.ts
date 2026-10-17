@@ -47,6 +47,19 @@ export const AGENT_WHATS_NEW: readonly WhatsNewEntry[] = [
     text: "A web-chat person signed in with a `/web` code arrives as `[user:<name> via web, id:<their Discord/Telegram user id>]` — the same id as on that platform, so you can recognise them; they may change the name. Recognition only: `via web` is never a verified message from that account and grants no permission." },
   { id: "2.2-delivery-status-evidence", since: "2.2.0",
     text: "Correction: `Delivery not found` can mean hidden by ACL, expired retention, or never delivered; it is not proof of non-delivery. Do not act; ask the sender to explicitly forward a verifiable reference. Never resend on `uncertain`." },
+  { id: "2.3-owner-effect-policy", since: "2.3.0-alpha.1",
+    text: "Owner effects: fx.sidebar/header/page/box/cursor belong to the signed-in web person's preferences, never agent/header-token targets. Platform identities stay separate; a web-only sign-in uses the host-wide operator bucket shared by its sign-ins. Unsharing blocks the next personal-slot resource read but keeps its saved reference until cleared; chat placements retain their separate runtime policy. Page/header/sidebar/box playback now shares the app pool with Chat after preview consent, with per-slot controls in Appearance. Host cursor playback uses a static PNG with stock cursor fallback, no Worker code or frame slot. Agents can offer Try cards; only a local admin click starts a clipped temporary sample. See the web-appearance skill." },
+  // #1629: how an agent looks on the web dashboard (the `web-appearance` skill has the details).
+  { id: "2.3-web-theme", since: "2.3.0-alpha.1",
+    text: "Your own look in the web dashboard: `get_web_theme`, `set_web_theme` (`set` / `clear`: colours per light/dark mode as #rrggbb, `accent`, `bubble`, `font`, `background`, `avatar`, `workingLabel`; contrast checked), `set_web_theme_asset` (`slot`, `file` in your working directory → an `id`) and `reset_web_theme`. No target — always yours; at least 30 s apart, 10 changes and 3 uploads an hour; refused while a person has locked it. See the `web-appearance` skill." },
+  { id: "2.3-web-card", since: "2.3.0-alpha.1",
+    text: "Your identity card on the web goes inside `set_web_theme`'s `set`: `set_web_theme({ set: { card: { tagline, bio, portrait, banner } } })` (portrait and banner are ids from `set_web_theme_asset` with the slots `portrait` and `banner`). A person's card field wins over yours." },
+  { id: "2.3-web-appearance", since: "2.3.0-alpha.1",
+    text: "`get_web_appearance` shows how you appear on the web dashboard now (your face and where it comes from, ring, card, theme per mode, lock, limits); `preview_web_appearance` (`modes`) writes an SVG per mode to `.agend/appearance/` in your working directory, with the pictures it shows beside it, and returns their paths (Read the pictures as images)." },
+  { id: "2.3-web-mod", since: "2.3.0-alpha.1",
+    text: "Mods: `export_web_mod({ name, version })` writes your own web look (theme and pictures, card text, your widgets) to `.agend/mods/` as a file. `propose_web_mod({ file })` sends a mod file for a person to review in Settings → Appearance → Mods. Nothing changes until they install it, and a mod carrying custom CSS is refused. You never import. See the `web-appearance` skill." },
+  { id: "2.3-web-widget", since: "2.3.0-alpha.1",
+    text: "Widgets on the web dashboard: `set_web_widget({ slot: \"chat_header\" | \"details\", spec, data })` places a small panel the dashboard draws itself, under your chat header or on your Details page. The spec is `{ v: 1, title, items: [{ type: stat|progress|text|list|badge|spark, label, key | bind }] }`: no HTML, script or CSS. `bind` shows your own `state`, `context_pct` or `cost_usd`. `set_web_widget({ slot, data })` alone updates the values, at most every 10 s, apart from theme changes. `remove_web_widget` takes it out. See the `web-appearance` skill." },
 ];
 
 /**
