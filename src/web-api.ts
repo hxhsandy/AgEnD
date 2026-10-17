@@ -1,5 +1,5 @@
 import { webHumanOrigin, type HumanOrigin } from "./human-delivery-receipts.js";
-import { guestDeliveries, guestFrameData, guestHistory, guestMessages, guestPollBody, guestRequestOf, guestStatus, type GuestRequest } from "./web-guest-access.js";
+import { guestChatRefusal, guestCommandText, guestDeliveries, guestFrameData, guestHistory, guestMessages, guestPollBody, guestPrefs, guestRequestOf, guestSeesMessage, guestStatus, type GuestRequest } from "./web-guest-access.js";
 import { withSpawnHoldReply } from "./spawn-hold-reply.js";
 import { binaryProbe } from "./binary-probe.js";
 import type { CachedImage } from "./web-images.js";
@@ -308,7 +308,7 @@ export interface WebApiContext {
   /** Answer one of them, exactly as a click on its platform button would. */
   clickWebPrompt?(instance: string, nonce: string, action: string): Promise<{ status: number; error?: string }>;
   /** #1266: a click on an agent reply's button. */
-  clickWebReplyButton?(instance: string, id: string, index: number, voter?: { key: string; userId: string; name: string }): Promise<{ status: number; error?: string; options?: number[] }>;
+  clickWebReplyButton?(instance: string, id: string, index: number, voter?: { key: string; userId: string; name: string; guest?: true }): Promise<{ status: number; error?: string; options?: number[] }>;
   /** Interrupt the current reply and drop what was queued for it; false when the instance is not running. */
   cancelInstance?(name: string): boolean;
   restartSingleInstance(name: string, opts?: { explicit?: boolean }): Promise<void>;
@@ -1313,12 +1313,21 @@ export function handleWebRequest(
         json(res, 400, { error: "instance, id and index required" });
         return;
       }
+      // #1920 step 2b: a guest clicks only on a reply it may see (§5.2), of an in-scope instance, while guests may chat.
+      const guest = guestRequestOf(req);
+      const refused = guestChatRefusal(guest, instance);
+      if (refused) { json(res, refused.status, { error: refused.error }); return; }
+      if (guest) {
+        const row = guest.history?.()?.findByButtons(instance, id);
+        if (!row || !guestSeesMessage(row, guest, guest.scope())) { json(res, 404, { error: "not found" }); return; }
+      }
       // #1823/#1827: the click is this page's person's — on a poll their vote (one per person, on every device of
       // theirs), on one-click buttons their choice — under their web id and name. A request that no longer passes the
       // gate (a session revoked meanwhile) clicks nothing as anyone.
       const person = webPersonOr401(req, res, url, ctx);
       if (!person) return;
-      const r = await click(instance, id, index, { key: person.voterKey, userId: person.userId, name: person.name });
+      // #1920 review: a guest's choice reaches the agent marked as a guest's, as its typed messages do.
+      const r = await click(instance, id, index, { key: person.voterKey, userId: person.userId, name: person.name, ...(guest ? { guest: true as const } : {}) });
       json(res, r.status, r.status === 200 ? { answered: true, ...(r.options ? { options: r.options } : {}) } : { error: r.error ?? "Refused", ...(r.status === 409 ? { gone: true } : {}) });
     })().catch(err => {
       ctx.logger.error({ err: (err as Error).message }, "Web reply-button click failed");
@@ -1463,6 +1472,9 @@ export function handleWebRequest(
       json(res, 404, { error: `Instance not found: ${name}` });
       return true;
     }
+    // #1920 step 2b: a guest's Cancel is the platform button's (anyone allowed there), while guests may chat.
+    const cancelRefused = guestChatRefusal(guestRequestOf(req), name);
+    if (cancelRefused) { json(res, cancelRefused.status, { error: cancelRefused.error }); return true; }
     if (!ctx.cancelInstance(name)) { json(res, 409, { error: `${name} is not running` }); return true; }
     ctx.eventLog?.logActivity("cancel", webPersonOf(req, url, ctx)?.name ?? WEB_NAME_FALLBACK, "stop the current reply", name);
     json(res, 200, { cancelled: name });
@@ -2008,6 +2020,11 @@ function handleSendMessage(req: IncomingMessage, res: ServerResponse, ctx: WebAp
         return;
       }
       const { instance, message: typed, attachments = [] } = parsed.data;
+      // #1920 step 2b: a guest writes only to an in-scope instance, while guests may chat, and never a command.
+      const guest = guestRequestOf(req);
+      const refused = guestChatRefusal(guest, instance);
+      if (refused) { json(res, refused.status, { error: refused.error }); return; }
+      if (guest && guestCommandText(typed)) { json(res, 403, { error: "guest_no_commands" }); return; }
       const ipc = ctx.instanceIpcClients.get(instance);
       if (!ipc) {
         json(res, 404, { error: `Instance not found: ${instance}` });
@@ -2080,6 +2097,7 @@ function handleSendMessage(req: IncomingMessage, res: ServerResponse, ctx: WebAp
             ts,
             thread_id: topicId != null ? String(topicId) : "",
             source: "web",
+            ...(guest ? { web_guest: "1" } : {}),          // #1920: "[user:… via web (guest), id:…]" (authority none)
             adapter_id: syncAdapter?.id,
             ...delivery.meta,
           },
@@ -2137,6 +2155,9 @@ function handleSendMessage(req: IncomingMessage, res: ServerResponse, ctx: WebAp
 function handleUpload(req: IncomingMessage, res: ServerResponse, url: URL, ctx: WebApiContext): void {
   const instance = url.searchParams.get("instance") ?? "";
   if (!ctx.webFiles) { json(res, 404, { error: "uploads are not available" }); return; }
+  // #1920 step 2b: a guest's upload is for an in-scope instance's message, while guests may chat.
+  const guestRefused = guestChatRefusal(guestRequestOf(req), instance);
+  if (guestRefused) { req.resume(); json(res, guestRefused.status, { error: guestRefused.error }); return; }
   if (!instance || instance.length > 128 || !safeInstanceSegment(instance) || !ctx.instanceIpcClients.has(instance)) {
     json(res, 404, { error: `Instance not found: ${instance}` });
     return;
@@ -2321,18 +2342,22 @@ function serveMediaRange(req: IncomingMessage, res: ServerResponse, files: WebFi
  * or replays a tour already seen, a new device included. Only for the signed-in app (the public link reads what is in
  * force too); the anonymous View reader and the sign-in page keep the browser's own.
  */
-type PrefsViewer = { person: string | null; epoch: string | null; scope: "none" | "person" | "operator"; canWrite: boolean; via: string };
+type PrefsViewer = { person: string | null; epoch: string | null; scope: "none" | "person" | "operator"; canWrite: boolean; via: string; guest?: boolean };
 function prefsViewer(req: IncomingMessage, url: URL, ctx: Partial<Pick<WebApiContext, "webToken" | "webSessions">>): PrefsViewer | null {
   const v = evaluateWebRequest(req as unknown as WebGateRequest, url, ctx.webToken ?? null, ctx.webSessions, { touch: false });
   if (v.kind !== "allow") return null;
   if (!gatewayRequestContext(req) && v.via === "session" && v.session) {
     const person = webPersonKey(v.session.owner);
-    return { person, epoch: v.session.handle, scope: person === OPERATOR ? "operator" : "person", canWrite: v.session.tier === "admin", via: "session" };
+    return { person, epoch: v.session.handle, scope: person === OPERATOR ? "operator" : "person", canWrite: v.session.tier === "admin", via: "session", ...(v.session.tier === "guest" ? { guest: true } : {}) };
   }
   return { person: null, epoch: null, scope: "none", canWrite: v.via !== "session" || v.session?.tier === "admin", via: v.via };
 }
 const prefsScope = (v: PrefsViewer | null) => ({ ownerScope: v?.scope ?? "none", ownerEpoch: v?.epoch ?? null });
-const prefsView = (prefs: WebPrefsStore, v: PrefsViewer | null) => ({ ...prefs.readForViewer(v?.person ?? null), ...prefsScope(v) });
+// #1920: a guest reads the host's look and its own, never a preference that names an instance (guestPrefs).
+const prefsView = (prefs: WebPrefsStore, v: PrefsViewer | null) => {
+  const view = { ...prefs.readForViewer(v?.person ?? null), ...prefsScope(v) };
+  return v?.guest ? guestPrefs(view) : view;
+};
 function shellHtmlTag(ctx: AppShellContext, mode: AppShellMode, viewer: PrefsViewer | null): string {
   if (mode !== "full" || !ctx.webPrefs) return '<html lang="en">';
   const view = prefsView(ctx.webPrefs, viewer);
