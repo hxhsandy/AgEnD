@@ -7,7 +7,6 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import v8 from "node:v8";
 import vm from "node:vm";
 import { installDom, settle } from "./helpers/mini-dom.js";
 import { h, page, type AppPage } from "./helpers/app-harness.js";
@@ -679,20 +678,56 @@ describe("the chat's renderer and a live preview (§6.2, #1408 §4)", () => {
     expect(node.querySelector(".pv-note").textContent).toMatch(/HTML previews are off\./);
   });
 
-  it("a card that left the page is not kept alive by the card registry (#1332 review)", async () => {
-    const { thread, list } = threadAt(fresh().document);
-    // Built in its own scope so nothing in this test holds the card afterwards.
-    const build = () => {
-      thread.render([agent(1, FENCE("<p>a</p>"))]);
-      const card = list.querySelector(".html-card");
-      expect(card?.querySelector(".pv-run"), "the card was really built").not.toBeNull();
-      thread.render([]);
-      return new WeakRef(card);
+  // #1332 review, made deterministic (#2032): a card that left the page is held by nothing the chat keeps. Not the
+  // thread's node map, not the preview module's live frame, and not a refresh: the per-card refresh registry is a
+  // WeakMap that refreshCards() reaches only through the cards still in the thread. The old version waited for a real
+  // gc() to clear a WeakRef — whether a detached node is collected within a few ticks is the engine's business, and
+  // shard 3 kept failing on it. Correctness never depended on the collection, only on these references going away.
+  it("a card that left the page is held by nothing the chat keeps: the thread's nodes, a live preview, a refresh (#1332 review, #2032)", () => {
+    // The per-card registry is weak (Prism #2033): while the thread is made and draws, every Map / Set / WeakMap it
+    // creates is a recording subclass. A card may be a WeakMap key, never a key or member of a strong collection —
+    // a strong registry would keep every retired card (and its HTML source) for the thread's whole life.
+    const Real = { Map: globalThis.Map, Set: globalThis.Set, WeakMap: globalThis.WeakMap };
+    const isCard = (k: any) => !!k?.classList?.contains?.("html-card");
+    const strong: string[] = [], weak: unknown[] = [];
+    class RecMap<K, V> extends Real.Map<K, V> { override set(k: K, v: V) { if (isCard(k)) strong.push("Map key"); return super.set(k, v); } }
+    class RecSet<T> extends Real.Set<T> { override add(v: T) { if (isCard(v)) strong.push("Set member"); return super.add(v); } }
+    class RecWeakMap<K extends WeakKey, V> extends Real.WeakMap<K, V> { override set(k: K, v: V) { if (isCard(k)) weak.push(k); return super.set(k, v); } }
+    Object.assign(globalThis, { Map: RecMap, Set: RecSet, WeakMap: RecWeakMap });
+    let made: ReturnType<typeof threadAt>;
+    try {
+      made = threadAt(fresh().document);
+      made.thread.render([agent(1, FENCE("<p>a</p>"))]);
+    } finally { Object.assign(globalThis, Real); }
+    expect([weak.length > 0, strong], "the card is a weak key only").toEqual([true, []]);
+    const { thread, list } = made!;
+    const released = (node: any, card: any, key: string) => {
+      expect(list.contains(card), "it left the thread").toBe(false);
+      expect([...thread.nodes.values()].some((v: any) => v.node === node || v.node.contains(card)), "the thread's node map lets go").toBe(false);
+      expect([PV.liveCount(), !!PV.liveFrame(key)], "the preview module lets go of its frame").toEqual([0, false]);
     };
-    const ref = build();
-    v8.setFlagsFromString("--expose-gc");
-    const gc = vm.runInNewContext("gc") as () => void;
-    for (let i = 0; i < 5 && ref.deref(); i++) { await new Promise(r => setImmediate(r)); gc(); }
-    expect(ref.deref(), "the retired card was collected").toBeUndefined();
+    // Another message takes its place (draw's path).
+    const node = list.children[0], card = list.querySelector(".html-card");
+    expect(card?.querySelector(".pv-run"), "the card was really built").not.toBeNull();
+    runPreview(node, 1);
+    expect([PV.liveCount(), !!PV.liveFrame(keyOf(1))], "its preview is running").toEqual([1, true]);
+    thread.render([agent(2, FENCE("<p>b</p>"))]);
+    released(node, card, keyOf(1));
+    // A refresh reaches the cards in the thread only: turning previews off rewrites the new card, never the old one.
+    const next = list.querySelector(".html-card"), oldNote = card!.querySelector(".pv-note")?.textContent, nextNote = next.querySelector(".pv-note")?.textContent;
+    PV.setNever(true);
+    try {
+      thread.refreshCards();
+      expect(next.querySelector(".pv-note").textContent, "the card in the thread hears it").toMatch(/switched off on this device/);
+      expect(next.querySelector(".pv-note").textContent).not.toBe(nextNote);
+      expect(card!.querySelector(".pv-note")?.textContent, "the card that left does not").toBe(oldNote);
+    } finally { PV.setNever(false); }
+    // The thread emptied (render's own path).
+    const node2 = list.children[0], card2 = list.querySelector(".html-card");
+    runPreview(node2, 2);
+    expect(PV.liveCount()).toBe(1);
+    thread.render([]);
+    released(node2, card2, keyOf(2));
+    expect(thread.nodes.size).toBe(0);
   });
 });
