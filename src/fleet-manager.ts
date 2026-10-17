@@ -350,7 +350,7 @@ type ReconcileObserver = (
   status: ApplyTargetStatus,
   error?: string,
 ) => void;
-import { CHAT_PROFILE_LOGIN_BACKENDS, credentialHomeSpec, credentialProfileHome, credentialProfileLogin, credentialSwitchCarriesConversation, credentialSwitchStartsFresh, instanceCredentialProfile } from "./backend/credential-profile.js";
+import { CHAT_PROFILE_LOGIN_BACKENDS, credentialHomeSpec, credentialProfileHome, credentialProfileLogin, credentialProfileStoreHome, credentialSwitchCarriesConversation, credentialSwitchStartsFresh, instanceCredentialProfile } from "./backend/credential-profile.js";
 import { carryClaudeConversation, type CarryResult } from "./backend/claude-carry.js";
 import { mergeBackendOptions, profileKey, profileName, profileOf, type ClassicProfile } from "./classic-bindings.js";
 import {
@@ -1209,6 +1209,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
   /** #1306: the preview listener (health_port + 1 by default), and whether it is listening. */
   private previewListener: PreviewListener | null = null;
   private previewListening = false;
+  /** The preview listener could not open its port: "<port>: <error code>", for the page (#2061 follow-up); null otherwise. */
+  private previewListenError: string | null = null;
   /** The ports the preview listener was started for, and the inputs it was built from (a reload compares them). */
   private previewPorts: { requested: number; bound: number } | null = null;
   private previewInputs = "";
@@ -13447,10 +13449,11 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       };
     };
     const choicesFromCache = (instance: string): WebChoices | null => {
-      const cached = this.readCliEnv(this.backendNameForInstance(instance));     // the cached catalog only: never a probe here
+      const backend = this.backendNameForInstance(instance);
+      const cached = this.readCliEnv(backend, this.catalogProfile(backend, instance));     // the cached catalog only: never a probe here
       if (!cached?.models.length) return null;
       const current = this.resolveInstanceModel(instance).model;
-      return { current, options: cached.models.map(o => ({ id: o.id, label: this.modelChoiceLabel(o, current) })) };
+      return { current, options: this.withCurrentModel(cached.models, current).map(o => ({ id: o.id, label: this.modelChoiceLabel(o, current) })) };
     };
     return runWebCommand({
       // Own entries only: a name like "__proto__" or "constructor" must not be found on the prototype (#1476 review).
@@ -16450,7 +16453,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     configured: string | null | undefined = this.fleetConfig?.instances[instanceName]?.model ?? this.fleetConfig?.defaults?.model,
   ): { known: boolean; names: string[] } {
     const aliases = ["default", "sonnet", "opus", "haiku", "opusplan", "Fable"];
-    const api = (this.readCliEnv("claude-code")?.apiModels ?? []).map(m => m.id);
+    const api = (this.readCliEnv("claude-code", this.catalogProfile("claude-code", instanceName))?.apiModels ?? []).map(m => m.id);
     const lower = model.trim().toLowerCase();
     const bare = lower.replace(/\[1m\]$/, "");
     const known = aliases.some(a => a.toLowerCase() === bare)
@@ -16480,14 +16483,24 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     return classic ?? this.fleetConfig?.defaults?.backend ?? "claude-code";
   }
 
-  private cliEnvPath(backend: string): string {
-    return join(getAgendHome(), "cli-env", `${backend.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+  /**
+   * #2072: a catalog is the account's, so a credential profile has its own. Only claude-code's probe reads an account
+   * catalog through a profile's login (its `GET /v1/models` with the profile's token); other backends' probes read the
+   * process environment, so their catalog stays the backend's own.
+   */
+  private catalogProfile(backend: string, instanceName: string | null | undefined): string | null {
+    return backend === "claude-code" && instanceName ? this.credentialProfileOf(instanceName, backend) : null;
   }
 
-  /** Read the cached CLI env for a backend, or null if missing/stale/unparseable. */
-  private readCliEnv(backend: string): import("./backend/types.js").CliEnv | null {
+  private cliEnvPath(backend: string, profile: string | null = null): string {
+    const safe = (s: string) => s.replace(/[^A-Za-z0-9._-]/g, "_");
+    return join(getAgendHome(), "cli-env", profile ? `${safe(backend)}@${safe(profile)}.json` : `${safe(backend)}.json`);
+  }
+
+  /** Read the cached CLI env for a backend (a credential profile's own, when given), or null if missing/stale/unparseable. */
+  private readCliEnv(backend: string, profile: string | null = null): import("./backend/types.js").CliEnv | null {
     try {
-      const env = JSON.parse(readFileSync(this.cliEnvPath(backend), "utf-8")) as import("./backend/types.js").CliEnv;
+      const env = JSON.parse(readFileSync(this.cliEnvPath(backend, profile), "utf-8")) as import("./backend/types.js").CliEnv;
       if (typeof env?.probedAt === "number" && Date.now() - env.probedAt < CLI_ENV_TTL_MS) return env;
     } catch { /* missing / stale / corrupt */ }
     return null;
@@ -16532,12 +16545,14 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
    */
   private async probeBackendBounded(
     backend: string,
-    opts: { refreshVendorCatalog?: boolean } = {},
+    opts: { refreshVendorCatalog?: boolean; profile?: string | null } = {},
   ): Promise<import("./backend/types.js").CliEnv | null> {
-    // #725: single-flight per backend. Explicit vendor refreshes remain a
+    // #725: single-flight per backend (#2072: per backend and credential profile). Explicit vendor refreshes remain a
     // separate flight from an ordinary probe, while sysinfo can join either.
-    const regularFlight = this.pendingCliEnvProbes.get(backend);
-    const vendorFlight = this.pendingVendorCliEnvProbes.get(backend);
+    const profile = opts.profile ?? null;
+    const key = profile ? `${backend}@${profile}` : backend;
+    const regularFlight = this.pendingCliEnvProbes.get(key);
+    const vendorFlight = this.pendingVendorCliEnvProbes.get(key);
     if (opts.refreshVendorCatalog && vendorFlight) return vendorFlight;
     if (!opts.refreshVendorCatalog && (vendorFlight || regularFlight)) return vendorFlight ?? regularFlight!;
 
@@ -16546,18 +16561,19 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     const epoch = this.cliEnvProbeEpoch;
     const input: BackendProbeInput = {
       mode: "env", backend, instanceDir,
-      config: { workingDirectory: "", instanceDir, instanceName: `probe-${backend}`, mcpServers: {} },
+      config: { workingDirectory: "", instanceDir, instanceName: `probe-${backend}`, mcpServers: {},
+        ...(profile ? { credentialStoreHome: credentialProfileStoreHome(getAgendHome(), backend, profile) } : {}) },
       refreshVendorCatalog: opts.refreshVendorCatalog === true,
     };
-    const bounded = this.runBackendProbeWorker(`global:${backend}`, input).then(probed => {
+    const bounded = this.runBackendProbeWorker(`global:${key}`, input).then(probed => {
       if (!probed || Array.isArray(probed) || this.shuttingDown || epoch !== this.cliEnvProbeEpoch) return null;
-      try { return this.persistCliEnvProbeResult(backend, probed); }
-      catch (err) { this.logger.warn({ backend, err }, "CLI env cache write failed"); return null; }
+      try { return this.persistCliEnvProbeResult(backend, probed, profile); }
+      catch (err) { this.logger.warn({ backend, profile, err }, "CLI env cache write failed"); return null; }
     }).finally(() => {
       const flights = opts.refreshVendorCatalog ? this.pendingVendorCliEnvProbes : this.pendingCliEnvProbes;
-      if (flights.get(backend) === bounded) flights.delete(backend);
+      if (flights.get(key) === bounded) flights.delete(key);
     });
-    (opts.refreshVendorCatalog ? this.pendingVendorCliEnvProbes : this.pendingCliEnvProbes).set(backend, bounded);
+    (opts.refreshVendorCatalog ? this.pendingVendorCliEnvProbes : this.pendingCliEnvProbes).set(key, bounded);
     return bounded;
   }
 
@@ -16678,6 +16694,15 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     return this.resolveInstanceModel(instanceName).display;
   }
 
+  /**
+   * #2072: the model an instance runs is always among its choices — one its CLI's catalog does not list (an older
+   * name, a custom provider's, a typed one) is shown first, marked, so the menu never hides what is running.
+   */
+  private withCurrentModel(options: import("./backend/types.js").ModelOption[], currentModel: string | null | undefined): import("./backend/types.js").ModelOption[] {
+    if (!currentModel || currentModel === "default" || options.some(o => o.id === currentModel)) return options;
+    return [{ id: currentModel, label: currentModel, description: t("model.not_listed") }, ...options];
+  }
+
   private modelChoiceLabel(
     option: import("./backend/types.js").ModelOption,
     currentModel: string,
@@ -16690,6 +16715,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
   private persistCliEnvProbeResult(
     backend: string,
     probed: Omit<import("./backend/types.js").CliEnv, "backend" | "probedAt">,
+    profile: string | null = null,
   ): import("./backend/types.js").CliEnv {
     const env: import("./backend/types.js").CliEnv = { backend, probedAt: Date.now(), ...probed };
     // An empty result must never overwrite a catalog we already have. Some
@@ -16699,25 +16725,25 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     // antigravity cache replaced by an empty one. Keep the known models and
     // let the fresher currentModel/version through.
     if (!env.models?.length) {
-      const previous = this.readCliEnv(backend);
+      const previous = this.readCliEnv(backend, profile);
       if (previous?.models?.length) env.models = previous.models;
     }
     // Same protection for the extended catalog: one offline moment must not
     // blank a good account list for the whole cache TTL.
     if (!env.apiModels?.length) {
-      const previous = this.readCliEnv(backend);
+      const previous = this.readCliEnv(backend, profile);
       if (previous?.apiModels?.length) env.apiModels = previous.apiModels;
     }
     // Effort levels read from --help (#1328) are a capability of one binary. A help that could not be read (absent)
     // keeps the cached levels only for that same binary: both versions known and equal, cache still valid. A help
     // that was read and lists none ([]) is an answer and is written as is, so the fallback applies.
     if (env.effortLevels === undefined) {
-      const previous = this.readCliEnv(backend);
+      const previous = this.readCliEnv(backend, profile);
       if (previous?.effortLevels && previous.version && env.version && previous.version === env.version) {
         env.effortLevels = previous.effortLevels;
       }
     }
-    const path = this.cliEnvPath(backend);
+    const path = this.cliEnvPath(backend, profile);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, JSON.stringify(env, null, 2));
     return env;
@@ -16733,6 +16759,15 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     // #724: use the bounded variant so background startup probes cannot hang
     // indefinitely — each is wrapped by CLI_ENV_PROBE_DEADLINE_MS.
     for (const b of backends) void this.probeBackendBounded(b);
+    // #2072: each Claude credential profile in use has its own account catalog. Only fleet.yaml's agents are walked
+    // here; a ClassicBot room on a profile is probed on its first /model (catalogProfile knows rooms too).
+    const profiles = new Set<string>();
+    for (const name of Object.keys(this.fleetConfig?.instances ?? {})) {
+      if (this.backendNameForInstance(name) !== "claude-code") continue;
+      const profile = this.catalogProfile("claude-code", name);
+      if (profile) profiles.add(profile);
+    }
+    for (const profile of profiles) void this.probeBackendBounded("claude-code", { profile });
   }
 
   /** Best-effort model list for `/model`: cached CLI env first, else live probe. Never throws. */
@@ -16755,7 +16790,8 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     opts: { refresh?: boolean; refreshVendorCatalog?: boolean; onLiveProbe?: () => void } = {},
   ): Promise<{ models: import("./backend/types.js").ModelOption[]; source: "live" | "cache" }> {
     const backendName = this.backendNameForInstance(instanceName);
-    const cached = this.readCliEnv(backendName);
+    const profile = this.catalogProfile(backendName, instanceName);
+    const cached = this.readCliEnv(backendName, profile);
     if (!opts.refresh && cached?.models.length && !this.cliEnvNeedsRefresh(cached)) {
       return { models: cached.models, source: "cache" };
     }
@@ -16766,7 +16802,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     // Stale, missing, or a forced refresh → probe live (also refreshes the cache).
     // A newly released model is invisible until this runs, which is why staleness
     // triggers it rather than waiting for the 24h hard expiry or a cold start.
-    const env = await this.probeBackendBounded(backendName, { refreshVendorCatalog: opts.refreshVendorCatalog });
+    const env = await this.probeBackendBounded(backendName, { refreshVendorCatalog: opts.refreshVendorCatalog, profile });
     if (env?.models.length) return { models: env.models, source: "live" };
     // Probe failed or timed out: the previous list is still the best answer.
     return { models: cached?.models ?? [], source: "cache" };
@@ -16786,7 +16822,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
   ): { id: string; label: string }[] {
     const isClaude = this.backendNameForInstance(instanceName) === "claude-code";
     const choices = [{ id: `${MODEL_SELECT_CALLBACK_PREFIX}${nonce}:__refresh__`, label: t("model.refresh") }];
-    for (const o of options.slice(0, isClaude ? 23 : 24)) {
+    for (const o of this.withCurrentModel(options, currentModel).slice(0, isClaude ? 23 : 24)) {
       choices.push({ id: `${MODEL_SELECT_CALLBACK_PREFIX}${nonce}:${o.id}`, label: this.modelChoiceLabel(o, currentModel) });
     }
     if (isClaude) choices.push({ id: `${MODEL_SELECT_CALLBACK_PREFIX}${nonce}:__more__`, label: t("model.more") });
@@ -17197,10 +17233,12 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
   }
 
   /** Cached-or-live account catalog behind "/model → more models" (claude). */
-  private async claudeApiModelOptions(): Promise<import("./backend/types.js").ModelOption[]> {
-    const cached = this.readCliEnv("claude-code");
+  private async claudeApiModelOptions(instanceName: string): Promise<import("./backend/types.js").ModelOption[]> {
+    // #2072: the account behind THIS instance — its credential profile's catalog, else the default login's.
+    const profile = this.catalogProfile("claude-code", instanceName);
+    const cached = this.readCliEnv("claude-code", profile);
     if (cached?.apiModels?.length) return cached.apiModels;
-    const env = await this.probeBackendBounded("claude-code");
+    const env = await this.probeBackendBounded("claude-code", { profile });
     return env?.apiModels ?? [];
   }
 
@@ -17211,7 +17249,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     adapter?: ChannelAdapter; adapterChatId?: string; adapterThreadId?: string; menuMessageId?: string;
     respondChoices?: (text: string, choices: { id: string; label: string }[]) => Promise<string | undefined>;
   }): Promise<void> {
-    const expanded = await this.claudeApiModelOptions();
+    const expanded = await this.claudeApiModelOptions(pending.instanceName);
     if (!expanded.length) {
       await pending.respond(t("model.more_unavailable")).catch(() => {});
       return;
@@ -20881,6 +20919,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
       this.logger.warn({ code: err.code, port: settings.port }, "Preview listener unavailable; HTML previews are off");
       this.previewListening = false;
       this.previewListener = null;
+      this.previewListenError = `${settings.port}: ${err.code ?? err.message}`;
     });
     // An optional listener never takes the fleet down: a port Node refuses outright throws here, synchronously.
     try {
@@ -20889,6 +20928,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
       this.logger.warn({ err: (err as Error).message, port: settings.port }, "Preview listener cannot listen; HTML previews are off");
       this.previewListening = false;
       this.previewListener = null;
+      this.previewListenError = `${settings.port}: ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}`;
     }
   }
 
@@ -20911,6 +20951,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
 
   private stopPreviewListener(): void {
     this.previewListening = false;
+    this.previewListenError = null;
     this.previewListener?.close();
     this.previewListener = null;
   }
@@ -20919,8 +20960,16 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
   previewForUi(hostHeader: string | undefined, secure: boolean): PreviewAvailability & { boot: string | null } {
     const listener = this.previewListening ? this.previewListener : null;
     const decided = previewAvailability(listener ? listener.settings : null, hostHeader, secure, listener ? listener.origins : undefined);
-    if (!listener && this.fleetConfig?.web?.preview !== false) decided.reason = "Previews are not available on this fleet right now.";
+    // Previews are on, but no listener answers: say why — its port could not be opened (the error, never "turned off"),
+    // or it is not listening yet.
+    if (!listener && this.fleetConfig?.web?.preview !== false) Object.assign(decided, this.previewNotListening());
     return { ...decided, boot: listener ? listener.bootId : null };
+  }
+  private previewNotListening(): { code: PreviewOffCode; reason: string; detail?: string } {
+    const failed = this.previewListenError;
+    return failed
+      ? { code: "listenFailed", detail: failed, reason: `Previews are unavailable: the fleet could not open its preview port (${failed}). Another program may be using it — set web.preview_port, then restart AgEnD.` }
+      : { code: "notListening", reason: "Previews are not available on this fleet right now." };
   }
 
   /**
@@ -20936,7 +20985,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     const configured = typeof web?.preview_origin === "string" ? normalizeOrigin(web.preview_origin) : null;
     if (configured) {
       const listener = this.previewListening ? this.previewListener : null;
-      if (!listener) return off("publicLink", "Previews are not available on this fleet right now.");
+      if (!listener) { const why = this.previewNotListening(); return off(why.code, why.reason, why.detail ? { detail: why.detail } : {}); }
       if (!configured.startsWith("https:")) return off("needHttps", "Previews need an https web.preview_origin when the dashboard is reached over https.");
       return { dashboardOrigin, previewOrigin: configured, reason: null, code: null, boot: listener.bootId, frameSrc: `${configured}/frame` };
     }
