@@ -77,6 +77,7 @@ import { isProbeableRouteTarget, type RouteTarget } from "./fleet-context.js";
 import { getEffectiveInstanceDefaults, loadFleetConfig, loadRawFleetConfig, DEFAULT_COST_GUARD, DEFAULT_DAILY_SUMMARY, DEFAULT_INSTANCE_CONFIG } from "./config.js";
 import { EventLog } from "./event-log.js";
 import { binaryProbe } from "./binary-probe.js";
+import { AVAILABILITY_STALE_MS, BackendAvailabilityStore, hostAvailabilityProbes, type AvailabilityProbes, type BackendAvailability } from "./backend-availability.js";
 import { classifySqliteOpenError } from "./sqlite-open-errors.js";
 import { OutboxOpenError } from "./outbox-open-error.js";
 import { AdapterWorld } from "./adapter-world.js";
@@ -95,7 +96,7 @@ import { createBackend } from "./backend/factory.js";
 import { readEffortMetadata } from "./backend/effort-metadata.js";
 import { codexEffort, flagEffort } from "./backend/launch-effort.js";
 import { codexMetadataHomes, readCodexModelEffortLevels, resolveCodexLaunchModel } from "./backend/codex-metadata.js";
-import { CLI_ENV_TTL_MS, isModelCompatible, resolveBinary, SYSINFO_BACKEND_IDS, UnsupportedCliError, type BackendCliVersionSnapshot } from "./backend/types.js";
+import { CLI_ENV_TTL_MS, isModelCompatible, noteResolvedBinary, resolveBinary, SYSINFO_BACKEND_IDS, UnsupportedCliError, type BackendCliVersionSnapshot } from "./backend/types.js";
 import { createLogger, rotateLogIfNeeded, type Logger } from "./logger.js";
 import { processAttachments } from "./channel/attachment-handler.js";
 import { routeToolCall } from "./channel/tool-router.js";
@@ -6595,6 +6596,9 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
 
     await TmuxManager.ensureSession(getTmuxSession());
     this.tmuxSessionEnsured = true;
+
+    // #2072: what this host can run — probed in the background, published for every picker.
+    this.startAvailabilityRefresh();
 
     // Pre-flight (advisory, fire-and-forget): warm the per-backend auth cache
     // before instances spawn, so a CLI that comes up on its sign-in screen gets
@@ -13468,7 +13472,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         if (step.kind === "refuse") return step.noop ? { text: step.text } : { error: step.text };
         if (step.kind === "choose") {
           const id = (token: string) => joinBackendArgs([...step.args, token]);
-          return { choices: { prompt: step.text, current: step.current === null ? null : id(step.current), options: step.choices.map(c => ({ id: id(c.token), label: c.label })) } };
+          return { choices: { prompt: step.text, current: step.current === null ? null : id(step.current), options: step.choices.map(c => ({ id: id(c.token), label: c.label, ...(c.disabled ? { disabled: c.disabled } : {}) })) } };
         }
         const now = performance.now();
         for (const [k, v] of this.webBackendTokens) if (v.deadline < now) this.webBackendTokens.delete(k);
@@ -14742,7 +14746,11 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         fleetConfig: () => this.fleetConfig,
         isFleetAdmin: (userId, adapterId) => this.isFleetAdmin(userId, adapterId),
         eventLog: () => this.eventLog,
-        recoverBackendInstances: (backend, profile) => this.recoverBackendInstances(backend, undefined, profile ?? null),
+        recoverBackendInstances: (backend, profile) => {
+          // #2072: a sign-in just finished — the pickers learn it now, not at the next pass.
+          if (!profile) void this.backendAvailability.refresh([backend], { force: true });
+          return this.recoverBackendInstances(backend, undefined, profile ?? null);
+        },
         claimWindow: backend => this.loginWindow.tryClaim("web", backend),
         releaseWindow: claim => { this.loginWindow.release(claim); },
         isClaimCurrent: claim => this.loginWindow.isCurrent(claim),
@@ -15318,6 +15326,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         // binary the same way, so a binary only a login shell could see was
         // installed, reported as verified, and then offered nowhere.
         this.adoptBinaryDirectory(installedAt, backend);
+        // #2072: an install just finished — the pickers learn it now, not at the next pass.
+        void this.backendAvailability.refresh([backend], { force: true });
         if (!LOGIN_FLOWS[backend]) {
           this.installHandoff = null;
           await chat.adapter.sendText(chat.chatId, t("install.success_no_login", backend),
@@ -17621,7 +17631,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     return {
       currentBackend: (name) => this.backendNameForInstance(name),
       currentDisplay: (name) => `${this.backendNameForInstance(name)} · ${this.resolveInstanceModel(name).display}`,
-      installedBackends: () => KNOWN_BACKENDS.filter(b => b !== "mock" && this.backendInstalledHere(b)),
+      availability: () => this.backendAvailabilityRows(),
       models: (backend) => this.backendModelOptions(backend, opts),
       // #1808: the same rule update_instance_config's switch applies (backendModelVerdict).
       modelKnown: (backend, model) => this.backendModelVerdict(instanceName, backend, model).ok,
@@ -17718,10 +17728,35 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     return () => true;
   }
 
-  /** Installed the way the launch finds a CLI (resolveBinary): on PATH or in a known install directory. */
-  private backendInstalledHere(backend: string): boolean {
-    const binary = BACKEND_INSTALLATION_INFO[backend]?.binary;
-    return !!binary && resolveBinary(binary) !== binary;
+  /**
+   * #2072: what this host can run, from the published availability snapshot (backend-availability.ts). Read only: a
+   * handler never starts a probe, not even in the background — launch, the timer, and /login install or sign-in do.
+   */
+  backendAvailabilityRows(): BackendAvailability[] {
+    return this.backendAvailability.snapshot();
+  }
+  /** The probes the snapshot runs (tests replace them: no CLI, no account, no network). */
+  availabilityProbes: AvailabilityProbes = hostAvailabilityProbes;
+  private availabilityStore: BackendAvailabilityStore | null = null;
+  private availabilityTimer: NodeJS.Timeout | null = null;
+  get backendAvailability(): BackendAvailabilityStore {
+    return this.availabilityStore ??= new BackendAvailabilityStore(
+      KNOWN_BACKENDS.filter(b => b !== "mock" && !!BACKEND_INSTALLATION_INFO[b]), this.availabilityProbes,
+      { onChange: () => this.noteAvailabilityPaths() });
+  }
+  /** A launch need not look the binary up again (a synchronous `which` on the loop) when the snapshot found it. */
+  private noteAvailabilityPaths(): void {
+    for (const row of this.availabilityStore?.snapshot() ?? []) {
+      const binary = BACKEND_INSTALLATION_INFO[row.backend]?.binary;
+      if (binary) noteResolvedBinary(binary, row.state === "not_installed" ? null : row.path);
+    }
+  }
+  /** Probe now and then every AVAILABILITY_STALE_MS; a pass that finds nothing changed starts no CLI. */
+  private startAvailabilityRefresh(): void {
+    void this.backendAvailability.refresh();
+    if (this.availabilityTimer) clearInterval(this.availabilityTimer);
+    this.availabilityTimer = setInterval(() => { void this.backendAvailability.refresh(); }, AVAILABILITY_STALE_MS);
+    this.availabilityTimer.unref?.();
   }
 
   /** The models `/model` would offer on a backend: the cached CLI env, else (live) a bounded probe. Never throws. */
@@ -18022,9 +18057,10 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     return undefined;
   }
 
+  /** #2072: from the published snapshot (no `which` on the loop); not checked yet counts as installed (no false alarm). */
   private isBackendInstalled(backend: string): boolean {
-    const installation = BACKEND_INSTALLATION_INFO[backend];
-    return !!installation && checkBinaryInstalled(installation.binary);
+    if (!BACKEND_INSTALLATION_INFO[backend]) return false;
+    return this.backendAvailability.get(backend)?.state !== "not_installed";
   }
 
   private getMissingBackendWarning(backend: string | undefined): string | undefined {
@@ -18450,6 +18486,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
 
     this.controlClient?.stop();
     this.controlClient = null;
+    if (this.availabilityTimer) { clearInterval(this.availabilityTimer); this.availabilityTimer = null; }
 
     if (this.healthServer) {
       this.healthServerListening = false;
