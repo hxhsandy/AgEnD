@@ -2,7 +2,7 @@
  * #2072: the published backend availability snapshot and the `/backend` steps that read it. No CLI, no account and no
  * network: the probes are fakes, and the offline sign-in check reads a scratch home.
  */
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -178,5 +178,74 @@ describe("a launch on the loop uses the snapshot's path", () => {
     expect(resolveBinary("agend-test-cli-2072", ["/nowhere"])).toBe("agend-test-cli-2072");   // explicit dirs: no hint
     noteResolvedBinary("agend-test-cli-2072", null);
     expect(resolveBinary("agend-test-cli-2072", ["/nowhere"])).toBe("agend-test-cli-2072");
+  });
+});
+
+describe("#2078 review: a probe never lets a CLI change itself or reach a vendor", () => {
+  const scratch = () => mkdtempSync(join(tmpdir(), "avail-bin-"));
+  it("muse is never started: its version is read from the file its launcher keeps", async () => {
+    const { probeBackendVersion } = await import("../src/backend-availability.js");
+    const dir = scratch(), marker = join(dir, "ran");
+    writeFileSync(join(dir, "muse"), `#!/bin/sh\ntouch ${JSON.stringify(marker)}\necho 9.9.9\n`, { mode: 0o755 });
+    writeFileSync(join(dir, ".muse-version"), "1.4.10-R6427.1\n");
+    expect(await probeBackendVersion("muse", join(dir, "muse"))).toBe("1.4.10");
+    expect(existsSync(marker)).toBe(false);
+    expect(await probeBackendVersion("muse", join(scratch(), "muse"))).toBeNull();      // no file: unknown, still not started
+  });
+  it("`--version` runs with no network and with the no-update switches (null where namespaces are not allowed)", async () => {
+    const { probeBackendVersion } = await import("../src/backend-availability.js");
+    const dir = scratch();
+    // The "version" it prints is its network interface count (/proc/net is per namespace), then DISABLE_AUTOUPDATER:
+    // no network = only loopback.
+    writeFileSync(join(dir, "fakecli"), '#!/bin/sh\necho "$(tail -n +3 /proc/net/dev | wc -l | tr -d " ").${DISABLE_AUTOUPDATER:-0}.0"\n', { mode: 0o755 });
+    const got = await probeBackendVersion("codex", join(dir, "fakecli"));
+    expect(got === null || got === "1.1.0").toBe(true);
+  });
+});
+
+describe("#2078 review: the logins read are the ones the CLI reads", () => {
+  const home = () => mkdtempSync(join(tmpdir(), "avail-home2-"));
+  const put = (path: string) => { mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, "{\"x\":1}"); };
+  it("claude's login is in CLAUDE_CONFIG_DIR when set, not ~/.claude", async () => {
+    const h = home(), cfg = join(h, "elsewhere");
+    put(join(cfg, ".credentials.json"));
+    expect(await probeOfflineAuth("claude-code", { CLAUDE_CONFIG_DIR: cfg }, h)).toBe("valid");
+    const h2 = home(); put(join(h2, ".claude", ".credentials.json"));
+    expect(await probeOfflineAuth("claude-code", { CLAUDE_CONFIG_DIR: join(h2, "empty") }, h2)).toBe(process.platform === "darwin" ? "unknown" : "invalid");
+  });
+  it("codex's top-level `profile` selects the provider; an unreadable selection is unknown", async () => {
+    const { codexUsesOwnProvider } = await import("../src/backend-availability.js");
+    const h = home(), cx = join(h, ".codex"); mkdirSync(cx, { recursive: true });
+    const t = async (body: string) => { writeFileSync(join(cx, "config.toml"), body); return codexUsesOwnProvider({ CODEX_HOME: cx }); };
+    expect(await t('profile = "glm"\n[profiles.glm]\nmodel_provider = "glm"\n')).toBe("yes");
+    expect(await t('profile = "x"\n[profiles.y]\nmodel_provider = "glm"\n')).toBe("unknown");
+    expect(await t('profile = "o"\n[profiles.o]\nmodel = "gpt-5"\n')).toBe("no");
+    expect(await t('[profiles.x]\nmodel_provider = "glm"\n')).toBe("no");
+    expect(await probeOfflineAuth("codex", { CODEX_HOME: cx }, h)).toBe("invalid");   // the last config: no own provider, no login
+    await t('profile = "x"\n[profiles.y]\nmodel_provider = "glm"\n');
+    expect(await probeOfflineAuth("codex", { CODEX_HOME: cx }, h)).toBe("unknown");
+  });
+});
+
+describe("#2078 review: the version is read from disk first, starting nothing", () => {
+  it("a versioned install path, an npm package.json, else nothing — and no CLI started for any of them", async () => {
+    const { staticBackendVersion } = await import("../src/backend-availability.js");
+    const { symlinkSync } = await import("node:fs");
+    const root = mkdtempSync(join(tmpdir(), "avail-static-")), marker = join(root, "ran");
+    const cli = (dir: string) => { mkdirSync(dir, { recursive: true }); const f = join(dir, "cli"); writeFileSync(f, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`, { mode: 0o755 }); return f; };
+    // claude's layout: a link to …/versions/<version>
+    const versions = join(root, "share", "claude", "versions"); mkdirSync(versions, { recursive: true });
+    writeFileSync(join(versions, "2.1.302"), "#!/bin/sh\n", { mode: 0o755 });
+    symlinkSync(join(versions, "2.1.302"), join(root, "claude"));
+    expect(await staticBackendVersion("claude-code", join(root, "claude"))).toBe("2.1.302");
+    // codex's layout: …/releases/0.162.1-<target>/bin/codex
+    expect(await staticBackendVersion("codex", cli(join(root, "releases", "0.162.1-x86_64-unknown-linux-musl", "bin")))).toBe("0.162.1");
+    // an npm-installed CLI: node_modules/<pkg>/bin/cli with package.json beside
+    const pkg = join(root, "lib", "node_modules", "some-cli"); mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "some-cli", version: "3.4.5" }));
+    expect(await staticBackendVersion("opencode", cli(join(pkg, "bin")))).toBe("3.4.5");
+    // nothing on disk says: unknown
+    expect(await staticBackendVersion("grok", cli(join(root, "plain", "bin")))).toBeNull();
+    expect(existsSync(marker)).toBe(false);
   });
 });

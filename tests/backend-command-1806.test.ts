@@ -735,3 +735,21 @@ describe("review r2: with the default model, codex's levels are those of the mod
     expect(await inherited.levels()).not.toContain("max");
   });
 });
+
+describe("#2078 review: an instance on a credential profile is judged by that profile's login", () => {
+  it("default login signed out, the instance's profile signed in: offered and switchable; a signed-out profile is left to the profile gate", async () => {
+    const { credentialProfileStoreHome } = await import("../src/backend/credential-profile.js");
+    const f = fleet({ backend_options: { codex: { credential_profile: "work" } } });
+    f.any.backendAvailabilityRows = vi.fn(() => [{ backend: "claude-code", state: "usable", path: "/bin/claude" }, { backend: "codex", state: "not_signed_in", path: "/bin/codex", auth: "invalid" }]);
+    const store = credentialProfileStoreHome(f.fm.dataDir, "codex", "work");
+    mkdirSync(store, { recursive: true });
+    writeFileSync(join(store, "auth.json"), JSON.stringify({ tokens: { access_token: "c".repeat(32) } }));
+    const rows = f.fm.backendAvailabilityFor("worker");
+    expect(rows.find((r: any) => r.backend === "codex")).toMatchObject({ state: "usable", auth: "valid" });
+    const step = await backendStep(f.any.backendCommandDeps("worker", { live: false }), "worker", ["codex"]);
+    expect(step.kind).toBe("choose");
+    rmSync(join(store, "auth.json"));
+    // No claim from the default login; update_instance_config's profile gate refuses it with the profile's own command.
+    expect(f.fm.backendAvailabilityFor("worker").find((r: any) => r.backend === "codex")!.state).toBe("unknown");
+  });
+});

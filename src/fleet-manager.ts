@@ -350,7 +350,7 @@ type ReconcileObserver = (
   status: ApplyTargetStatus,
   error?: string,
 ) => void;
-import { CHAT_PROFILE_LOGIN_BACKENDS, credentialHomeSpec, credentialProfileHome, credentialSwitchCarriesConversation, credentialSwitchStartsFresh, instanceCredentialProfile } from "./backend/credential-profile.js";
+import { CHAT_PROFILE_LOGIN_BACKENDS, credentialHomeSpec, credentialProfileHome, credentialProfileLogin, credentialSwitchCarriesConversation, credentialSwitchStartsFresh, instanceCredentialProfile } from "./backend/credential-profile.js";
 import { carryClaudeConversation, type CarryResult } from "./backend/claude-carry.js";
 import { mergeBackendOptions, profileKey, profileName, profileOf, type ClassicProfile } from "./classic-bindings.js";
 import {
@@ -17649,7 +17649,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     return {
       currentBackend: (name) => this.backendNameForInstance(name),
       currentDisplay: (name) => `${this.backendNameForInstance(name)} · ${this.resolveInstanceModel(name).display}`,
-      availability: () => this.backendAvailabilityRows(),
+      availability: () => this.backendAvailabilityFor(instanceName),
       models: (backend) => this.backendModelOptions(backend, opts),
       // #1808: the same rule update_instance_config's switch applies (backendModelVerdict).
       modelKnown: (backend, model) => this.backendModelVerdict(instanceName, backend, model).ok,
@@ -17752,6 +17752,24 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
    */
   backendAvailabilityRows(): BackendAvailability[] {
     return this.backendAvailability.snapshot();
+  }
+  /**
+   * #2072 (#2078 review): the snapshot as THIS instance would see it. Its sign-in on a backend is its own credential
+   * profile's when it has one there — the host's default login says nothing about it. A profile's login is a file check
+   * (credentialProfileLogin), no process.
+   */
+  backendAvailabilityFor(instanceName: string): BackendAvailability[] {
+    return this.backendAvailabilityRows().map(row => {
+      const profile = this.credentialProfileOf(instanceName, row.backend);
+      if (!profile || (row.state !== "usable" && row.state !== "not_signed_in" && row.state !== "unknown") || !row.path) return row;
+      let login: ReturnType<typeof credentialProfileLogin>["state"] = "unknown";
+      try { login = credentialProfileLogin(this.dataDir, row.backend, profile).state; } catch { /* unknown */ }
+      // Signed in there: usable for this instance. Signed out (or unknown): the host's default login says nothing about
+      // it, so no "not signed in" claim from it — update_instance_config's profile gate refuses a signed-out profile
+      // when applied, naming the profile and the command that signs it in.
+      if (login === "logged-in") return { ...row, auth: "valid" as const, state: "usable" as const };
+      return row.state === "not_signed_in" ? { ...row, auth: "unknown" as const, state: "unknown" as const } : row;
+    });
   }
   /** The probes the snapshot runs (tests replace them: no CLI, no account, no network). */
   availabilityProbes: AvailabilityProbes = hostAvailabilityProbes;

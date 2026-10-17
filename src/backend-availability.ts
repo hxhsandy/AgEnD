@@ -12,15 +12,22 @@
  * again when it is applied. Only a definite answer disables it: not installed, not signed in (for a login that needs
  * one), or older than the minimum AgEnD supports. A probe that fails keeps the last definite answer (fail open).
  *
- * Cost (the leader's rules, #2072): sign-in is read OFFLINE from credential files and API-key variables — never a model
- * or API request, never the CLI's own status command (`grok models` and `agy models` call the vendor; grok's also
- * always exits 0, #1792). Where a login cannot be judged offline the answer is unknown, not "signed in". Probes run
- * one backend at a time; the only CLI started is `<binary> --version`, inside a memory-capped scope where systemd can
- * make one, and only when the binary or its credential files changed since the last probe — an idle host spawns none.
+ * Cost and safety (the leader's rules, #2072):
+ * - Sign-in is read OFFLINE from credential files and API-key variables — never a model or API request, never the
+ *   CLI's own status command (`grok models` and `agy models` call the vendor; grok's also always exits 0, #1792).
+ *   Where a login cannot be judged offline the answer is unknown, not "signed in".
+ * - Probes run one backend at a time. The only CLI ever started is `<binary> --version`, and only when the binary or
+ *   its credential files changed since the last probe: inside a memory-capped scope where systemd can make one, and in
+ *   a network namespace with no network (`unshare -rn`) so no CLI can update itself or reach a vendor (#2078 review:
+ *   `muse --version` updated its own launcher). Before that, the version is read from disk wherever it is written there
+ *   (a version file, a versioned install path, an npm package.json), which starts nothing; muse is never started at
+ *   all. Without a network namespace (macOS, or a host that forbids one) no `--version` runs: unknown.
+ * - Each pass still asks whether each binary is there (`which`, and one `sh` test of the install directories, both
+ *   bounded children) — never a CLI.
  */
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { binaryProbe, spawnProbeCommand, PROBE_DEADLINE_MS, type ProbeChild } from "./binary-probe.js";
 import { BACKEND_INSTALLATION_INFO } from "./instance-lifecycle.js";
 import { KIRO_SUPPORTED_MIN } from "./backend/kiro.js";
@@ -176,13 +183,22 @@ async function answer(child: ProbeChild, deadlineMs = PROBE_DEADLINE_MS): Promis
   finally { if (timer) clearTimeout(timer); }
 }
 
+/** `npm prefix -g`, asked once per process (an answer only; no answer is asked again next time). */
+let npmPrefixAnswer: string | null | undefined;
+async function npmPrefix(): Promise<string | null> {
+  if (npmPrefixAnswer !== undefined) return npmPrefixAnswer;
+  const got = await answer(spawnProbeCommand("npm", ["prefix", "-g"]), 3000);
+  if (got !== undefined) npmPrefixAnswer = got;
+  return got ?? null;
+}
+
 /** The directories resolveBinary searches after PATH, without its synchronous `npm prefix -g` and readdir. */
 async function fallbackDirs(backend: string): Promise<string[]> {
   const home = homedir();
   const dirs = [...(BACKEND_INSTALLATION_INFO[backend]?.binDirs?.(process.env, home) ?? []), dirname(process.execPath),
     join(home, ".local", "bin"), join(home, ".npm-global", "bin"), "/usr/local/bin", "/usr/bin", "/bin"];
   try { for (const v of (await readdir(join(home, ".nvm", "versions", "node"))).sort().reverse()) dirs.push(join(home, ".nvm", "versions", "node", v, "bin")); } catch { /* optional */ }
-  const prefix = await answer(spawnProbeCommand("npm", ["prefix", "-g"]), 3000);
+  const prefix = await npmPrefix();
   if (prefix) dirs.push(join(prefix, "bin"));
   return [...new Set(dirs)];
 }
@@ -211,23 +227,82 @@ function canScope(): Promise<boolean> {
 /** The cap a `--version` run gets: no CLI started for a probe can take the fleet's memory (one OOM took a fleet down). */
 export const VERSION_PROBE_MEMORY = "512M";
 
-/** `<path> --version`, bounded in time and, where systemd can make a scope, in memory. */
-export async function probeBackendVersion(_backend: string, path: string): Promise<string | null> {
+/** Whether `unshare -rn` works here (a user and a network namespace, so a CLI runs with no network); learned once. */
+let netlessWorks: Promise<boolean> | null = null;
+function canRunNetless(): Promise<boolean> {
+  if (process.platform !== "linux") return Promise.resolve(false);
+  return netlessWorks ??= answer(spawnProbeCommand("unshare", ["-rn", "--", "echo", "ok"]), 3000).then(a => a === "ok");
+}
+/** Each CLI's own "do not update" switches, set for a `--version` run (belt and braces: there is no network anyway). */
+export const NO_UPDATE_ENV: Readonly<Record<string, string>> = {
+  DISABLE_AUTOUPDATER: "1", OPENCODE_DISABLE_AUTOUPDATE: "1", NO_UPDATE_NOTIFIER: "1", CI: "1",
+};
+/** A backend whose version is read from a file next to its launcher: starting it at all can update it (#2078 review). */
+export const STATIC_VERSION_FILES: Readonly<Record<string, (path: string) => string>> = {
+  muse: (path) => join(dirname(path), ".muse-version"),
+};
+
+/**
+ * The version from what is on disk, starting nothing: a launcher's own version file (muse), else a version segment
+ * of the binary's real path (claude installs into `…/versions/2.1.302`, codex into `…/releases/0.162.1-<target>/`),
+ * else an npm package.json above it (an npm-installed CLI). Null when none says.
+ */
+export async function staticBackendVersion(backend: string, path: string): Promise<string | null> {
+  const file = STATIC_VERSION_FILES[backend];
+  if (file) { try { return parseVersion(await readFile(file(path), "utf8")); } catch { return null; } }
+  let real: string;
+  try { real = await realpath(path); } catch { return null; }
+  const segment = real.split("/").reverse().find(part => /^v?\d+\.\d+\.\d+(?:[-+.][\w.-]*)?$/.test(part));
+  if (segment) return parseVersion(segment);
+  let dir = dirname(real);
+  for (let i = 0; i < 4; i++) {
+    try {
+      const pkg = JSON.parse(await readFile(join(dir, "package.json"), "utf8")) as { version?: unknown };
+      if (typeof pkg.version === "string") return parseVersion(pkg.version);
+    } catch { /* keep looking up */ }
+    dir = dirname(dir);
+  }
+  return null;
+}
+
+/**
+ * The version, without letting any CLI change anything or reach the network (the leader's rule, #2078):
+ * 1. what is on disk (staticBackendVersion) — every OS, every backend;
+ * 2. else, on Linux where an unprivileged network namespace can be made, `<path> --version` inside it (no network),
+ *    with the CLIs' no-update switches, a deadline and (where systemd can) a memory cap; muse never (STATIC_VERSION_FILES);
+ * 3. else unknown — never a networked `--version`. No version is no "too old" claim: the backend stays selectable.
+ */
+export async function probeBackendVersion(backend: string, path: string): Promise<string | null> {
+  const known = await staticBackendVersion(backend, path);
+  if (known || STATIC_VERSION_FILES[backend]) return known;
+  if (!(await canRunNetless())) return null;
+  const argv = ["unshare", "-rn", "--", "env", ...Object.entries(NO_UPDATE_ENV).map(([k, v]) => `${k}=${v}`), path, "--version"];
   const child = (await canScope())
-    ? spawnProbeCommand("systemd-run", ["--user", "--scope", "-q", "-p", `MemoryMax=${VERSION_PROBE_MEMORY}`, "--", path, "--version"])
-    : spawnProbeCommand(path, ["--version"]);
+    ? spawnProbeCommand("systemd-run", ["--user", "--scope", "-q", "-p", `MemoryMax=${VERSION_PROBE_MEMORY}`, "--", ...argv])
+    : spawnProbeCommand(argv[0]!, argv.slice(1));
   return parseVersion(await answer(child, 5000));
 }
 
-/** A codex login is not ours to check when codex's own config names a provider other than OpenAI. */
-export async function codexUsesOwnProvider(env: NodeJS.ProcessEnv = process.env): Promise<boolean> {
-  try {
-    const text = await readFile(join(env.CODEX_HOME || join(homedir(), ".codex"), "config.toml"), "utf8");
-    // Only the top level (before the first [table]) names the provider codex runs with by default.
-    const top = text.split(/^\s*\[/m)[0] ?? "";
-    const m = /^\s*model_provider\s*=\s*"([^"]+)"/m.exec(top);
-    return !!m && m[1] !== "openai";
-  } catch { return false; }
+/**
+ * Whether codex's own config runs it on a provider other than OpenAI (no login of ours): "yes", "no", or "unknown".
+ * Its default is the top level's `model_provider`, or the provider of the profile the top level selects
+ * (`profile = "x"` → `[profiles.x]`). A selected profile that cannot be read is unknown, never "no" (#2078 review).
+ */
+export async function codexUsesOwnProvider(env: NodeJS.ProcessEnv = process.env): Promise<"yes" | "no" | "unknown"> {
+  let text: string;
+  try { text = await readFile(join(env.CODEX_HOME || join(homedir(), ".codex"), "config.toml"), "utf8"); } catch { return "no"; }
+  const top = text.split(/^\s*\[/m)[0] ?? "";
+  const provider = (body: string) => /^\s*model_provider\s*=\s*"([^"]+)"/m.exec(body)?.[1] ?? null;
+  const own = (p: string | null) => (p ? (p !== "openai" ? "yes" : "no") : null);
+  const selected = /^\s*profile\s*=\s*"([^"]+)"/m.exec(top)?.[1];
+  if (selected) {
+    const name = selected.replace(/[.*+?^$()|[\]\\{}]/g, "\\$&");
+    const at = text.search(new RegExp(`^\\s*\\[profiles\\.(?:"${name}"|${name})\\]\\s*$`, "m"));
+    if (at < 0) return "unknown";
+    const body = text.slice(at).split(/^\s*\[/m)[1] ?? "";
+    return own(provider(body)) ?? own(provider(top)) ?? "no";
+  }
+  return own(provider(top)) ?? "no";
 }
 
 // ── Offline sign-in: credential files and API-key variables only ──
@@ -246,12 +321,15 @@ interface OfflineLogin {
  */
 export const OFFLINE_LOGINS: Readonly<Record<string, OfflineLogin>> = {
   // macOS keeps Claude's login in the Keychain, which we do not open: there, no file is not proof.
-  "claude-code": { files: (env, home) => [join(env.CLAUDE_HOME || join(home, ".claude"), ".credentials.json")], keys: ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
+  // The config dir claude itself reads (claudeConfigDirFor): CLAUDE_CONFIG_DIR, else ~/.claude (#2078 review).
+  "claude-code": { files: (env, home) => [join(env.CLAUDE_CONFIG_DIR?.trim() || join(home, ".claude"), ".credentials.json")], keys: ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
     absent: (platform) => platform === "darwin" ? "unknown" : "invalid" },
   codex: { files: (env, home) => [join(env.CODEX_HOME || join(home, ".codex"), "auth.json")], keys: ["OPENAI_API_KEY"], absent: () => "invalid" },
   // #1792: `grok models` exits 0 signed out, and calls xAI — the file is the only offline truth.
   grok: { files: (env, home) => [join(env.GROK_HOME || join(home, ".grok"), "auth.json")], keys: ["XAI_API_KEY", "GROK_API_KEY"], absent: () => "invalid" },
   antigravity: { files: (env, home) => [join(env.GEMINI_HOME || join(home, ".gemini"), "antigravity-cli", "antigravity-oauth-token")], absent: () => "invalid" },
+  // kiro keeps data.sqlite3 after a sign-out, so its presence proves only that kiro was used here, not a live login:
+  // it can read "signed in" for a signed-out kiro (fail open — never the other way).
   "kiro-cli": { files: (env, home) => [join(env.KIRO_CLI_HOME || join(home, ".local", "share", "kiro-cli"), "data.sqlite3")], absent: () => "invalid" },
   // OpenCode reads many providers' keys from the environment: no file is not proof.
   opencode: { files: (env, home) => [join(env.XDG_DATA_HOME || join(home, ".local", "share"), "opencode", "auth.json")], absent: () => "unknown" },
@@ -259,7 +337,11 @@ export const OFFLINE_LOGINS: Readonly<Record<string, OfflineLogin>> = {
 
 /** The default login's state, from files and variables only. */
 export async function probeOfflineAuth(backend: string, env: NodeJS.ProcessEnv = process.env, home = homedir()): Promise<AuthState> {
-  if (backend === "codex" && await codexUsesOwnProvider(env)) return "not_required";
+  if (backend === "codex") {
+    const own = await codexUsesOwnProvider(env);
+    if (own === "yes") return "not_required";
+    if (own === "unknown") return "unknown";
+  }
   const login = OFFLINE_LOGINS[backend];
   if (!login) return "unknown";
   if (login.keys?.some(k => (env[k] ?? "").trim())) return "valid";
