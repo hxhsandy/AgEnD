@@ -244,6 +244,21 @@ describe("#2078 review: the version is read from disk first, starting nothing", 
     const pkg = join(root, "lib", "node_modules", "some-cli"); mkdirSync(pkg, { recursive: true });
     writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "some-cli", version: "3.4.5" }));
     expect(await staticBackendVersion("opencode", cli(join(pkg, "bin")))).toBe("3.4.5");
+    // under nvm the path carries Node's version: the CLI's package.json wins (Fable R2 witness: 1.7.3, not 22.22.2)
+    const nvm = join(root, ".nvm", "versions", "node", "v22.22.2"), grokPkg = join(nvm, "lib", "node_modules", "grok-cli");
+    mkdirSync(join(grokPkg, "bin"), { recursive: true }); mkdirSync(join(nvm, "bin"), { recursive: true });
+    writeFileSync(join(grokPkg, "package.json"), JSON.stringify({ name: "grok-cli", version: "1.7.3" }));
+    writeFileSync(join(grokPkg, "bin", "grok.js"), "#!/bin/sh\n", { mode: 0o755 });
+    symlinkSync(join(grokPkg, "bin", "grok.js"), join(nvm, "bin", "grok"));
+    expect(await staticBackendVersion("grok", join(nvm, "bin", "grok"))).toBe("1.7.3");
+    // a scoped package, and a package.json with no version: unknown, never a path segment
+    const scoped = join(nvm, "lib", "node_modules", "@x", "y-cli"); mkdirSync(join(scoped, "bin"), { recursive: true });
+    writeFileSync(join(scoped, "package.json"), JSON.stringify({ name: "@x/y-cli", version: "0.9.1" }));
+    expect(await staticBackendVersion("opencode", cli(join(scoped, "bin")))).toBe("0.9.1");
+    writeFileSync(join(scoped, "package.json"), JSON.stringify({ name: "@x/y-cli" }));
+    expect(await staticBackendVersion("opencode", join(scoped, "bin", "cli"))).toBeNull();
+    // a version-looking directory that is not a known layout is not a version
+    expect(await staticBackendVersion("kiro-cli", cli(join(root, "tools", "2.0.0", "bin")))).toBeNull();
     // nothing on disk says: unknown
     expect(await staticBackendVersion("grok", cli(join(root, "plain", "bin")))).toBeNull();
     expect(existsSync(marker)).toBe(false);

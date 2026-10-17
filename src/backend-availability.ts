@@ -244,23 +244,30 @@ export const STATIC_VERSION_FILES: Readonly<Record<string, (path: string) => str
 
 /**
  * The version from what is on disk, starting nothing: a launcher's own version file (muse), else a version segment
- * of the binary's real path (claude installs into `…/versions/2.1.302`, codex into `…/releases/0.162.1-<target>/`),
- * else an npm package.json above it (an npm-installed CLI). Null when none says.
+ * the package.json of the npm package that owns the binary (under node_modules), else a version segment of the real
+ * path in a layout we know (claude's `…/versions/2.1.302`, codex's `…/releases/0.162.1-<target>/`). Null when none says.
  */
 export async function staticBackendVersion(backend: string, path: string): Promise<string | null> {
   const file = STATIC_VERSION_FILES[backend];
   if (file) { try { return parseVersion(await readFile(file(path), "utf8")); } catch { return null; } }
   let real: string;
   try { real = await realpath(path); } catch { return null; }
-  const segment = real.split("/").reverse().find(part => /^v?\d+\.\d+\.\d+(?:[-+.][\w.-]*)?$/.test(part));
-  if (segment) return parseVersion(segment);
-  let dir = dirname(real);
-  for (let i = 0; i < 4; i++) {
+  const parts = real.split("/");
+  // An npm-installed CLI: the package that owns the binary (…/node_modules/<pkg> or …/node_modules/@scope/<pkg>). Read
+  // first: an nvm prefix puts Node's own version in the path (…/nvm/versions/node/v22.22.2/…, #2078 review).
+  const nm = parts.lastIndexOf("node_modules");
+  if (nm >= 0 && parts[nm + 1]) {
+    const pkgDir = parts.slice(0, nm + (parts[nm + 1]!.startsWith("@") ? 3 : 2)).join("/");
     try {
-      const pkg = JSON.parse(await readFile(join(dir, "package.json"), "utf8")) as { version?: unknown };
+      const pkg = JSON.parse(await readFile(join(pkgDir, "package.json"), "utf8")) as { version?: unknown };
       if (typeof pkg.version === "string") return parseVersion(pkg.version);
-    } catch { /* keep looking up */ }
-    dir = dirname(dir);
+    } catch { /* no package.json there */ }
+    return null;
+  }
+  // The versioned layouts we know: claude's …/versions/<v>, codex's …/releases/<v>-<target>/…. Only a segment whose
+  // parent is one of those names — never any version-looking directory on the way.
+  for (let i = parts.length - 1; i > 0; i--) {
+    if ((parts[i - 1] === "versions" || parts[i - 1] === "releases") && /^v?\d+\.\d+\.\d+(?:[-+.][\w.-]*)?$/.test(parts[i]!)) return parseVersion(parts[i]);
   }
   return null;
 }
