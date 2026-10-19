@@ -1,0 +1,292 @@
+{
+ "engine": "chromium",
+ "tag": "after",
+ "agents": {
+  "A": "agend-leader-t1503382358143799511",
+  "B": "agend-dev-claude-t1519896892392083558",
+  "C": "agend-reviewer-t1503382598640996543"
+ },
+ "cases": {
+  "switch": {
+   "ok": true,
+   "desk": [
+    {
+     "to": "agend-dev-claude-t1519896892392083558",
+     "sum": 0.0832,
+     "n": 1,
+     "src": [
+      "chat-split"
+     ]
+    },
+    {
+     "to": "agend-leader-t1503382358143799511",
+     "sum": 0,
+     "n": 0,
+     "src": []
+    },
+    {
+     "to": "agend-dev-claude-t1519896892392083558",
+     "sum": 0,
+     "n": 0,
+     "src": []
+    },
+    {
+     "to": "agend-leader-t1503382358143799511",
+     "sum": 0,
+     "n": 0,
+     "src": []
+    }
+   ],
+   "phone": [
+    {
+     "to": "agend-dev-claude-t1519896892392083558",
+     "sum": 0.1432,
+     "n": 1,
+     "src": [
+      "chat-split"
+     ]
+    },
+    {
+     "to": "agend-leader-t1503382358143799511",
+     "sum": 0,
+     "n": 0,
+     "src": []
+    },
+    {
+     "to": "agend-dev-claude-t1519896892392083558",
+     "sum": 0,
+     "n": 0,
+     "src": []
+    },
+    {
+     "to": "agend-leader-t1503382358143799511",
+     "sum": 0,
+     "n": 0,
+     "src": []
+    }
+   ],
+   "rule": "warm switches (3rd, 4th) shift 0; the first visit is recorded (its card is read then)"
+  },
+  "desk-light": {
+   "ok": true,
+   "heights": {
+    "hidden": 35,
+    "shown": 384,
+    "folded": 236,
+    "saved": 148,
+    "noBanner": 149,
+    "noBio": 253
+   },
+   "bannerFlushPx": 0,
+   "controls": [
+    [
+     "id-ctl id-hide",
+     "id-banner-box",
+     "Hide card",
+     "28×28"
+    ],
+    [
+     "id-ctl id-fold",
+     "id-row",
+     "Hide picture and bio",
+     "28×28"
+    ]
+   ],
+   "foldedControls": [
+    [
+     "id-ctl id-hide",
+     "id-banner-box"
+    ],
+    [
+     "id-ctl id-fold id-unfold",
+     "id-banner-box"
+    ]
+   ],
+   "strip": true,
+   "kept": [
+    "open",
+    "hidden"
+   ],
+   "noBanner": [
+    [
+     "id-ctl id-hide",
+     "id-row"
+    ]
+   ],
+   "noBio": [
+    "id-ctl id-hide",
+    "id-ctl id-fold"
+   ],
+   "errors": []
+  },
+  "desk-dark": {
+   "ok": true,
+   "heights": {
+    "hidden": 35,
+    "shown": 384,
+    "folded": 236,
+    "saved": 148,
+    "noBanner": 149,
+    "noBio": 253
+   },
+   "bannerFlushPx": 0,
+   "controls": [
+    [
+     "id-ctl id-hide",
+     "id-banner-box",
+     "隱藏卡片",
+     "28×28"
+    ],
+    [
+     "id-ctl id-fold",
+     "id-row",
+     "隱藏小圖與介紹",
+     "28×28"
+    ]
+   ],
+   "foldedControls": [
+    [
+     "id-ctl id-hide",
+     "id-banner-box"
+    ],
+    [
+     "id-ctl id-fold id-unfold",
+     "id-banner-box"
+    ]
+   ],
+   "strip": true,
+   "kept": [
+    "open",
+    "hidden"
+   ],
+   "noBanner": [
+    [
+     "id-ctl id-hide",
+     "id-row"
+    ]
+   ],
+   "noBio": [
+    "id-ctl id-hide",
+    "id-ctl id-fold"
+   ],
+   "errors": []
+  },
+  "phone-light": {
+   "ok": true,
+   "heights": {
+    "hidden": 35,
+    "shown": 286,
+    "folded": 146,
+    "saved": 140,
+    "noBanner": 141,
+    "noBio": 179
+   },
+   "bannerFlushPx": 0,
+   "controls": [
+    [
+     "id-ctl id-hide",
+     "id-banner-box",
+     "隱藏卡片",
+     "32×32"
+    ],
+    [
+     "id-ctl id-fold",
+     "id-row",
+     "隱藏小圖與介紹",
+     "32×32"
+    ]
+   ],
+   "foldedControls": [
+    [
+     "id-ctl id-hide",
+     "id-banner-box"
+    ],
+    [
+     "id-ctl id-fold id-unfold",
+     "id-banner-box"
+    ]
+   ],
+   "strip": true,
+   "kept": [
+    "open",
+    "hidden"
+   ],
+   "noBanner": [
+    [
+     "id-ctl id-hide",
+     "id-row"
+    ]
+   ],
+   "noBio": [
+    "id-ctl id-hide",
+    "id-ctl id-fold"
+   ],
+   "errors": []
+  },
+  "phone-dark": {
+   "ok": true,
+   "heights": {
+    "hidden": 35,
+    "shown": 286,
+    "folded": 146,
+    "saved": 140,
+    "noBanner": 141,
+    "noBio": 179
+   },
+   "bannerFlushPx": 0,
+   "controls": [
+    [
+     "id-ctl id-hide",
+     "id-banner-box",
+     "Hide card",
+     "32×32"
+    ],
+    [
+     "id-ctl id-fold",
+     "id-row",
+     "Hide picture and bio",
+     "32×32"
+    ]
+   ],
+   "foldedControls": [
+    [
+     "id-ctl id-hide",
+     "id-banner-box"
+    ],
+    [
+     "id-ctl id-fold id-unfold",
+     "id-banner-box"
+    ]
+   ],
+   "strip": true,
+   "kept": [
+    "open",
+    "hidden"
+   ],
+   "noBanner": [
+    [
+     "id-ctl id-hide",
+     "id-row"
+    ]
+   ],
+   "noBio": [
+    "id-ctl id-hide",
+    "id-ctl id-fold"
+   ],
+   "errors": []
+  },
+  "safe=1": {
+   "ok": true,
+   "okShow": true,
+   "safe": true,
+   "errors": []
+  },
+  "public link": {
+   "ok": true,
+   "pShow": true,
+   "pCard": true,
+   "pFold": true,
+   "errors": []
+  }
+ }
+}

@@ -1,0 +1,22 @@
+{
+ "desk-light": {
+  "folded": 68,
+  "open": 416,
+  "toggleRow": 32
+ },
+ "desk-dark": {
+  "folded": 68,
+  "open": 416,
+  "toggleRow": 32
+ },
+ "phone-light": {
+  "folded": 68,
+  "open": 318,
+  "toggleRow": 32
+ },
+ "phone-dark": {
+  "folded": 68,
+  "open": 318,
+  "toggleRow": 32
+ }
+}
