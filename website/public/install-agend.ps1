@@ -177,22 +177,12 @@ function Read-OutputTail($tail) {
     }
     return ($text -replace [char]0xFEFF, '')
 }
-# wsl.exe 自己的訊息用哪種編碼：設了 WSL_UTF8=1 的新版是 UTF-8，舊版（例如還沒更新前內建的那支）是 UTF-16LE。
-# 先問它一次 --version（輸出一定有英文字母、數字和換行）：看到 0x00 就是 UTF-16。
-function Get-WslOutputEncoding([string]$File = 'wsl.exe', [string[]]$Arguments = @('--version')) {
-    $probe = Join-Path ([IO.Path]::GetTempPath()) ('agend-wslenc-' + [Guid]::NewGuid().ToString('N') + '.txt')
-    $prev = $env:WSL_UTF8; $env:WSL_UTF8 = '1'
-    try {
-        $start = @{ FilePath = $File; NoNewWindow = $true; Wait = $true; RedirectStandardOutput = $probe }
-        if ($Arguments.Count -gt 0) { $start.ArgumentList = (Join-ProcessArguments $Arguments) }
-        Start-Process @start
-        $bytes = [IO.File]::ReadAllBytes($probe)
-        if ($bytes -contains [byte]0) { return 'utf16' }
-    } catch { } finally {
-        if ($null -eq $prev) { Remove-Item Env:WSL_UTF8 -ErrorAction SilentlyContinue } else { $env:WSL_UTF8 = $prev }
-        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
-    }
-    return 'utf8'
+# wsl.exe 自己的訊息用哪種編碼，只看檔案、不執行任何程式（#2228 審查：乾淨的 Windows 上 wsl --version 會停在
+# 「Press any key to install」等按鍵）。新版 WSL（2.0 起，認得 WSL_UTF8=1）裝在 %ProgramFiles%\WSL\wsl.exe，
+# System32 的 wsl.exe 會轉給它，輸出是 UTF-8；沒有它，就是系統內建的舊版，自己的訊息是 UTF-16LE。
+function Get-WslOutputEncoding([string]$ProgramFiles = $env:ProgramFiles) {
+    if ($ProgramFiles -and (Test-Path -LiteralPath (Join-Path (Join-Path $ProgramFiles 'WSL') 'wsl.exe'))) { return 'utf8' }
+    return 'utf16'
 }
 
 # 工具輸出的一段文字 → 已完成的行、還沒換行的尾巴、目前的進度字樣。去掉色彩控制碼；一行裡的 \r 是工具原地更新的

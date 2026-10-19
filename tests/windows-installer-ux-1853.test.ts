@@ -62,7 +62,9 @@ const dirs: string[] = [];
 afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
 
 /** Run a pwsh script with the installer's helper functions loaded (from its syntax tree; nothing else of it runs). */
-function withHelpers(body: string, input?: string) {
+/** Fails the test on a pwsh that errored or timed out unless that exit status is the expected one (#2228 review: an
+ *  error message once quoted the very line a test looked for). */
+function withHelpers(body: string, input?: string, expectStatus = 0) {
   const dir = mkdtempSync(join(tmpdir(), "agend-1853ux-")); dirs.push(dir);
   const file = join(dir, "t.ps1");
   writeFileSync(file, `$ErrorActionPreference = 'Stop'
@@ -72,6 +74,7 @@ foreach ($fn in $ast.FindAll({ param($n) $n -is [System.Management.Automation.La
 $script:OnWindows = $false
 ${body}`);
   const r = spawnSync("pwsh", ["-NoProfile", "-File", file], { encoding: "utf8", timeout: 60_000, input, env: { ...process.env, TMPDIR: dir } });
+  if (r.error || r.signal || r.status !== expectStatus) throw new Error(`pwsh ended ${r.error ?? r.signal ?? r.status}, expected ${expectStatus}:\n${r.stdout}${r.stderr}`);
   return { out: r.stdout + r.stderr, dir };
 }
 
@@ -100,12 +103,21 @@ $want4 = "中文輸出完成\`n"; $all4 = $u8.GetBytes($want4); $got4 = Feed 'c4
 Write-Output ("EXACT=" + ($got1 -ceq $want1) + "," + ($got2 -ceq $want2) + "," + ($got3 -ceq $want3) + "," + ($got4 -ceq $want4))`);
     expect(out).toContain("EXACT=True,True,True,True");
   });
-  it("wsl.exe's own encoding is asked of it once: a NUL in its --version output means UTF-16", () => {
-    const { out } = withHelpers(`$a = Get-WslOutputEncoding 'sh' @('-c', 'printf "W\\000S\\000L\\000\\r\\000\\n\\000"')
-$b = Get-WslOutputEncoding 'sh' @('-c', 'echo "WSL 版本: 2.6.1.0"; echo "WSL_UTF8=$WSL_UTF8"')
-$c = Get-WslOutputEncoding 'no-such-wsl-binary' @()
-Write-Output ("ENC=" + $a + "," + $b + "," + $c)`);
-    expect(out).toContain("ENC=utf16,utf8,utf8");
+  it("wsl.exe's own encoding comes from which wsl.exe is installed — no process is run, so nothing can wait for a key", () => {
+    // #2228 review: a clean Windows's `wsl --version` can stop at "Press any key to install". A wsl.exe on PATH that
+    // would hang and read the keyboard proves the check never runs it.
+    const { out, dir } = withHelpers(`$bin = Join-Path $env:TMPDIR 'bin'; New-Item -ItemType Directory -Path $bin | Out-Null
+foreach ($n in @('wsl.exe', 'wsl')) { $f = Join-Path $bin $n; Set-Content -LiteralPath $f -Value "#!/bin/sh\`ntouch '$env:TMPDIR/ran'\`nread x\`nsleep 30"; chmod +x $f }
+$env:PATH = $bin + [IO.Path]::PathSeparator + $env:PATH
+$pf = Join-Path $env:TMPDIR 'pf'; New-Item -ItemType Directory -Path (Join-Path $pf 'WSL') -Force | Out-Null
+$clock = [Diagnostics.Stopwatch]::StartNew()
+$old = Get-WslOutputEncoding (Join-Path $env:TMPDIR 'empty')
+New-Item -ItemType File -Path (Join-Path (Join-Path $pf 'WSL') 'wsl.exe') | Out-Null
+$new = Get-WslOutputEncoding $pf
+$none = Get-WslOutputEncoding ''
+Write-Output ("ENC=" + $old + "," + $new + "," + $none + " FAST=" + ($clock.Elapsed.TotalSeconds -lt 3))`);
+    expect(out).toContain("ENC=utf16,utf8,utf16 FAST=True");
+    expect(() => readFileSync(join(dir, "ran"))).toThrow();                  // the fake wsl.exe never ran
   });
   it("the console's input mode (a bit-accurate model): one snapshot, put back exactly — after a step, after Enter carries on, after y stops it", () => {
     const model = (keys: string) => `$script:mode = [uint32]0xC7
@@ -126,7 +138,7 @@ Write-Output ("CODE=$code MODE=" + ('0x{0:X}' -f $script:mode))`, "\n");
     expect(carryOn.out).toContain("    finished");
     expect(carryOn.out).toContain("CODE=0 MODE=0xC7");
     const stop = withHelpers(model(ctrlC) + `$null = Invoke-Watched -Label 'x' -Usually 'y' -File 'sh' -Arguments @('-c', 'sleep 20')
-Write-Output 'NOT-REACHED'`, "y\n");
+Write-Output 'NOT-REACHED'`, "y\n", 1);                                           // y stops the install: exit 1
     expect(stop.out).toContain("已停止安裝。");
     expect(stop.out).not.toContain("NOT-REACHED");
     expect(readFileSync(join(stop.dir, "modes.txt"), "utf8").trim().split("\n").at(-1)).toBe("0xC7");
@@ -175,10 +187,10 @@ Write-Output ("STOP=" + $stop + " ALIVE=" + (-not $p.HasExited))`, "y\n");
   it("the status line fits the window: Chinese counts as two columns", () => {
     const { out } = withHelpers(`Write-Output ("W=" + (Get-DisplayWidth '安裝 AgEnD') + " CUT=" + (Limit-Width '下載並安裝 Ubuntu-24.04：已經過 3 分 05 秒' 20) + " CUTW=" + (Get-DisplayWidth (Limit-Width '下載並安裝 Ubuntu-24.04：已經過 3 分 05 秒' 20)))
 Write-Output ("ELAPSED=" + (Format-Elapsed 59.9) + "|" + (Format-Elapsed 185))
-Set-QuickEdit $true; Set-QuickEdit $false; Write-Output "QE-NOOP-OK"`);
+$saved = Enter-StepConsole; Restore-StepConsole $saved; Write-Output ("QE-NOOP=" + ($null -eq $saved))`);
     expect(out).toContain("W=10 ");
     expect(out).toMatch(/CUTW=(1\d|20)\n/);
     expect(out).toContain("ELAPSED=59 秒|3 分 05 秒\n");
-    expect(out).toContain("QE-NOOP-OK");                                     // not Windows: QuickEdit is left alone, no error
+    expect(out).toContain("QE-NOOP=True");                                   // not Windows: nothing saved, nothing changed, no error
   });
 });
