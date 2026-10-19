@@ -65,6 +65,251 @@ function Check-Admin {
     return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+# ── 長時間步驟：即時進度與主控台防護（#1853 使用者實測回饋）────────
+# 長步驟在背景執行，它自己的輸出即時轉印出來，另有一行心跳顯示已經過的時間和「通常需要多久」，畫面不會一片安靜。
+# 步驟進行中：關閉「快速編輯」（傳統主控台點一下視窗就會凍結正在跑的程式），並把 Ctrl+C 當成按鍵讀進來，
+# 先問要不要停止，而不是直接中斷到一半。步驟結束（含停止）時，兩者都恢復原狀。
+$script:OnWindows = ($PSVersionTable.PSEdition -eq 'Desktop') -or ($IsWindows -eq $true)
+$script:ConsoleModeSaved = $null
+
+function Set-QuickEdit([bool]$off) {
+    # $off = $true：關閉快速編輯；$false：恢復成安裝程式啟動時的設定。只在 Windows 的真主控台有作用。
+    if (-not $script:OnWindows) { return }
+    try {
+        if (-not ('AgEnD.ConsoleMode' -as [type])) {
+            Add-Type -Namespace AgEnD -Name ConsoleMode -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int nStdHandle);
+[DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+[DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+'@
+        }
+        $h = [AgEnD.ConsoleMode]::GetStdHandle(-10)                       # STD_INPUT_HANDLE
+        $mode = [uint32]0
+        if (-not [AgEnD.ConsoleMode]::GetConsoleMode($h, [ref]$mode)) { return }
+        if ($off) {
+            if ($null -eq $script:ConsoleModeSaved) { $script:ConsoleModeSaved = $mode }
+            $new = $mode -bor 0x80                                        # ENABLE_EXTENDED_FLAGS：才能改快速編輯
+            if ($new -band 0x40) { $new = $new - 0x40 }                   # ENABLE_QUICK_EDIT_MODE 關閉
+            [void][AgEnD.ConsoleMode]::SetConsoleMode($h, [uint32]$new)
+        } elseif ($null -ne $script:ConsoleModeSaved) {
+            [void][AgEnD.ConsoleMode]::SetConsoleMode($h, [uint32]($script:ConsoleModeSaved -bor 0x80))
+            $script:ConsoleModeSaved = $null
+        }
+    } catch { }
+}
+
+function Format-Elapsed([double]$seconds) {
+    $s = [int][math]::Floor($seconds)
+    if ($s -lt 60) { return "$s 秒" }
+    return ("{0} 分 {1:00} 秒" -f [math]::Floor($s / 60), ($s % 60))
+}
+
+# 終端機上的顯示寬度：中日韓文字佔兩格。
+function Get-DisplayWidth([string]$text) {
+    $w = 0
+    foreach ($ch in $text.ToCharArray()) {
+        $c = [int]$ch
+        if (($c -ge 0x1100 -and $c -le 0x115F) -or ($c -ge 0x2E80 -and $c -le 0xA4CF) -or ($c -ge 0xAC00 -and $c -le 0xD7A3) -or
+            ($c -ge 0xF900 -and $c -le 0xFAFF) -or ($c -ge 0xFE30 -and $c -le 0xFE4F) -or ($c -ge 0xFF00 -and $c -le 0xFF60) -or ($c -ge 0xFFE0 -and $c -le 0xFFE6)) { $w += 2 } else { $w += 1 }
+    }
+    return $w
+}
+function Limit-Width([string]$text, [int]$max) {
+    if ($max -lt 8) { return '' }
+    if ((Get-DisplayWidth $text) -le $max) { return $text }
+    $out = ''
+    foreach ($ch in $text.ToCharArray()) { if ((Get-DisplayWidth ($out + $ch + '...')) -gt $max) { break }; $out += $ch }
+    return $out + '...'
+}
+
+# 讀取子程序寫到檔案的新輸出。wsl.exe 自己的訊息可能是 UTF-16LE（舊版不認 WSL_UTF8），其他都是 UTF-8：
+# 看到 0x00 就是 UTF-16（UTF-8 文字不會有 0x00），在第一個換行或 64 位元組前先不決定。
+function New-OutputTail([string]$path) { return @{ Path = $path; Stream = $null; Decoder = $null; Raw = (New-Object System.Collections.Generic.List[byte]) } }
+function Read-OutputTail($tail, [bool]$final) {
+    if (-not $tail.Stream) {
+        try { $tail.Stream = [IO.File]::Open($tail.Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite, Delete') } catch { return '' }
+    }
+    $buf = New-Object byte[] 65536
+    $text = ''
+    while (($n = $tail.Stream.Read($buf, 0, $buf.Length)) -gt 0) {
+        if ($tail.Decoder) {
+            $chars = New-Object char[] ($n + 4)
+            $c = $tail.Decoder.GetChars($buf, 0, $n, $chars, 0)
+            $text += New-Object string ($chars, 0, $c)
+        } else {
+            for ($i = 0; $i -lt $n; $i++) { $tail.Raw.Add($buf[$i]) }
+        }
+    }
+    if (-not $tail.Decoder -and $tail.Raw.Count -gt 0) {
+        $raw = $tail.Raw.ToArray()
+        if ($final -or $raw.Length -ge 64 -or ($raw -contains [byte]10) -or ($raw -contains [byte]13)) {
+            $tail.Decoder = if ($raw -contains [byte]0) { [Text.Encoding]::Unicode.GetDecoder() } else { [Text.Encoding]::UTF8.GetDecoder() }
+            $chars = New-Object char[] ($raw.Length + 4)
+            $c = $tail.Decoder.GetChars($raw, 0, $raw.Length, $chars, 0)
+            $text += New-Object string ($chars, 0, $c)
+            $tail.Raw.Clear()
+        }
+    }
+    return ($text -replace [char]0xFEFF, '')
+}
+
+# 工具輸出的一段文字 → 已完成的行、還沒換行的尾巴、目前的進度字樣。去掉色彩控制碼；一行裡的 \r 是工具原地更新的
+# 進度，只留最後一段（Windows 上子程序直接寫檔，\r 原樣保留）。
+function Get-LastSegment([string]$s) { return (@($s -split "`r" | Where-Object { $_.Trim() }) | Select-Object -Last 1) }
+function Split-ToolOutput([string]$text) {
+    $text = $text -replace "\x1b\[[0-9;?]*[ -/]*[@-~]", '' -replace "\x1b\][^\x07]*\x07", ''
+    $parts = $text -split "`n"
+    $lines = @()
+    for ($j = 0; $j -lt $parts.Count - 1; $j++) { $seg = Get-LastSegment $parts[$j]; if ($seg) { $lines += $seg.TrimEnd() } }
+    $rest = $parts[-1]
+    $now = Get-LastSegment $rest
+    return @{ Lines = $lines; Rest = $rest; Progress = $(if ($now) { $now.Trim() } else { '' }) }
+}
+
+# 執行一個長步驟：背景跑 $File $Arguments，轉印它的輸出，顯示心跳。回傳它的結束碼。
+#   $Usually：「通常需要 3–10 分鐘」；$UpperMinutes：超過就補一句「比平常久，仍在進行中」。
+#   $HeartbeatSeconds：輸出被導向（不是真主控台）時，每隔幾秒印一行心跳（真主控台則每秒原地更新同一行）。
+function Invoke-Watched {
+    param([string]$Label, [string]$Usually, [string]$File, [string[]]$Arguments = @(), [double]$UpperMinutes = 0, [int]$HeartbeatSeconds = 30)
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ('agend-step-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $outFile = Join-Path $dir 'out.txt'; $errFile = Join-Path $dir 'err.txt'; $inFile = Join-Path $dir 'in.txt'
+    [IO.File]::WriteAllText($inFile, '')
+    # Start-Process 用空白把參數接起來：含空白或引號的參數要加引號。
+    $quoted = @($Arguments | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } })
+    $start = @{ FilePath = $File; NoNewWindow = $true; PassThru = $true; RedirectStandardOutput = $outFile; RedirectStandardError = $errFile }
+    # 標準輸入接一個空檔：子程序不會跟這個視窗搶按鍵（Ctrl+C 留給上面的確認）。只在 Windows：那裡是把檔案交給子程序；
+    # Linux 上的 pwsh 會自己把檔案寫進管線，子程序先結束就出錯（只有測試在 Linux 上跑）。
+    if ($script:OnWindows) { $start.RedirectStandardInput = $inFile }
+    if ($quoted.Count -gt 0) { $start.ArgumentList = $quoted }
+
+    $live = $false
+    try { $live = -not [Console]::IsOutputRedirected -and -not [Console]::IsInputRedirected } catch { }
+    $savedCtrlC = $null
+    $prevUtf8 = $env:WSL_UTF8
+    $env:WSL_UTF8 = '1'                                                   # 讓 wsl.exe 自己的訊息用 UTF-8
+    # 這一步的狀態（scriptblock 之間共用同一個 hashtable）。
+    $st = @{ Tails = @((New-OutputTail $outFile), (New-OutputTail $errFile)); Pending = @('', ''); Progress = ''; Shown = $false }
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $nextBeat = $HeartbeatSeconds
+    $spin = '|/-\'
+    $proc = $null
+
+    $clearStatus = {
+        if ($st.Shown) {
+            $w = 79; try { $w = [Console]::WindowWidth - 1 } catch { }
+            [Console]::Write("`r" + (' ' * $w) + "`r")
+            $st.Shown = $false
+        }
+    }
+    $beatText = {
+        $t = "$Label：已經過 $(Format-Elapsed $clock.Elapsed.TotalSeconds)（$Usually）"
+        if ($UpperMinutes -gt 0 -and $clock.Elapsed.TotalMinutes -gt $UpperMinutes) { $t += "，比平常久，仍在進行中，請不要關閉視窗" }
+        return $t
+    }
+    $printLine = {
+        param([string]$line)
+        & $clearStatus; Write-Host ("    " + $line) -ForegroundColor DarkGray
+    }
+    $emit = {
+        param([bool]$final)
+        for ($k = 0; $k -lt 2; $k++) {
+            $chunk = Read-OutputTail $st.Tails[$k] $final
+            if ($chunk) {
+                $cut = Split-ToolOutput ($st.Pending[$k] + $chunk)
+                foreach ($line in $cut.Lines) { & $printLine $line }
+                $st.Pending[$k] = $cut.Rest
+                if ($cut.Progress) { $st.Progress = $cut.Progress }
+            }
+            if ($final) { $cut = Split-ToolOutput ($st.Pending[$k] + "`n"); foreach ($line in $cut.Lines) { & $printLine $line }; $st.Pending[$k] = '' }
+        }
+    }
+
+    try {
+        if ($live) {
+            try { $savedCtrlC = [Console]::TreatControlCAsInput; [Console]::TreatControlCAsInput = $true } catch { $savedCtrlC = $null }
+            Set-QuickEdit $true
+        }
+        $proc = Start-Process @start
+        $null = $proc.Handle                                              # 先取 Handle，之後才讀得到 ExitCode
+        $tick = 0
+        while (-not $proc.HasExited) {
+            Start-Sleep -Milliseconds 250
+            & $emit $false
+            if ($live -and $null -ne $savedCtrlC) {
+                while ([Console]::KeyAvailable) {
+                    $key = [Console]::ReadKey($true)
+                    if ($key.KeyChar -eq [char]3 -or ($key.Key -eq 'C' -and ($key.Modifiers -band [ConsoleModifiers]::Control))) {
+                        & $clearStatus
+                        if (Confirm-StopInstall $proc) {
+                            [Console]::TreatControlCAsInput = $savedCtrlC; Set-QuickEdit $false
+                            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+                            exit 1
+                        }
+                    }
+                }
+            }
+            if ($live) {
+                $tick++
+                $w = 79; try { $w = [Console]::WindowWidth - 1 } catch { }
+                $line = "  " + $spin[$tick % 4] + " " + (& $beatText)
+                if ($st.Progress) { $line += "  " + $st.Progress }
+                [Console]::Write("`r" + (' ' * $w) + "`r" + (Limit-Width $line $w))
+                $st.Shown = $true
+            } elseif ($clock.Elapsed.TotalSeconds -ge $nextBeat) {
+                Write-Host ("  ... " + (& $beatText))
+                $nextBeat += $HeartbeatSeconds
+            }
+        }
+        $proc.WaitForExit()
+        & $emit $true
+        & $clearStatus
+        Write-Host ("  {0}：用了 {1}" -f $Label, (Format-Elapsed $clock.Elapsed.TotalSeconds)) -ForegroundColor DarkGray
+        return $proc.ExitCode
+    } finally {
+        foreach ($t in $st.Tails) { if ($t.Stream) { $t.Stream.Dispose() } }
+        if ($null -ne $savedCtrlC) { try { [Console]::TreatControlCAsInput = $savedCtrlC } catch { } }
+        if ($live) { Set-QuickEdit $false }
+        if ($null -eq $prevUtf8) { Remove-Item Env:WSL_UTF8 -ErrorAction SilentlyContinue } else { $env:WSL_UTF8 = $prevUtf8 }
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# 自動步驟中按了 Ctrl+C：先問，不直接中斷。回傳 $true 表示使用者要停止（子程序已結束）。
+function Confirm-StopInstall($proc) {
+    Write-Host ""
+    Write-Warn "你按了 Ctrl+C。在這個視窗裡，Ctrl+C 是「停止」，不是「複製」。"
+    Write-Warn "安裝還在背景繼續進行，沒有中斷。"
+    Write-Host "  要停止安裝嗎？輸入 y 再按 Enter 就停止；直接按 Enter 會繼續。" -ForegroundColor Yellow -NoNewline
+    $answer = [Console]::ReadLine()
+    if ($answer -match '^\s*[yY]') {
+        if (-not $proc.HasExited) {
+            if ($script:OnWindows) { & taskkill.exe /PID $proc.Id /T /F 2>&1 | Out-Null } else { try { $proc.Kill() } catch { } }
+        }
+        Write-Err "已停止安裝。"
+        Write-Info "之後再執行同一行安裝指令（或此腳本），會從還沒完成的步驟繼續。"
+        return $true
+    }
+    Write-Ok "繼續安裝..."
+    return $false
+}
+
+# 在 WSL 裡以 root 執行一段 bash 腳本，作為長步驟（見 Invoke-Watched）。腳本放在沒有空白的 ProgramData 路徑。
+function Invoke-WslStep {
+    param([string]$Label, [string]$Usually, [string]$Script, [double]$UpperMinutes = 0)
+    $dir = Join-Path $env:ProgramData 'AgEnD-install'
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $file = Join-Path $dir ('step-' + [Guid]::NewGuid().ToString('N') + '.sh')
+    [IO.File]::WriteAllText($file, ($Script -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding $false))
+    try {
+        $wslFile = (wsl -d $UBUNTU_DISTRO -u root -- wslpath -u ($file -replace '\\', '\\') 2>$null | Out-String).Trim()
+        if (-not $wslFile.StartsWith('/')) { $wslFile = '/mnt/' + $file.Substring(0, 1).ToLower() + ($file.Substring(2) -replace '\\', '/') }
+        return (Invoke-Watched -Label $Label -Usually $Usually -UpperMinutes $UpperMinutes -File 'wsl.exe' -Arguments @('-d', $UBUNTU_DISTRO, '-u', 'root', '--', 'bash', $wslFile))
+    } finally {
+        Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # ── 開始 ─────────────────────────────────────────────────
 
 Clear-Host
@@ -80,6 +325,15 @@ if (-not (Check-Admin)) {
     Write-Info "請右鍵點擊 PowerShell →「以系統管理員身分執行」"
     Read-Host "按 Enter 結束"; exit 1
 }
+
+# 使用這個視窗的小提醒（#1853：不熟主控台的人最常卡在這幾件事）
+Write-Host "  ── 使用這個視窗前，先看這幾點 ──" -ForegroundColor Yellow
+Write-Info "  複製：用滑鼠選取文字，再按右鍵（或 Enter）。"
+Write-Info "  貼上：在視窗裡按一下右鍵。"
+Write-Info "  請不要按 Ctrl+C：在這個視窗裡，它不是「複製」，而是「停止」。"
+Write-Info "    自動安裝的步驟中不小心按到，會先問你要不要停止，不會直接中斷。"
+Write-Info "  自動安裝時點到視窗也沒關係，不會讓安裝暫停。"
+Write-Host ""
 
 # 網路檢查
 Write-Info "檢查網路連線..."
@@ -120,9 +374,9 @@ if (Stage-Done 1) {
     }
 
     if (-not $wslFeatureEnabled) {
-        Write-Info "正在啟用 WSL 功能（可能需要一點時間）..."
-        dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart 2>$null | Out-Null
-        dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart 2>$null | Out-Null
+        Write-Info "正在啟用 WSL 功能..."
+        $null = Invoke-Watched -Label "啟用 WSL 功能" -Usually "通常需要 1–3 分鐘" -UpperMinutes 5 -File "dism.exe" -Arguments @("/online", "/enable-feature", "/featurename:Microsoft-Windows-Subsystem-Linux", "/all", "/norestart")
+        $null = Invoke-Watched -Label "啟用虛擬機器平台" -Usually "通常需要 1–3 分鐘" -UpperMinutes 5 -File "dism.exe" -Arguments @("/online", "/enable-feature", "/featurename:VirtualMachinePlatform", "/all", "/norestart")
         Write-Ok "WSL 功能已啟用"
 
         Write-Warn "WSL 功能剛啟用，需要重新開機才能繼續"
@@ -137,8 +391,13 @@ if (Stage-Done 1) {
 
     # ── 1b: 更新 WSL 核心 ──
     Write-Info "更新 WSL 核心元件..."
-    $wslUpdateOutput = wsl --update 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) {
+    $wslUpdateCode = Invoke-Watched -Label "更新 WSL 核心元件" -Usually "通常需要 1–5 分鐘" -UpperMinutes 8 -File "wsl.exe" -Arguments @("--update")
+    if ($wslUpdateCode -ne 0) {
+        # Microsoft Store 被擋（公司電腦常見）時，改從 GitHub 下載同一個更新。
+        Write-Warn "從 Microsoft Store 更新失敗，改從 GitHub 下載..."
+        $wslUpdateCode = Invoke-Watched -Label "從 GitHub 更新 WSL" -Usually "通常需要 1–5 分鐘" -UpperMinutes 8 -File "wsl.exe" -Arguments @("--update", "--web-download")
+    }
+    if ($wslUpdateCode -ne 0) {
         Write-Warn "wsl --update 失敗，從 GitHub 下載最新版 WSL..."
         try {
             $release = Invoke-RestMethod "https://api.github.com/repos/microsoft/WSL/releases/latest" -TimeoutSec 30
@@ -147,17 +406,16 @@ if (Stage-Done 1) {
                 $wslMsi = "$env:TEMP\wsl-latest.msi"
                 Write-Info "  下載中: $($msiAsset.name) ($($release.tag_name))..."
                 Invoke-WebRequest -Uri $msiAsset.browser_download_url -OutFile $wslMsi -UseBasicParsing
-                Write-Info "  安裝中（可能需要 1-2 分鐘）..."
-                $msiProc = Start-Process msiexec.exe -ArgumentList "/i",$wslMsi,"/quiet","/norestart" -Wait -PassThru
+                $msiCode = Invoke-Watched -Label "安裝 WSL" -Usually "通常需要 1–2 分鐘" -UpperMinutes 5 -File "msiexec.exe" -Arguments @("/i", $wslMsi, "/quiet", "/norestart")
                 Remove-Item $wslMsi -Force -ErrorAction SilentlyContinue
-                if ($msiProc.ExitCode -eq 0) {
+                if ($msiCode -eq 0) {
                     Write-Ok "WSL $($release.tag_name) 已從 GitHub 安裝"
-                } elseif ($msiProc.ExitCode -eq 3010) {
+                } elseif ($msiCode -eq 3010) {
                     Write-Warn "WSL 已安裝但需要重新開機才能生效"
                     Write-Info "請重新開機後，再次執行同一行安裝指令（或此腳本），會從中斷處繼續"
                     Read-Host "按 Enter 結束"; exit 0
                 } else {
-                    Write-Err "MSI 安裝失敗 (exit code: $($msiProc.ExitCode))"
+                    Write-Err "MSI 安裝失敗 (exit code: $msiCode)"
                     Write-Info "請手動到 https://github.com/microsoft/WSL/releases 下載 .msi 安裝"
                     Read-Host "按 Enter 結束"; exit 1
                 }
@@ -270,9 +528,8 @@ if (Stage-Done 1) {
         Read-Host "  了解了嗎？按 Enter 開始安裝"
 
         # 安裝
-        Write-Info "正在安裝 $UBUNTU_DISTRO（下載中，可能需要 3-10 分鐘）..."
-        Write-Info "請耐心等待，不要關閉視窗..."
-        wsl --install -d $UBUNTU_DISTRO --location $wslPath --no-launch
+        Write-Info "正在安裝 $UBUNTU_DISTRO，請不要關閉視窗..."
+        $null = Invoke-Watched -Label "下載並安裝 $UBUNTU_DISTRO" -Usually "通常需要 3–10 分鐘" -UpperMinutes 15 -File "wsl.exe" -Arguments @("--install", "-d", $UBUNTU_DISTRO, "--location", $wslPath, "--no-launch")
 
         # 驗證
         Write-Info "正在驗證安裝結果..."
@@ -418,7 +675,7 @@ if (Stage-Done 2) {
     $ErrorActionPreference = "Continue"
 
     Write-Info "  [WSL] 安裝必要套件..."
-    wsl -d $UBUNTU_DISTRO -u root -- bash -c 'apt-get install -y unzip curl git 2>/dev/null || true' 2>&1 | Out-Null
+    $null = Invoke-WslStep -Label "安裝必要套件" -Usually "通常需要 1–2 分鐘" -UpperMinutes 5 -Script 'apt-get install -y unzip curl git || true'
 
     $failed = @()
     foreach ($b in $selected) {
@@ -429,10 +686,7 @@ if (Stage-Done 2) {
             $nodePrep = 'export NVM_DIR=/root/.nvm; [ -s $NVM_DIR/nvm.sh ] && . $NVM_DIR/nvm.sh; if ! command -v npm >/dev/null 2>&1; then curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash; export NVM_DIR=/root/.nvm; . $NVM_DIR/nvm.sh; nvm install 22 >/dev/null 2>&1; fi; '
         }
         $cmd = "$BACKEND_PATH; $nodePrep$($b.Install)"
-        wsl -d $UBUNTU_DISTRO -u root -- bash -c $cmd 2>&1 | ForEach-Object {
-            $line = $_.ToString().Trim()
-            if ($line -match "\S" -and $line -notmatch "RemoteException") { Write-Info "    $line" }
-        }
+        $null = Invoke-WslStep -Label ("安裝 {0}" -f $b.Name) -Usually "通常需要 1–3 分鐘" -UpperMinutes 6 -Script $cmd
         $check = wsl -d $UBUNTU_DISTRO -u root -- bash -lc "$BACKEND_PATH; if command -v $($b.Bin) >/dev/null 2>&1; then echo OK; else echo FAIL; fi" 2>&1 | Out-String
         if ($check -match "OK") { Write-Ok ("{0} 安裝完成" -f $b.Name) }
         else { Write-Warn ("{0} 安裝可能失敗（找不到 {1}）" -f $b.Name, $b.Bin); $failed += $b.Name }
@@ -486,8 +740,11 @@ if (Stage-Done 3) {
             }
             "claude"      { Write-Warn "  首次執行會導向 Anthropic OAuth 登入；完成後在畫面輸入 /quit 離開" }
             "antigravity" { Write-Warn "  首次執行會導向 Google Sign-In；完成後離開 CLI（依畫面提示，或按 Ctrl+D）" }
-            "codex"       { Write-Warn "  首次執行會導向 ChatGPT 登入（或先設定 OPENAI_API_KEY）；完成後離開 CLI" }
+            "codex"       { Write-Warn "  首次執行會導向 ChatGPT 登入（或先設定 OPENAI_API_KEY）；完成後輸入 /quit 離開" }
         }
+        Write-Warn ""
+        Write-Warn "  要複製畫面上的網址：用滑鼠選取，再按右鍵。要貼上：按右鍵。"
+        Write-Warn "  登入時請不要按 Ctrl+C：它會直接關掉登入程式。"
         Write-Warn "═══════════════════════════════════════════════════════"
         Write-Host ""
         Read-Host ("  準備好了嗎？按 Enter 開始登入 {0}" -f $b.Name)
@@ -529,10 +786,9 @@ if (Stage-Done 4) {
     Write-Host ""
 
     Write-Info "  [WSL] 安裝 tmux..."
-    wsl -d $UBUNTU_DISTRO -u root -- bash -c 'apt-get install -y -qq tmux > /dev/null 2>&1' 2>&1 | Out-Null
+    $null = Invoke-WslStep -Label "安裝 tmux" -Usually "通常不到 1 分鐘" -UpperMinutes 3 -Script 'apt-get install -y -qq tmux || true'
 
     Write-Info "  [WSL] 執行 AgEnD 官方安裝腳本（含 nvm + Node.js $NODE_VERSION + 編譯工具）..."
-    $agendScript = "$env:TEMP\install-agend-wsl.sh"
     $scriptLines = @(
         '#!/bin/bash'
         'export HOME=/root'
@@ -542,21 +798,7 @@ if (Stage-Done 4) {
         'if ! grep -q "NVM_DIR" /root/.bashrc 2>/dev/null; then printf "\nexport NVM_DIR=\"/root/.nvm\"\n[ -s \"\$NVM_DIR/nvm.sh\" ] && source \"\$NVM_DIR/nvm.sh\"\n" >> /root/.bashrc; fi'
         'if ! grep -q "NVM_DIR" /root/.profile 2>/dev/null; then printf "\nexport NVM_DIR=\"/root/.nvm\"\n[ -s \"\$NVM_DIR/nvm.sh\" ] && source \"\$NVM_DIR/nvm.sh\"\n" >> /root/.profile; fi'
     )
-    $scriptContent = $scriptLines -join "`n"
-    [IO.File]::WriteAllText($agendScript, $scriptContent, (New-Object System.Text.UTF8Encoding $false))
-
-    # 轉換 Windows 路徑為 WSL 路徑
-    $wslScriptPath = wsl -d $UBUNTU_DISTRO -u root -- wslpath -u ($agendScript -replace '\\', '\\')
-
-    wsl -d $UBUNTU_DISTRO -u root -- bash $wslScriptPath 2>&1 | ForEach-Object {
-        $line = $_.ToString().Trim()
-        if ($line -match "\S" -and $line -notmatch "RemoteException") {
-            Write-Info "  [WSL] $line"
-        }
-    }
-
-    # 清理暫存檔
-    Remove-Item $agendScript -Force -ErrorAction SilentlyContinue
+    $null = Invoke-WslStep -Label "安裝 AgEnD 與 Node.js" -Usually "通常需要 3–8 分鐘" -UpperMinutes 15 -Script ($scriptLines -join "`n")
 
     Write-Host ""
 
@@ -597,6 +839,9 @@ if (Stage-Done 5) {
     Write-Info "  - 輸入 Bot Token"
     Write-Info "  - 在群組發一則訊息讓 Bot 偵測"
     Write-Info "  - 自動產生設定 + 安裝 service + 啟動"
+    Write-Host ""
+    Write-Warn "要貼上 Bot Token：在視窗裡按一下右鍵。"
+    Write-Warn "設定時請不要按 Ctrl+C：它會直接結束設定。"
     Write-Host ""
     Read-Host "  準備好了嗎？按 Enter 開始"
 
