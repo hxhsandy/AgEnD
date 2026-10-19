@@ -1,0 +1,203 @@
+{
+ "engine": "webkit",
+ "tag": "after",
+ "agents": {
+  "A": "agend-leader-t1503382358143799511",
+  "B": "agend-dev-claude-t1519896892392083558",
+  "C": "agend-reviewer-t1503382598640996543"
+ },
+ "cases": {
+  "desk-light": {
+   "ok": true,
+   "heights": {
+    "hidden": 35,
+    "shown": 384,
+    "folded": 236,
+    "saved": 148,
+    "noBanner": 149,
+    "noBio": 253
+   },
+   "bannerFlushPx": 0,
+   "cardButtons": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "header": {
+    "hidden": {
+     "cls": "icon-btn",
+     "label": "Identity card",
+     "haspopup": "menu"
+    },
+    "shown": {
+     "cls": "icon-btn active",
+     "label": "Identity card",
+     "haspopup": "menu"
+    },
+    "folded": {
+     "cls": "icon-btn active",
+     "label": "Identity card",
+     "haspopup": "menu"
+    }
+   },
+   "strip": true,
+   "kept": [
+    "open",
+    "hidden"
+   ],
+   "fold": {
+    "noBanner": false,
+    "noBio": true
+   },
+   "errors": []
+  },
+  "desk-dark": {
+   "ok": true,
+   "heights": {
+    "hidden": 35,
+    "shown": 384,
+    "folded": 236,
+    "saved": 148,
+    "noBanner": 149,
+    "noBio": 253
+   },
+   "bannerFlushPx": 0,
+   "cardButtons": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "header": {
+    "hidden": {
+     "cls": "icon-btn",
+     "label": "身分卡",
+     "haspopup": "menu"
+    },
+    "shown": {
+     "cls": "icon-btn active",
+     "label": "身分卡",
+     "haspopup": "menu"
+    },
+    "folded": {
+     "cls": "icon-btn active",
+     "label": "身分卡",
+     "haspopup": "menu"
+    }
+   },
+   "strip": true,
+   "kept": [
+    "open",
+    "hidden"
+   ],
+   "fold": {
+    "noBanner": false,
+    "noBio": true
+   },
+   "errors": []
+  },
+  "phone-light": {
+   "ok": true,
+   "heights": {
+    "hidden": 35,
+    "shown": 286,
+    "folded": 146,
+    "saved": 140,
+    "noBanner": 141,
+    "noBio": 179
+   },
+   "bannerFlushPx": 0,
+   "cardButtons": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "header": {
+    "hidden": {
+     "cls": "icon-btn",
+     "label": "身分卡",
+     "haspopup": "menu"
+    },
+    "shown": {
+     "cls": "icon-btn active",
+     "label": "身分卡",
+     "haspopup": "menu"
+    },
+    "folded": {
+     "cls": "icon-btn active",
+     "label": "身分卡",
+     "haspopup": "menu"
+    }
+   },
+   "strip": true,
+   "kept": [
+    "open",
+    "hidden"
+   ],
+   "fold": {
+    "noBanner": false,
+    "noBio": true
+   },
+   "errors": []
+  },
+  "phone-dark": {
+   "ok": true,
+   "heights": {
+    "hidden": 35,
+    "shown": 286,
+    "folded": 146,
+    "saved": 140,
+    "noBanner": 141,
+    "noBio": 179
+   },
+   "bannerFlushPx": 0,
+   "cardButtons": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "header": {
+    "hidden": {
+     "cls": "icon-btn",
+     "label": "Identity card",
+     "haspopup": "menu"
+    },
+    "shown": {
+     "cls": "icon-btn active",
+     "label": "Identity card",
+     "haspopup": "menu"
+    },
+    "folded": {
+     "cls": "icon-btn active",
+     "label": "Identity card",
+     "haspopup": "menu"
+    }
+   },
+   "strip": true,
+   "kept": [
+    "open",
+    "hidden"
+   ],
+   "fold": {
+    "noBanner": false,
+    "noBio": true
+   },
+   "errors": []
+  },
+  "menu keyboard": {
+   "ok": true,
+   "opened": true,
+   "first": "menuitemcheckbox|Show card",
+   "shownByKey": true,
+   "stillOpen": true,
+   "second": "Show picture and bio",
+   "closedByEsc": true,
+   "focusBack": true,
+   "closedByOutside": true,
+   "errors": []
+  }
+ }
+}
