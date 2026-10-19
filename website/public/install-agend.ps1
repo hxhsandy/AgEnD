@@ -70,11 +70,13 @@ function Check-Admin {
 # 步驟進行中：關閉「快速編輯」（傳統主控台點一下視窗就會凍結正在跑的程式），並把 Ctrl+C 當成按鍵讀進來，
 # 先問要不要停止，而不是直接中斷到一半。步驟結束（含停止）時，兩者都恢復原狀。
 $script:OnWindows = ($PSVersionTable.PSEdition -eq 'Desktop') -or ($IsWindows -eq $true)
-$script:ConsoleModeSaved = $null
 
-function Set-QuickEdit([bool]$off) {
-    # $off = $true：關閉快速編輯；$false：恢復成安裝程式啟動時的設定。只在 Windows 的真主控台有作用。
-    if (-not $script:OnWindows) { return }
+# 主控台輸入模式（Windows）：ENABLE_PROCESSED_INPUT 0x1（Ctrl+C 是「停止」訊號）、ENABLE_QUICK_EDIT_MODE 0x40、
+# ENABLE_EXTENDED_FLAGS 0x80（要改快速編輯必須帶上）。[Console]::TreatControlCAsInput 改的也是這份模式裡的 0x1，
+# 和快速編輯分開存、分開還原會互相蓋掉（#2228 審查），所以不用它：長步驟開始時存下整份模式一次，一次寫入
+# 「快速編輯關、Ctrl+C 當按鍵」，結束時（含停止）把存下的那份原樣寫回。
+function Get-InputMode {
+    if (-not $script:OnWindows) { return $null }
     try {
         if (-not ('AgEnD.ConsoleMode' -as [type])) {
             Add-Type -Namespace AgEnD -Name ConsoleMode -MemberDefinition @'
@@ -83,20 +85,49 @@ function Set-QuickEdit([bool]$off) {
 [DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
 '@
         }
-        $h = [AgEnD.ConsoleMode]::GetStdHandle(-10)                       # STD_INPUT_HANDLE
         $mode = [uint32]0
-        if (-not [AgEnD.ConsoleMode]::GetConsoleMode($h, [ref]$mode)) { return }
-        if ($off) {
-            if ($null -eq $script:ConsoleModeSaved) { $script:ConsoleModeSaved = $mode }
-            $new = $mode -bor 0x80                                        # ENABLE_EXTENDED_FLAGS：才能改快速編輯
-            if ($new -band 0x40) { $new = $new - 0x40 }                   # ENABLE_QUICK_EDIT_MODE 關閉
-            [void][AgEnD.ConsoleMode]::SetConsoleMode($h, [uint32]$new)
-        } elseif ($null -ne $script:ConsoleModeSaved) {
-            [void][AgEnD.ConsoleMode]::SetConsoleMode($h, [uint32]($script:ConsoleModeSaved -bor 0x80))
-            $script:ConsoleModeSaved = $null
-        }
+        if ([AgEnD.ConsoleMode]::GetConsoleMode([AgEnD.ConsoleMode]::GetStdHandle(-10), [ref]$mode)) { return $mode }   # STD_INPUT_HANDLE
     } catch { }
+    return $null
 }
+function Set-InputMode([uint32]$mode) {
+    try { return [AgEnD.ConsoleMode]::SetConsoleMode([AgEnD.ConsoleMode]::GetStdHandle(-10), $mode) } catch { return $false }
+}
+# 回傳存下的模式；$null 表示這不是真主控台（或改不了），什麼都沒改。
+function Enter-StepConsole {
+    $saved = Get-InputMode
+    if ($null -eq $saved) { return $null }
+    $guarded = [long]$saved -bor 0x80
+    if ($guarded -band 0x40) { $guarded -= 0x40 }                      # 快速編輯關
+    if ($guarded -band 0x1) { $guarded -= 0x1 }                        # Ctrl+C 當按鍵讀
+    if (-not (Set-InputMode ([uint32]$guarded))) { return $null }
+    return $saved
+}
+function Restore-StepConsole($saved) {
+    if ($null -eq $saved) { return }
+    [void](Set-InputMode ([uint32]([long]$saved -bor 0x80)))           # 帶 0x80，原本的快速編輯設定才寫得回去
+}
+function Test-LiveConsole { try { return (-not [Console]::IsOutputRedirected -and -not [Console]::IsInputRedirected) } catch { return $false } }
+function Read-StepKey { try { if ([Console]::KeyAvailable) { return [Console]::ReadKey($true) } } catch { }; return $null }
+function Test-CtrlC($key) { return ($key.KeyChar -eq [char]3) -or ($key.Key -eq 'C' -and ($key.Modifiers -band [ConsoleModifiers]::Control)) }
+# 讀一行回答。長步驟中 Ctrl+C 已是按鍵、系統不再處理行編輯，所以自己處理 Enter 和退格；輸入被導向時（測試）就讀一行。
+function Read-Answer {
+    try {
+        $s = ''
+        while ($true) {
+            $k = [Console]::ReadKey($true)
+            if ($k.Key -eq 'Enter') { Write-Host ''; return $s }
+            if ($k.Key -eq 'Backspace') { if ($s.Length -gt 0) { $s = $s.Substring(0, $s.Length - 1); Write-Host "`b `b" -NoNewline }; continue }
+            if ([char]::IsControl($k.KeyChar)) { continue }
+            $s += $k.KeyChar; Write-Host $k.KeyChar -NoNewline
+        }
+    } catch { return [Console]::ReadLine() }
+}
+
+# 狀態列可用的寬度（視窗寬度不明或太窄時用 79）。
+function Get-StatusWidth { $w = 0; try { $w = [Console]::WindowWidth - 1 } catch { }; if ($w -lt 20) { $w = 79 }; return $w }
+# Start-Process 用空白把參數接起來：含空白或引號的參數要加引號。
+function Join-ProcessArguments([string[]]$Arguments) { return @($Arguments | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }) }
 
 function Format-Elapsed([double]$seconds) {
     $s = [int][math]::Floor($seconds)
@@ -122,35 +153,46 @@ function Limit-Width([string]$text, [int]$max) {
     return $out + '...'
 }
 
-# 讀取子程序寫到檔案的新輸出。wsl.exe 自己的訊息可能是 UTF-16LE（舊版不認 WSL_UTF8），其他都是 UTF-8：
-# 看到 0x00 就是 UTF-16（UTF-8 文字不會有 0x00），在第一個換行或 64 位元組前先不決定。
-function New-OutputTail([string]$path) { return @{ Path = $path; Stream = $null; Decoder = $null; Raw = (New-Object System.Collections.Generic.List[byte]) } }
-function Read-OutputTail($tail, [bool]$final) {
+# 讀取子程序寫到檔案的新輸出，用這一步已知的編碼（不從位元組猜：純中文的 UTF-16 開頭可以是合法的 ASCII，
+# 「上」U+4E0A 也含 0x0A，#2228 審查）。'utf8'：WSL 裡的程式（Linux 的輸出原樣傳過來）；'utf16'：舊版 wsl.exe 自己的訊息；
+# 'oem'：Windows 主控台程式（dism），用主控台的字碼頁。解碼器會接住切在兩次讀取之間的多位元組字元。
+function New-OutputTail([string]$path, [string]$encoding = 'utf8') {
+    $enc = switch ($encoding) {
+        'utf16' { [Text.Encoding]::Unicode }
+        'oem' { try { [Console]::OutputEncoding } catch { [Text.Encoding]::Default } }
+        default { [Text.Encoding]::UTF8 }
+    }
+    return @{ Path = $path; Stream = $null; Decoder = $enc.GetDecoder() }
+}
+function Read-OutputTail($tail) {
     if (-not $tail.Stream) {
         try { $tail.Stream = [IO.File]::Open($tail.Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite, Delete') } catch { return '' }
     }
     $buf = New-Object byte[] 65536
     $text = ''
     while (($n = $tail.Stream.Read($buf, 0, $buf.Length)) -gt 0) {
-        if ($tail.Decoder) {
-            $chars = New-Object char[] ($n + 4)
-            $c = $tail.Decoder.GetChars($buf, 0, $n, $chars, 0)
-            $text += New-Object string ($chars, 0, $c)
-        } else {
-            for ($i = 0; $i -lt $n; $i++) { $tail.Raw.Add($buf[$i]) }
-        }
-    }
-    if (-not $tail.Decoder -and $tail.Raw.Count -gt 0) {
-        $raw = $tail.Raw.ToArray()
-        if ($final -or $raw.Length -ge 64 -or ($raw -contains [byte]10) -or ($raw -contains [byte]13)) {
-            $tail.Decoder = if ($raw -contains [byte]0) { [Text.Encoding]::Unicode.GetDecoder() } else { [Text.Encoding]::UTF8.GetDecoder() }
-            $chars = New-Object char[] ($raw.Length + 4)
-            $c = $tail.Decoder.GetChars($raw, 0, $raw.Length, $chars, 0)
-            $text += New-Object string ($chars, 0, $c)
-            $tail.Raw.Clear()
-        }
+        $chars = New-Object char[] ($n + 4)
+        $c = $tail.Decoder.GetChars($buf, 0, $n, $chars, 0)
+        $text += New-Object string ($chars, 0, $c)
     }
     return ($text -replace [char]0xFEFF, '')
+}
+# wsl.exe 自己的訊息用哪種編碼：設了 WSL_UTF8=1 的新版是 UTF-8，舊版（例如還沒更新前內建的那支）是 UTF-16LE。
+# 先問它一次 --version（輸出一定有英文字母、數字和換行）：看到 0x00 就是 UTF-16。
+function Get-WslOutputEncoding([string]$File = 'wsl.exe', [string[]]$Arguments = @('--version')) {
+    $probe = Join-Path ([IO.Path]::GetTempPath()) ('agend-wslenc-' + [Guid]::NewGuid().ToString('N') + '.txt')
+    $prev = $env:WSL_UTF8; $env:WSL_UTF8 = '1'
+    try {
+        $start = @{ FilePath = $File; NoNewWindow = $true; Wait = $true; RedirectStandardOutput = $probe }
+        if ($Arguments.Count -gt 0) { $start.ArgumentList = (Join-ProcessArguments $Arguments) }
+        Start-Process @start
+        $bytes = [IO.File]::ReadAllBytes($probe)
+        if ($bytes -contains [byte]0) { return 'utf16' }
+    } catch { } finally {
+        if ($null -eq $prev) { Remove-Item Env:WSL_UTF8 -ErrorAction SilentlyContinue } else { $env:WSL_UTF8 = $prev }
+        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+    }
+    return 'utf8'
 }
 
 # 工具輸出的一段文字 → 已完成的行、還沒換行的尾巴、目前的進度字樣。去掉色彩控制碼；一行裡的 \r 是工具原地更新的
@@ -169,27 +211,27 @@ function Split-ToolOutput([string]$text) {
 # 執行一個長步驟：背景跑 $File $Arguments，轉印它的輸出，顯示心跳。回傳它的結束碼。
 #   $Usually：「通常需要 3–10 分鐘」；$UpperMinutes：超過就補一句「比平常久，仍在進行中」。
 #   $HeartbeatSeconds：輸出被導向（不是真主控台）時，每隔幾秒印一行心跳（真主控台則每秒原地更新同一行）。
+#   $Encoding：它輸出的編碼（見 New-OutputTail）。
 function Invoke-Watched {
-    param([string]$Label, [string]$Usually, [string]$File, [string[]]$Arguments = @(), [double]$UpperMinutes = 0, [int]$HeartbeatSeconds = 30)
+    param([string]$Label, [string]$Usually, [string]$File, [string[]]$Arguments = @(), [double]$UpperMinutes = 0, [int]$HeartbeatSeconds = 30,
+        [string]$Encoding = 'utf8')
     $dir = Join-Path ([IO.Path]::GetTempPath()) ('agend-step-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     $outFile = Join-Path $dir 'out.txt'; $errFile = Join-Path $dir 'err.txt'; $inFile = Join-Path $dir 'in.txt'
     [IO.File]::WriteAllText($inFile, '')
-    # Start-Process 用空白把參數接起來：含空白或引號的參數要加引號。
-    $quoted = @($Arguments | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } })
+    $quoted = Join-ProcessArguments $Arguments
     $start = @{ FilePath = $File; NoNewWindow = $true; PassThru = $true; RedirectStandardOutput = $outFile; RedirectStandardError = $errFile }
     # 標準輸入接一個空檔：子程序不會跟這個視窗搶按鍵（Ctrl+C 留給上面的確認）。只在 Windows：那裡是把檔案交給子程序；
     # Linux 上的 pwsh 會自己把檔案寫進管線，子程序先結束就出錯（只有測試在 Linux 上跑）。
     if ($script:OnWindows) { $start.RedirectStandardInput = $inFile }
     if ($quoted.Count -gt 0) { $start.ArgumentList = $quoted }
 
-    $live = $false
-    try { $live = -not [Console]::IsOutputRedirected -and -not [Console]::IsInputRedirected } catch { }
-    $savedCtrlC = $null
+    $live = Test-LiveConsole
+    $consoleSaved = $null
     $prevUtf8 = $env:WSL_UTF8
     $env:WSL_UTF8 = '1'                                                   # 讓 wsl.exe 自己的訊息用 UTF-8
     # 這一步的狀態（scriptblock 之間共用同一個 hashtable）。
-    $st = @{ Tails = @((New-OutputTail $outFile), (New-OutputTail $errFile)); Pending = @('', ''); Progress = ''; Shown = $false }
+    $st = @{ Tails = @((New-OutputTail $outFile $Encoding), (New-OutputTail $errFile $Encoding)); Pending = @('', ''); Progress = ''; Shown = $false }
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $nextBeat = $HeartbeatSeconds
     $spin = '|/-\'
@@ -197,7 +239,7 @@ function Invoke-Watched {
 
     $clearStatus = {
         if ($st.Shown) {
-            $w = 79; try { $w = [Console]::WindowWidth - 1 } catch { }
+            $w = Get-StatusWidth
             [Console]::Write("`r" + (' ' * $w) + "`r")
             $st.Shown = $false
         }
@@ -214,7 +256,7 @@ function Invoke-Watched {
     $emit = {
         param([bool]$final)
         for ($k = 0; $k -lt 2; $k++) {
-            $chunk = Read-OutputTail $st.Tails[$k] $final
+            $chunk = Read-OutputTail $st.Tails[$k]
             if ($chunk) {
                 $cut = Split-ToolOutput ($st.Pending[$k] + $chunk)
                 foreach ($line in $cut.Lines) { & $printLine $line }
@@ -226,23 +268,19 @@ function Invoke-Watched {
     }
 
     try {
-        if ($live) {
-            try { $savedCtrlC = [Console]::TreatControlCAsInput; [Console]::TreatControlCAsInput = $true } catch { $savedCtrlC = $null }
-            Set-QuickEdit $true
-        }
+        if ($live) { $consoleSaved = Enter-StepConsole }
         $proc = Start-Process @start
         $null = $proc.Handle                                              # 先取 Handle，之後才讀得到 ExitCode
         $tick = 0
         while (-not $proc.HasExited) {
             Start-Sleep -Milliseconds 250
             & $emit $false
-            if ($live -and $null -ne $savedCtrlC) {
-                while ([Console]::KeyAvailable) {
-                    $key = [Console]::ReadKey($true)
-                    if ($key.KeyChar -eq [char]3 -or ($key.Key -eq 'C' -and ($key.Modifiers -band [ConsoleModifiers]::Control))) {
+            if ($null -ne $consoleSaved) {
+                while ($null -ne ($key = Read-StepKey)) {
+                    if (Test-CtrlC $key) {
                         & $clearStatus
                         if (Confirm-StopInstall $proc) {
-                            [Console]::TreatControlCAsInput = $savedCtrlC; Set-QuickEdit $false
+                            Restore-StepConsole $consoleSaved; $consoleSaved = $null
                             Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
                             exit 1
                         }
@@ -251,7 +289,7 @@ function Invoke-Watched {
             }
             if ($live) {
                 $tick++
-                $w = 79; try { $w = [Console]::WindowWidth - 1 } catch { }
+                $w = Get-StatusWidth
                 $line = "  " + $spin[$tick % 4] + " " + (& $beatText)
                 if ($st.Progress) { $line += "  " + $st.Progress }
                 [Console]::Write("`r" + (' ' * $w) + "`r" + (Limit-Width $line $w))
@@ -268,8 +306,7 @@ function Invoke-Watched {
         return $proc.ExitCode
     } finally {
         foreach ($t in $st.Tails) { if ($t.Stream) { $t.Stream.Dispose() } }
-        if ($null -ne $savedCtrlC) { try { [Console]::TreatControlCAsInput = $savedCtrlC } catch { } }
-        if ($live) { Set-QuickEdit $false }
+        Restore-StepConsole $consoleSaved
         if ($null -eq $prevUtf8) { Remove-Item Env:WSL_UTF8 -ErrorAction SilentlyContinue } else { $env:WSL_UTF8 = $prevUtf8 }
         Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -281,7 +318,7 @@ function Confirm-StopInstall($proc) {
     Write-Warn "你按了 Ctrl+C。在這個視窗裡，Ctrl+C 是「停止」，不是「複製」。"
     Write-Warn "安裝還在背景繼續進行，沒有中斷。"
     Write-Host "  要停止安裝嗎？輸入 y 再按 Enter 就停止；直接按 Enter 會繼續。" -ForegroundColor Yellow -NoNewline
-    $answer = [Console]::ReadLine()
+    $answer = Read-Answer
     if ($answer -match '^\s*[yY]') {
         if (-not $proc.HasExited) {
             if ($script:OnWindows) { & taskkill.exe /PID $proc.Id /T /F 2>&1 | Out-Null } else { try { $proc.Kill() } catch { } }
@@ -375,8 +412,8 @@ if (Stage-Done 1) {
 
     if (-not $wslFeatureEnabled) {
         Write-Info "正在啟用 WSL 功能..."
-        $null = Invoke-Watched -Label "啟用 WSL 功能" -Usually "通常需要 1–3 分鐘" -UpperMinutes 5 -File "dism.exe" -Arguments @("/online", "/enable-feature", "/featurename:Microsoft-Windows-Subsystem-Linux", "/all", "/norestart")
-        $null = Invoke-Watched -Label "啟用虛擬機器平台" -Usually "通常需要 1–3 分鐘" -UpperMinutes 5 -File "dism.exe" -Arguments @("/online", "/enable-feature", "/featurename:VirtualMachinePlatform", "/all", "/norestart")
+        $null = Invoke-Watched -Label "啟用 WSL 功能" -Usually "通常需要 1–3 分鐘" -UpperMinutes 5 -Encoding oem -File "dism.exe" -Arguments @("/online", "/enable-feature", "/featurename:Microsoft-Windows-Subsystem-Linux", "/all", "/norestart")
+        $null = Invoke-Watched -Label "啟用虛擬機器平台" -Usually "通常需要 1–3 分鐘" -UpperMinutes 5 -Encoding oem -File "dism.exe" -Arguments @("/online", "/enable-feature", "/featurename:VirtualMachinePlatform", "/all", "/norestart")
         Write-Ok "WSL 功能已啟用"
 
         Write-Warn "WSL 功能剛啟用，需要重新開機才能繼續"
@@ -391,11 +428,11 @@ if (Stage-Done 1) {
 
     # ── 1b: 更新 WSL 核心 ──
     Write-Info "更新 WSL 核心元件..."
-    $wslUpdateCode = Invoke-Watched -Label "更新 WSL 核心元件" -Usually "通常需要 1–5 分鐘" -UpperMinutes 8 -File "wsl.exe" -Arguments @("--update")
+    $wslUpdateCode = Invoke-Watched -Label "更新 WSL 核心元件" -Usually "通常需要 1–5 分鐘" -UpperMinutes 8 -Encoding (Get-WslOutputEncoding) -File "wsl.exe" -Arguments @("--update")
     if ($wslUpdateCode -ne 0) {
         # Microsoft Store 被擋（公司電腦常見）時，改從 GitHub 下載同一個更新。
         Write-Warn "從 Microsoft Store 更新失敗，改從 GitHub 下載..."
-        $wslUpdateCode = Invoke-Watched -Label "從 GitHub 更新 WSL" -Usually "通常需要 1–5 分鐘" -UpperMinutes 8 -File "wsl.exe" -Arguments @("--update", "--web-download")
+        $wslUpdateCode = Invoke-Watched -Label "從 GitHub 更新 WSL" -Usually "通常需要 1–5 分鐘" -UpperMinutes 8 -Encoding (Get-WslOutputEncoding) -File "wsl.exe" -Arguments @("--update", "--web-download")
     }
     if ($wslUpdateCode -ne 0) {
         Write-Warn "wsl --update 失敗，從 GitHub 下載最新版 WSL..."
@@ -406,7 +443,7 @@ if (Stage-Done 1) {
                 $wslMsi = "$env:TEMP\wsl-latest.msi"
                 Write-Info "  下載中: $($msiAsset.name) ($($release.tag_name))..."
                 Invoke-WebRequest -Uri $msiAsset.browser_download_url -OutFile $wslMsi -UseBasicParsing
-                $msiCode = Invoke-Watched -Label "安裝 WSL" -Usually "通常需要 1–2 分鐘" -UpperMinutes 5 -File "msiexec.exe" -Arguments @("/i", $wslMsi, "/quiet", "/norestart")
+                $msiCode = Invoke-Watched -Label "安裝 WSL" -Usually "通常需要 1–2 分鐘" -UpperMinutes 5 -Encoding oem -File "msiexec.exe" -Arguments @("/i", $wslMsi, "/quiet", "/norestart")
                 Remove-Item $wslMsi -Force -ErrorAction SilentlyContinue
                 if ($msiCode -eq 0) {
                     Write-Ok "WSL $($release.tag_name) 已從 GitHub 安裝"
@@ -529,7 +566,7 @@ if (Stage-Done 1) {
 
         # 安裝
         Write-Info "正在安裝 $UBUNTU_DISTRO，請不要關閉視窗..."
-        $null = Invoke-Watched -Label "下載並安裝 $UBUNTU_DISTRO" -Usually "通常需要 3–10 分鐘" -UpperMinutes 15 -File "wsl.exe" -Arguments @("--install", "-d", $UBUNTU_DISTRO, "--location", $wslPath, "--no-launch")
+        $null = Invoke-Watched -Label "下載並安裝 $UBUNTU_DISTRO" -Usually "通常需要 3–10 分鐘" -UpperMinutes 15 -Encoding (Get-WslOutputEncoding) -File "wsl.exe" -Arguments @("--install", "-d", $UBUNTU_DISTRO, "--location", $wslPath, "--no-launch")
 
         # 驗證
         Write-Info "正在驗證安裝結果..."

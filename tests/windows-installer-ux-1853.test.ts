@@ -32,18 +32,19 @@ describe("the installer's long steps and console guards (static)", () => {
     expect(code).not.toMatch(/^\s*wsl --install/m);
     expect(code).not.toMatch(/apt-get install[^\n]*Out-Null/);
   });
-  it("QuickEdit off and Ctrl+C read as a key only while a step runs, both put back in a finally", () => {
+  it("QuickEdit off and Ctrl+C read as a key only while a step runs, from one saved mode put back whole in a finally", () => {
     const fn = code.slice(code.indexOf("function Invoke-Watched"), code.indexOf("function Confirm-StopInstall"));
-    expect(fn).toMatch(/\[Console\]::TreatControlCAsInput = \$true/);
-    expect(fn).toMatch(/Set-QuickEdit \$true/);
+    expect(fn).toMatch(/if \(\$live\) \{ \$consoleSaved = Enter-StepConsole \}/);
     const fin = fn.slice(fn.lastIndexOf("} finally {"));
-    expect(fin).toMatch(/\[Console\]::TreatControlCAsInput = \$savedCtrlC/);
-    expect(fin).toMatch(/Set-QuickEdit \$false/);
+    expect(fin).toMatch(/Restore-StepConsole \$consoleSaved/);
     expect(fin).toMatch(/WSL_UTF8/);
-    const qe = code.slice(code.indexOf("function Set-QuickEdit"), code.indexOf("function Format-Elapsed"));
-    expect(qe).toMatch(/-bor 0x80/);                                         // ENABLE_EXTENDED_FLAGS, or the change is ignored
-    expect(qe).toMatch(/if \(\$new -band 0x40\) \{ \$new = \$new - 0x40 \}/);  // ENABLE_QUICK_EDIT_MODE cleared
-    expect(qe).toMatch(/\$script:ConsoleModeSaved -bor 0x80/);              // restored to what it was
+    expect(code).not.toMatch(/TreatControlCAsInput/);                       // it writes the same mode: never mixed in again
+    const enter = code.slice(code.indexOf("function Enter-StepConsole"), code.indexOf("function Restore-StepConsole"));
+    expect(enter).toMatch(/-bor 0x80/);                                       // ENABLE_EXTENDED_FLAGS, or the change is ignored
+  });
+  it("each step reads its output in the encoding it is known to use", () => {
+    expect(code.match(/-Encoding oem -File "dism\.exe"/g)).toHaveLength(2);
+    expect(code.match(/-Encoding \(Get-WslOutputEncoding\) -File "wsl\.exe"/g)).toHaveLength(3);
   });
   it("a plain notice at the start, and again at the login and quickstart steps", () => {
     for (const line of ["複製：用滑鼠選取文字，再按右鍵（或 Enter）。", "貼上：在視窗裡按一下右鍵。", "請不要按 Ctrl+C：在這個視窗裡，它不是「複製」，而是「停止」。",
@@ -82,22 +83,57 @@ Write-Output ("LINES=" + (($c.Lines -join '|') -replace "\\e", '<ESC>')); Write-
     expect(out).toContain("PROGRESS=half 7\n");
     expect(out).toContain("REST=half 3<CR>half 7\n");
   });
-  it("wsl.exe's UTF-16LE is read as such, even when it starts with Chinese; UTF-8 split across reads is joined", () => {
-    const { out } = withHelpers(`$f = Join-Path $env:TMPDIR 'u16.txt'
-[IO.File]::WriteAllBytes($f, [Text.Encoding]::Unicode.GetBytes('正'))
-$tail = New-OutputTail $f
-$first = Read-OutputTail $tail $false
-$s = [IO.File]::Open($f, 'Append', 'Write', 'ReadWrite'); $b = [Text.Encoding]::Unicode.GetBytes("在檢查更新。\`r\`n"); $s.Write($b, 0, $b.Length); $s.Close()
-$second = Read-OutputTail $tail $false
-Write-Output ("U16=[" + $first + "][" + ($second -replace "\`r\`n", '<CRLF>') + "]")
-$g = Join-Path $env:TMPDIR 'u8.txt'; $all = [Text.Encoding]::UTF8.GetBytes("中文輸出完成\`n")
-[IO.File]::WriteAllBytes($g, $all[0..3]); $t8 = New-OutputTail $g
-$a = Read-OutputTail $t8 $false
-$s = [IO.File]::Open($g, 'Append', 'Write', 'ReadWrite'); $s.Write($all, 4, $all.Length - 4); $s.Close()
-$b2 = Read-OutputTail $t8 $false
-Write-Output ("U8=[" + $a + "][" + ($b2 -replace "\`n", '<LF>') + "]")`);
-    expect(out).toContain("U16=[][正在檢查更新。<CRLF>]");                       // nothing decided before the newline: no mojibake
-    expect(out).toContain("U8=[][中文輸出完成<LF>]");
+  it("output read in its known encoding: UTF-16 that starts as valid ASCII or with a 0x0D byte, and UTF-8 split across reads, all exact", () => {
+    // #2228 review: '正'×40 in UTF-16LE is 80 bytes of "ck…", and 「不」 is 0D 4E — guessing from bytes got both wrong.
+    const { out } = withHelpers(`function Feed([string]$name, [string]$enc, [byte[]]$first, [byte[]]$rest) {
+  $f = Join-Path $env:TMPDIR "$name.txt"; [IO.File]::WriteAllBytes($f, $first)
+  $tail = New-OutputTail $f $enc
+  $a = Read-OutputTail $tail
+  $s = [IO.File]::Open($f, 'Append', 'Write', 'ReadWrite'); $s.Write($rest, 0, $rest.Length); $s.Close()
+  return ($a + (Read-OutputTail $tail))
+}
+$u16 = [Text.Encoding]::Unicode; $u8 = [Text.Encoding]::UTF8
+$want1 = ('正' * 40) + "\`r\`n"; $got1 = Feed 'c1' 'utf16' ($u16.GetBytes('正' * 40)) ($u16.GetBytes("\`r\`n"))
+$want2 = "不支援此更新。\`r\`n"; $all2 = $u16.GetBytes($want2); $got2 = Feed 'c2' 'utf16' $all2[0..1] $all2[2..($all2.Length - 1)]
+$want3 = "上一步\`r\`n"; $all3 = $u16.GetBytes($want3); $got3 = Feed 'c3' 'utf16' $all3[0..2] $all3[3..($all3.Length - 1)]
+$want4 = "中文輸出完成\`n"; $all4 = $u8.GetBytes($want4); $got4 = Feed 'c4' 'utf8' $all4[0..3] $all4[4..($all4.Length - 1)]
+Write-Output ("EXACT=" + ($got1 -ceq $want1) + "," + ($got2 -ceq $want2) + "," + ($got3 -ceq $want3) + "," + ($got4 -ceq $want4))`);
+    expect(out).toContain("EXACT=True,True,True,True");
+  });
+  it("wsl.exe's own encoding is asked of it once: a NUL in its --version output means UTF-16", () => {
+    const { out } = withHelpers(`$a = Get-WslOutputEncoding 'sh' @('-c', 'printf "W\\000S\\000L\\000\\r\\000\\n\\000"')
+$b = Get-WslOutputEncoding 'sh' @('-c', 'echo "WSL 版本: 2.6.1.0"; echo "WSL_UTF8=$WSL_UTF8"')
+$c = Get-WslOutputEncoding 'no-such-wsl-binary' @()
+Write-Output ("ENC=" + $a + "," + $b + "," + $c)`);
+    expect(out).toContain("ENC=utf16,utf8,utf8");
+  });
+  it("the console's input mode (a bit-accurate model): one snapshot, put back exactly — after a step, after Enter carries on, after y stops it", () => {
+    const model = (keys: string) => `$script:mode = [uint32]0xC7
+function Get-InputMode { return $script:mode }
+function Set-InputMode([uint32]$m) { $script:mode = $m; Add-Content (Join-Path $env:TMPDIR 'modes.txt') ('0x{0:X}' -f $m); return $true }
+function Test-LiveConsole { return $true }
+$script:keys = @(${keys})
+function Read-StepKey { if ($script:keys.Count -gt 0) { $k = $script:keys[0]; $script:keys = @($script:keys | Select-Object -Skip 1); return $k }; return $null }
+`;
+    const ctrlC = "[PSCustomObject]@{ KeyChar = [char]3; Key = 'C'; Modifiers = [ConsoleModifiers]::Control }";
+    const normal = withHelpers(model("") + `$code = Invoke-Watched -Label 'x' -Usually 'y' -File 'sh' -Arguments @('-c', 'sleep 0.6; exit 0')
+Write-Output ("CODE=$code MODE=" + ('0x{0:X}' -f $script:mode))`);
+    expect(normal.out).toContain("CODE=0 MODE=0xC7");
+    expect(readFileSync(join(normal.dir, "modes.txt"), "utf8")).toBe("0x86\n0xC7\n");   // QuickEdit and processed input off, then back
+    const carryOn = withHelpers(model(ctrlC) + `$code = Invoke-Watched -Label 'x' -Usually 'y' -File 'sh' -Arguments @('-c', 'sleep 1.2; echo finished')
+Write-Output ("CODE=$code MODE=" + ('0x{0:X}' -f $script:mode))`, "\n");
+    expect(carryOn.out).toContain("要停止安裝嗎？");
+    expect(carryOn.out).toContain("    finished");
+    expect(carryOn.out).toContain("CODE=0 MODE=0xC7");
+    const stop = withHelpers(model(ctrlC) + `$null = Invoke-Watched -Label 'x' -Usually 'y' -File 'sh' -Arguments @('-c', 'sleep 20')
+Write-Output 'NOT-REACHED'`, "y\n");
+    expect(stop.out).toContain("已停止安裝。");
+    expect(stop.out).not.toContain("NOT-REACHED");
+    expect(readFileSync(join(stop.dir, "modes.txt"), "utf8").trim().split("\n").at(-1)).toBe("0xC7");
+    const off = withHelpers(model("") + `$script:mode = [uint32]0x87
+$null = Invoke-Watched -Label 'x' -Usually 'y' -File 'sh' -Arguments @('-c', 'exit 0')
+Write-Output ("MODE=" + ('0x{0:X}' -f $script:mode))`);
+    expect(off.out).toContain("MODE=0x87");                                      // QuickEdit was off: it stays off
   });
   it("a long step: its output as it comes, a heartbeat with the time and how long it usually takes, its exit code; nothing left behind", () => {
     const { out, dir } = withHelpers(`Remove-Item Env:WSL_UTF8 -ErrorAction SilentlyContinue
