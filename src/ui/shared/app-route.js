@@ -50,6 +50,24 @@ export function viewPath(instance) { return instance ? `/view/${encodeURICompone
 export function detailsPath(instance) { return `/ui/fleet/agent/${encodeURIComponent(instance)}`; }
 export function logPath(instance) { return `/ui/log/${encodeURIComponent(instance)}`; }
 export function fleetPath(tab) { return tab && tab !== "tasks" ? `/ui/fleet/${tab}` : "/ui/fleet"; }
+/** #2183: this device's last Fleet tab (Fleet remembers it; the Org chart the first time). */
+export const LAST_FLEET_TAB_KEY = "agend_last_fleet_tab";
+export function lastFleetTab() {
+  let tab = null;
+  try { tab = localStorage.getItem(LAST_FLEET_TAB_KEY); } catch { /* storage blocked: the default */ }
+  return FLEET_TABS.includes(tab) ? tab : "org";
+}
+/**
+ * #2183: where Fleet (the sidebar's entry, the phone's tab) goes — on a Fleet tab, that tab (the route, not storage: the
+ * panel stores it in an effect after this render, and a storage write re-renders nothing); anywhere else, the last one.
+ */
+export function fleetEntryPath(route) {
+  return fleetPath(route && route.panel === "fleet" ? route.tab : lastFleetTab());   // parseRoute names only FLEET_TABS
+}
+export function rememberFleetTab(tab) {
+  if (!FLEET_TABS.includes(tab)) return;
+  try { localStorage.setItem(LAST_FLEET_TAB_KEY, tab); } catch { /* this page only */ }
+}
 export const NEEDS_PATH = "/ui/needs";
 export function settingsPath(section) { return section && section !== "agents" ? `/settings/${section}` : "/settings"; }
 export function routePath(route) {
