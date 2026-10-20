@@ -26,7 +26,14 @@ function fixture(version) {
   return path.join(base, JSON.parse(packed.text)[0].filename);
 }
 const old = fixture('2.2.5'), target = fixture('2.3.0-beta.17');
+const require = createRequire(import.meta.url);
+const recovery = require('../../launcher/install-recovery.cjs');
 assert(run(['install', '-g', old]).code === 0, 'base install');
+const idleProbe = path.join(base, 'idle.cjs');
+fs.writeFileSync(idleProbe, `const r=require(${JSON.stringify(require.resolve('../../launcher/install-recovery.cjs'))});if(!r.npmIdle())throw Error('own npm exec blocked cleanup');console.log('own-exec-idle-ok');`);
+const throughExec = run(['exec', '--yes', '--package', target, '--', 'node', idleProbe]);
+assert(throughExec.code === 0 && throughExec.text.includes('own-exec-idle-ok'), JSON.stringify(throughExec));
+
 const probe = run(['install', '-g', '--foreground-scripts', target], { PROBE_FAIL: '1' });
 fs.writeFileSync(path.join(base, 'lifecycle-failure.log'), probe.text);
 const retired = /RETIRED=(\.agend-[A-Za-z0-9_-]+)/.exec(probe.text)?.[1];
@@ -41,8 +48,6 @@ const bin = path.join(prefix, 'bin/agend');
 const before = spawnSync(bin, ['--version'], { env, encoding: 'utf8', timeout: 5_000 });
 // The report's already-broken command chain is a distinct injected precondition.
 fs.unlinkSync(bin); fs.writeFileSync(path.join(prefix, '.agend-install.lock'), '{partial');
-const require = createRequire(import.meta.url);
-const recovery = require('../../launcher/install-recovery.cjs');
 assert(recovery.npmIdle(), 'Another npm is active; rerun after it exits');
 const moved = recovery.heal(prefix);
 assert(moved.length === 2, `Expected stale sibling + corrupt lock, got ${JSON.stringify(moved)}`);
@@ -50,6 +55,6 @@ const repaired = run(['install', '-g', target]); fs.writeFileSync(path.join(base
 assert(repaired.code === 0, repaired.text);
 const after = spawnSync(bin, ['--version'], { env, encoding: 'utf8', timeout: 5_000 });
 assert(after.status === 0 && after.stdout.trim() === '2.3.0-beta.17', 'repaired command must run');
-const evidence = { node: process.version, platform: process.platform, uid: process.getuid?.(), npm: run(['--version']).text.trim(), collision: true, collisionAloneKeptOldCommand: before.status === 0 && before.stdout.trim() === '2.2.5', injectedMissingBinThenRepaired: true, quarantinedArtifacts: moved.length, finalVersion: after.stdout.trim(), scratchPrefixOnly: true, realFleetOperations: 0 };
+const evidence = { node: process.version, platform: process.platform, uid: process.getuid?.(), npm: run(['--version']).text.trim(), ownNpmExecPermitsCleanup: true, collision: true, collisionAloneKeptOldCommand: before.status === 0 && before.stdout.trim() === '2.2.5', injectedMissingBinThenRepaired: true, quarantinedArtifacts: moved.length, finalVersion: after.stdout.trim(), scratchPrefixOnly: true, realFleetOperations: 0 };
 fs.writeFileSync(path.join(base, 'evidence.json'), JSON.stringify(evidence, null, 2));
 console.log(JSON.stringify(evidence));
