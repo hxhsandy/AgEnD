@@ -6,10 +6,35 @@ var path = require("path");
 var cp = require("child_process");
 var crypto = require("crypto");
 var MIN_AGE = 15 * 60 * 1000;
+// npm exec waits while its target installer runs; it is not a concurrent
+// prefix reify. Only that installer's own exec ancestors may be ignored.
+function npmIdleFromProcessList(output, ownPid) {
+  var rows = String(output).trim().split("\n").map(function (line) {
+    var m = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line);
+    return m ? { pid: Number(m[1]), parent: Number(m[2]), args: m[3] } : null;
+  });
+  if (!rows.length || rows.some(function (row) { return !row; })) return false;
+  var ancestors = {};
+  var pid = ownPid;
+  while (pid > 1 && !ancestors[pid]) {
+    ancestors[pid] = true;
+    var row = rows.find(function (r) { return r.pid === pid; });
+    if (!row) return false;
+    pid = row.parent;
+  }
+  return !rows.some(function (row) {
+    var npm = /^(?:\S*\/)?(?:npm|npx)(?:\s|$)/.test(row.args)
+      || /^\S*node\s+\S*(?:npm|npx)-cli\.js(?:\s|$)/.test(row.args);
+    if (!npm) return false;
+    var exec = /^(?:\S*\/)?npm\s+exec(?:\s|$)/.test(row.args)
+      || /^\S*node\s+\S*npm-cli\.js\s+exec(?:\s|$)/.test(row.args);
+    return !(ancestors[row.pid] && exec);
+  });
+}
 function npmIdle() {
   try {
-    var r = cp.spawnSync("ps", ["-A", "-o", "comm="], { encoding: "utf8", timeout: 5000 });
-    return r.status === 0 && !String(r.stdout).split("\n").some(function (s) { return /(?:^|\/)npm(?:\s|$)/.test(s.trim()); });
+    var r = cp.spawnSync("ps", ["-A", "-o", "pid=,ppid=,args="], { encoding: "utf8", timeout: 5000 });
+    return r.status === 0 && npmIdleFromProcessList(r.stdout, process.pid);
   } catch (e) { return false; }
 }
 function legacyBinConflict(prefix) {
@@ -81,7 +106,7 @@ function heal(prefix, options) {
   });
   return moved;
 }
-module.exports = { heal: heal, npmIdle: npmIdle, legacyBinConflict: legacyBinConflict, MIN_AGE: MIN_AGE };
+module.exports = { heal: heal, npmIdle: npmIdle, npmIdleFromProcessList: npmIdleFromProcessList, legacyBinConflict: legacyBinConflict, MIN_AGE: MIN_AGE };
 if (require.main === module) {
   if (!process.argv[2] || !path.isAbsolute(process.argv[2])) process.exit(2);
   if (process.argv[3] === "--legacy-bin-conflict") process.exit(legacyBinConflict(process.argv[2]) ? 0 : 1);

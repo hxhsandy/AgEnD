@@ -13,7 +13,7 @@ import { readFileSync, rmSync } from "node:fs";
 import { shellQuote } from "./backend/types.js";
 import { restorePackagePreimage, takePackagePreimage, type PackagePreimage } from "./package-preimage.js";
 import { createRequire } from "node:module";
-const recovery = createRequire(import.meta.url)("../launcher/install-recovery.cjs") as { heal(prefix: string, options?: { noNpmRunning: boolean }): string[]; legacyBinConflict(prefix: string): boolean };
+const recovery = createRequire(import.meta.url)("../launcher/install-recovery.cjs") as { heal(prefix: string, options?: { noNpmRunning: boolean }): string[]; legacyBinConflict(prefix: string): boolean; npmIdleFromProcessList(output: string, ownPid: number): boolean };
 export const UPDATE_INSTALL_TIMEOUT_MS = 10 * 60_000;
 
 export interface CommandResult {
@@ -223,8 +223,8 @@ export function verifyInstalledPackage(plan: UpdateInstallPlan, runner: CommandR
 
 export function runUpdateInstall(plan: UpdateInstallPlan, runner: CommandRunner): UpdateInstallOutcome {
   const heal = (prefix: string): string[] => {
-    const scan = runner.run("ps", ["-A", "-o", "comm="], { timeoutMs: 5_000 });
-    return recovery.heal(prefix, { noNpmRunning: scan.status === 0 && !scan.stdout.split("\n").some(line => /(?:^|\/)npm(?:\s|$)/.test(line.trim())) });
+    const scan = runner.run("ps", ["-A", "-o", "pid=,ppid=,args="], { timeoutMs: 5_000 });
+    return recovery.heal(prefix, { noNpmRunning: scan.status === 0 && recovery.npmIdleFromProcessList(scan.stdout, process.pid) });
   };
   // A real local link is only reported: the install below replaces it in place, and a failed install leaves it.
   const root = runner.run("npm", ["root", "-g"], { timeoutMs: 15_000 });

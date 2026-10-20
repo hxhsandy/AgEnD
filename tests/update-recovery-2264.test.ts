@@ -9,7 +9,7 @@ import { acquireInstallLock, type InstallLockDeps } from "../src/install-lock.js
 import { targetInstallerCommand } from "../src/target-installer.js";
 
 const require = createRequire(import.meta.url);
-const recovery = require("../launcher/install-recovery.cjs") as { heal(prefix: string, options: { noNpmRunning: boolean; now?: number; uid?: number }): string[] };
+const recovery = require("../launcher/install-recovery.cjs") as { npmIdleFromProcessList(output: string, ownPid: number): boolean; heal(prefix: string, options: { noNpmRunning: boolean; now?: number; uid?: number }): string[] };
 const admission = require("../launcher/install-admission.cjs") as { admit(pkg: string, deps: Record<string, unknown>): { ok: boolean; warning?: string } };
 const note = require("../launcher/old-updater-note.cjs") as { oldUpdaterNote(state: string, env: Record<string, string>): string };
 const roots: string[] = [];
@@ -34,6 +34,17 @@ describe("#2264 known leftovers preserve the command chain", () => {
     expect(targetInstallerCommand("2.3.0-beta.17", "2.2.5")).toEqual({ command: "npm", args: ["exec", "--yes", "--package", "@songsid/agend@2.3.0-beta.17", "--", "agend-install", "--upgrade", "--version", "2.3.0-beta.17", "--from-version", "2.2.5", "--yes"] });
     expect(() => targetInstallerCommand("beta", "2.2.5")).toThrow();
     expect(() => targetInstallerCommand("2.3.0", "2.2.5; command")).toThrow();
+  });
+  it("permits its own waiting npm exec but never another npm transaction", () => {
+    const chain = "1 0 /sbin/init\n10 1 npm exec agend-install --upgrade\n20 10 node agend-install.cjs\n30 20 ps -A";
+    expect(recovery.npmIdleFromProcessList(chain, 20)).toBe(true);
+    expect(recovery.npmIdleFromProcessList(chain + "\n40 1 npm install -g @songsid/agend", 20)).toBe(false);
+    expect(recovery.npmIdleFromProcessList(chain.replace("npm exec", "npm install"), 20)).toBe(false);
+    expect(recovery.npmIdleFromProcessList(chain + "\n40 1 npm exec agend-install", 20)).toBe(false);
+    expect(recovery.npmIdleFromProcessList(chain.replace("npm exec", "/usr/bin/node /usr/lib/node_modules/npm/bin/npm-cli.js exec"), 20)).toBe(true);
+    expect(recovery.npmIdleFromProcessList(chain + "\n40 1 /usr/bin/node /usr/lib/node_modules/npm/bin/npm-cli.js install -g package", 20)).toBe(false);
+    expect(recovery.npmIdleFromProcessList("unreadable", 20)).toBe(false);
+    expect(recovery.npmIdleFromProcessList("1 0 /sbin/init", 20)).toBe(false);
   });
   it("the reported stale sibling plus corrupt lock self-heals without manual rm", () => {
     const w = world(), old = leftover(w.prefix);
