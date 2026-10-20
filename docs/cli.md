@@ -494,3 +494,23 @@ One shared redactor covers credential formats/fields/headers/cookies and persona
 Both files are new, mode 0600; existing files/symlinks are not overwritten. The JSON review snapshot binds the exact title, issue body, full Markdown and delivery mode. An edit requires fresh approval. Links are capped at 7,500 encoded characters. Larger reports keep their complete redacted Markdown locally; the approved link body explicitly asks you to add that file manually rather than silently dropping evidence. Review the file you actually attach.
 
 Optional existing host GitHub CLI login: choose `--submit` during collection, review that delivery mode and exact text, then repeat `--submit` with `--draft`/`--approve`. Authentication is checked only after approval. AgEnD never logs in or stores a token. Overflow needs manual attachment and uses link mode. If creation times out or has an uncertain result, check GitHub before trying again.
+
+### Repair an interrupted installation
+
+If `agend` is missing or will not start after an update, run the official installer again as the same Linux/macOS user that owns the fleet:
+
+```sh
+curl -fsSL https://songsid.github.io/AgEnD/install.sh | bash
+```
+
+On Windows, rerun the original PowerShell installer:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://songsid.github.io/AgEnD/install.ps1 | iex"
+```
+
+The installer recognizes existing fleet data, repairs known abandoned npm artifacts and verifies the command. It preserves `AGEND_HOME`, configuration and transcripts, and skips setup for an existing fleet. Root installs with systemd enable linger and prepare `/run/user/0`; an unavailable manager prints the exact command to repair it. Do not remove your `.agend` directory. Set `AGEND_INSTALL_VERSION=beta` before the shell installer to select beta explicitly.
+
+New releases expose `agend-install`: install, repair and upgrade run the selected version's installer through npm, pinned to an exact release. `agend update` is the handoff; it does not implement a second download/install flow. Published older releases without that entry point retain an explicit compatibility route. An old updater that fails before executing any new package code cannot be repaired by that package's hook; the official one-liner bypasses the old updater.
+
+For WSL acceptance after installing a beta: run from a root shell without exporting XDG, confirm `agend --version`, `agend status` and `agend start`, then update and confirm the Telegram progress ends. Open a new shell and verify `command -v agend`; confirm existing instances/configuration remain. A Linux root-container rehearsal covers the layout and systemd path, not the Windows/WSL kernel.

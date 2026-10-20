@@ -339,3 +339,23 @@ agend bug-report --draft report.json --approve <SHA256>
 兩個新檔的權限皆為 0600，不覆寫既有檔案或符號連結。JSON 審閱快照綁定確切標題、內文、完整 Markdown 與提交方式；修改後須重新核准。預填網址上限為編碼後 7,500 字元；超出時完整回報仍保存在本機，核准的預填內文會請你手動附檔，不會暗中刪除證據。請核對實際附上的檔案。
 
 若你要求使用主機既有的 GitHub CLI 登入，可在收集時加 `--submit`，審閱該提交方式及文字，核准時也加 `--submit`。只有核准後才檢查登入，不會代為登入或儲存 token。超出連結容量的回報須改用連結方式手動附檔。提交逾時或結果不明時，先查 GitHub 再決定是否重試。
+
+### 修復中斷的安裝
+
+更新後若找不到 `agend`，或指令無法啟動，請用原本執行 fleet 的 Linux/macOS 使用者重新執行官方安裝指令：
+
+```sh
+curl -fsSL https://songsid.github.io/AgEnD/install.sh | bash
+```
+
+Windows 則重新執行原本的 PowerShell 安裝指令：
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://songsid.github.io/AgEnD/install.ps1 | iex"
+```
+
+安裝程式會辨識既有資料，修復已知的 npm 中斷殘留，再驗證指令。`AGEND_HOME`、設定與對話記錄會保留；已存在的 fleet 不會重新跑設定精靈。使用 systemd 的 root 安裝會啟用 linger 並準備 `/run/user/0`；使用者服務管理員無法連線時，會列出具體修復指令。請勿刪除 `.agend` 目錄。若要指定 beta，請先設定 `AGEND_INSTALL_VERSION=beta`。
+
+新版本提供 `agend-install`；安裝、修復、更新都透過 npm 執行所選版本自己的安裝程式，並固定到確切版本。`agend update` 只負責轉交，不再維護另一套下載安裝流程。已發布、沒有此入口的舊版使用明確的相容路徑。若舊更新程式在任何新版程式碼執行前就失敗，新版安裝 hook 無法攔截；重新執行官方一行指令可繞過舊更新程式。
+
+WSL 的 beta 驗收：在沒有手動匯出 XDG 的 root shell 執行 `agend --version`、`agend status`、`agend start`；更新後確認 Telegram 進度有最終結果。再開新 shell 驗證 `command -v agend`，並確認原本的實例與設定仍在。Linux root 容器可驗證安裝配置與 systemd 路徑，不代表已驗證 Windows/WSL 核心。

@@ -57,6 +57,10 @@ echo "npm $*" >> '${log}'
 case "$*" in
   "view @songsid/agend@beta version") echo '${tags.beta}';;
   "view @songsid/agend@latest version") echo '${tags.latest}';;
+  view*bin.agend-install*) echo '"./launcher/agend-install"';;
+  exec*) while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done
+    shift; [ "$1" = agend-install ] || exit 2; shift
+    exec '${process.execPath}' '${join(pkg, "dist", "cli.js")}' _install-release "$@";;
   view*) echo "$2" | sed 's/.*@//';;
   "config get prefix") echo '${home}';;
   "root -g") echo '${join(home, "lib", "node_modules")}';;
@@ -170,9 +174,10 @@ describe("agend update stays on the installed channel (built CLI, stubbed npm)",
     expect(calls.some(c => /install -g @songsid\/agend@(beta|latest)$/.test(c)), out).toBe(false);
   });
 
-  it("a registry answer that is not a version installs from the tag, as when the lookup fails", () => {
+  it("a non-version registry answer refuses before running an unpinned installer", () => {
     const { installs, out } = update("2.1.11-beta.2", { beta: "not-a-version", latest: "2.1.10" }, []);
-    expect(installs, out).toEqual(["npm install -g @songsid/agend@beta"]);
+    expect(installs, out).toEqual([]);
+    expect(out).toContain("Could not resolve an exact target version");
   });
 
   it("`update --version` reaches the update command, and `agend --version` still prints the version (#1182 review)", () => {

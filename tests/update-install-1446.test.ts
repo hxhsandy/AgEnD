@@ -105,6 +105,13 @@ case "$1 $2" in
   "prefix -g") echo ${sq(pfx)}; exit 0;;
   "install -g")
     [ -n "$NPM_FAIL" ] && exit 1
+    if [ -n "$NPM_BREAK" ]; then
+      rm -rf ${sq(join(pfx, "lib", "node_modules", "@songsid", "agend"))}
+      rm -f ${sq(join(pfx, "bin", "agend"))}
+      [ "$NPM_BREAK" = signal ] && kill -KILL $$
+      echo "npm error code $NPM_BREAK" >&2
+      exit 1
+    fi
     rm -rf ${sq(join(pfx, "lib", "node_modules", "@songsid", "agend"))}
     cp -r "$3" ${sq(join(pfx, "lib", "node_modules", "@songsid", "agend"))}
     ln -sf "../lib/node_modules/@songsid/agend/$(cat "$3/.bin-target")" ${sq(join(pfx, "bin", "agend"))}
@@ -169,6 +176,18 @@ describe("#1450 C6: a package that does not verify is replaced by the previous o
     expect(outcome.ok && outcome.rollback?.preimage?.version).toBe("2.1.12");
     expect(existsSync(join(outcome.ok && outcome.rollback?.preimage ? outcome.rollback.preimage.dir : "/nonexistent", "agend", "package.json"))).toBe(true);
     expect(installedVersion(w)).toBe("2.2.0");
+  });
+
+  it.each(["ENOSPC", "EAI_AGAIN", "signal"])("#2264: npm destroys the tree then fails (%s): restore and prove the previous 2.2 install", mode => {
+    const w = world();
+    runUpdateInstall(plan(fixturePackage(w.root, "base", "2.2.5"), "2.2.5"), w.runner);
+    const target = fixturePackage(w.root, "new", "2.3.0-beta.17");
+    w.env.NPM_BREAK = mode;
+    const result = runUpdateInstall(withRollback(target, "2.3.0-beta.17"), w.runner);
+    expect(result).toMatchObject({ ok: false, stage: "install", message: expect.stringContaining("rolled back to v2.2.5, which verifies") });
+    expect(installedVersion(w)).toBe("2.2.5");
+    expect(w.runner.run(join(w.prefix, "bin", "agend"), ["--version"]).stdout.trim()).toBe("2.2.5");
+    expect(w.callLog().some(line => /(?:uninstall|unlink)/.test(line))).toBe(false);
   });
 
   it("nothing installed yet: no preimage, and a failed verify has nothing to roll back to", () => {
@@ -287,7 +306,7 @@ describe("P0: the current install is never removed before the new one has succee
     const before = w.callLog().length;
     w.env.NPM_FAIL = "1";
     expect(runUpdateInstall(plan(fixturePackage(w.root, "v220", "2.2.0")), w.runner)).toMatchObject({ ok: false, stage: "install" });
-    expect(w.callLog().slice(before)).toEqual(["npm root -g", `npm install -g ${join(w.root, "src", "v220")}`]);
+    expect(w.callLog().slice(before)).toEqual(["npm root -g", "npm prefix -g", `npm install -g ${join(w.root, "src", "v220")}`]);
     expect(execFileSync(join(w.prefix, "bin", "agend"), ["--version"], { encoding: "utf8" }).trim()).toBe("2.1.12");
   });
 
@@ -387,8 +406,9 @@ describe("item 1: an nvm install runs every step inside nvm's Node 22 — nvm.sh
     return { w, nvmSh: join(nvmDir, "nvm.sh"), nvmPrefix };
   }
 
-  it("installs and verifies with nvm's node; the old system copy is NOT removed until the activation settles", () => {
+  it("installs and verifies with nvm's node; the positively identified 2.1 system copy waits for activation", () => {
     const { w, nvmSh, nvmPrefix } = nvmWorld();
+    runUpdateInstall(plan(fixturePackage(w.root, "old2112", "2.1.12"), "2.1.12"), w.runner);
     const outcome = runUpdateInstall({ pkg: fixturePackage(w.root, "v220", "2.2.0"), targetVersion: "2.2.0", viaNvm: true, nvmSh }, w.runner);
     expect(outcome).toMatchObject({ ok: true, agendPath: join(nvmPrefix, "bin", "agend"), version: "2.2.0", retireSystemCopy: true });
     const calls = w.callLog();
@@ -396,19 +416,30 @@ describe("item 1: an nvm install runs every step inside nvm's Node 22 — nvm.sh
     // #1473 review: the old system copy is what the current service still runs — an activation that fails later
     // must find it in place. The caller retires it once the fleet runs the new install.
     expect(calls.some(line => /uninstall/.test(line))).toBe(false);
-    retireSystemCopy(w.runner, join(w.tools, "npm"));
+    retireSystemCopy(w.runner, join(w.tools, "npm"), undefined, w.prefix);
     const retireCall = w.callLog().at(-1) ?? "";
     // sudo must use the absolute npm path (resolved by "command -v npm"), not bare "npm"
-    expect(retireCall).toMatch(/^sudo -n \/.*npm uninstall -g @songsid\/agend$/);
+    expect(retireCall).toMatch(/^sudo -n \/.*npm uninstall -g --prefix \/.* @songsid\/agend$/);
     expect(retireCall).not.toContain("sudo -n npm "); // no bare npm in sudo argv
     expect(existsSync(join(w.root, "pwned")), "the path was data, not shell").toBe(false);
+  });
+
+  it("#2264: a 2.2+ nvm transition never asks to retire the old system prefix", () => {
+    const { w, nvmSh } = nvmWorld();
+    runUpdateInstall(plan(fixturePackage(w.root, "old225", "2.2.5"), "2.2.5"), w.runner);
+    const result = runUpdateInstall({ pkg: fixturePackage(w.root, "new23", "2.3.0-beta.17"), targetVersion: "2.3.0-beta.17", viaNvm: true, nvmSh }, w.runner);
+    expect(result.ok).toBe(true);
+    expect(result).not.toHaveProperty("retireSystemCopy");
+    expect(result).not.toHaveProperty("retirePrefix");
+    expect(w.runner.run(join(w.prefix, "bin", "agend"), ["--version"]).stdout.trim()).toBe("2.2.5");
+    expect(w.callLog().some(line => /uninstall|unlink/.test(line))).toBe(false);
   });
 
   it("retireSystemCopy passes absolute npm path matching runner PATH resolution (#1490 P3)", () => {
     // Reverse mutation: passing bare "npm" instead of the resolved absolute path
     // makes this test fail because the resolved npm path starts with "/".
     const w = world();
-    retireSystemCopy(w.runner, join(w.tools, "npm"));
+    retireSystemCopy(w.runner, join(w.tools, "npm"), undefined, w.prefix);
     const sudoCall = w.callLog().find(line => line.startsWith("sudo ")) ?? "";
     const parts = sudoCall.split(" ");
     const nIdx = parts.indexOf("-n");
@@ -431,7 +462,7 @@ describe("item 1: an nvm install runs every step inside nvm's Node 22 — nvm.sh
     const nvmNpmPath = join(nvmBin, "npm");
     const systemNpmPath = join(w.tools, "npm");
     // retirement must use nvmNpmPath (the install npm), not systemNpmPath
-    retireSystemCopy(w.runner, nvmNpmPath);
+    retireSystemCopy(w.runner, nvmNpmPath, undefined, w.prefix);
     const sudoCall = w.callLog().find(line => line.startsWith("sudo ")) ?? "";
     const parts = sudoCall.split(" ");
     const nIdx = parts.indexOf("-n");

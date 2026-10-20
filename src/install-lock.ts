@@ -1,19 +1,10 @@
-/**
- * #1450 C1: one owner per npm global prefix. npm has no mutex between installs into one prefix (the #1455 gate
- * characterises what a collision does), so `agend update` takes `<realpath(prefix)>/.agend-install.lock` BEFORE npm
- * runs and holds it until the transition settles. Its own npm child is admitted by a single-use token
- * (AGEND_INSTALL_TOKEN), which the package's postinstall checks against this file (launcher/postinstall.cjs). Keyed to
- * the prefix — what npm changes — so two fleets with different AGEND_HOMEs on one prefix exclude each other, and two
- * prefixes (two nvm Nodes, a user prefix and /usr/local) never do.
- *
- * Ownership is evidence: a lock is replaced only when its holder is PROVEN gone — no such pid, or the pid is now a
- * process with another start time — and an unreadable file or an unreadable holder never counts as stale: it blocks,
- * naming itself. Replacing a stale lock is itself owned: only the holder of `<lock>.reclaim` (claimed with wx) may move
- * the lock file, so no updater can ever move a lock another one just claimed (#1472 review). Release removes a file only
- * while it is still exactly ours.
- */
+/** #2264: serialize two AgEnD updaters sharing a prefix. This mutex never
+ * admits/refuses manual npm installs and never touches package/bin paths.
+ * Publish complete records atomically; reclaim corrupt/dead owners with the
+ * existing ownership fence. A live competitor is named, not removed. */
 import { linkSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { atomicWriteFileSync } from "./atomic-write.js";
 
 export const INSTALL_LOCK_FILE = ".agend-install.lock";
 export const INSTALL_TOKEN_ENV = "AGEND_INSTALL_TOKEN";
@@ -123,8 +114,15 @@ export function acquireInstallLock(prefix: string, target: { spec: string; agend
   };
   const serialized = JSON.stringify(record) + "\n";
   const claim = (): boolean => {
-    try { writeFileSync(path, serialized, { flag: "wx", mode: 0o600 }); return true; }
-    catch (err) { if ((err as NodeJS.ErrnoException).code === "EEXIST") return false; throw err; }
+    const prepared = `${path}.claim-${deps.pid}-${record.token}`;
+    try {
+      // Complete and fsync the record before publishing it exclusively. A
+      // killed writer cannot leave a half-written lock blocking recovery.
+      atomicWriteFileSync(prepared, serialized, { mode: 0o600 });
+      linkSync(prepared, path);
+      return true;
+    } catch (err) { if ((err as NodeJS.ErrnoException).code === "EEXIST") return false; throw err; }
+    finally { try { unlinkSync(prepared); } catch { /* not published */ } }
   };
   const ours: InstallLock = { ok: true, path, token: record.token, release: () => releaseIfOurs(path, serialized, deps) };
 
@@ -134,15 +132,15 @@ export function acquireInstallLock(prefix: string, target: { spec: string; agend
     return { ok: false, path, reason: `the install lock ${path} could not be created (${(err as Error).message})` };
   }
   const seen = readOrNull(path);
-  if (seen === null) return { ok: false, path, reason: `another install is starting on ${canonical} (its lock ${path} appeared and went); retry` };
-  const holder = parseInstallLock(seen);
-  if (!holder) return { ok: false, path, reason: `the install lock ${path} cannot be read as a lock; if no other \`agend update\` is running, remove it and retry` };
-  const state = holderState(holder, deps);
+  const holder = parseInstallLock(seen ?? "");
+  // #2264 user policy: this is only an updater-vs-updater guard, never
+  // admission for manual npm repair. Corrupt records are reclaimable.
+  const state = holder ? holderState(holder, deps) : "stale";
   if (state === "live") {
-    return { ok: false, path, reason: `another AgEnD install is running on ${canonical} (pid ${holder.pid}, installing ${holder.targetSpec} for ${holder.agendHome}); wait for it to finish` };
+    return { ok: false, path, reason: `another AgEnD install is running on ${canonical} (pid ${holder!.pid}, installing ${holder!.targetSpec} for ${holder!.agendHome}); wait for it to finish` };
   }
   if (state === "unknown") {
-    return { ok: false, path, reason: `whether the install that holds ${path} (pid ${holder.pid}) is still running cannot be told; retry, or remove the lock once no \`agend update\` runs` };
+    return { ok: false, path, reason: `whether the install that holds ${path} (pid ${holder!.pid}) is still running cannot be told; retry, or remove the lock once no \`agend update\` runs` };
   }
 
   // Stale. Moving the lock file is owned too: only the holder of the reclaim marker may do it. Without that, an updater
@@ -171,8 +169,10 @@ export function acquireInstallLock(prefix: string, target: { spec: string; agend
       try { linkSync(aside, path); unlinkSync(aside); } catch { deps.log(`  ⚠ An install lock changed while it was being replaced; left at ${aside}.`); }
       return { ok: false, path, reason: `another install is starting on ${canonical}; retry` };
     }
-    try { unlinkSync(aside); } catch { /* best effort */ }
-    deps.log(`  Replaced a stale install lock (pid ${holder.pid} is gone, was installing ${holder.targetSpec}).`);
+    // Preserve corrupt records for diagnosis; never require a manual rm.
+    if (holder) { try { unlinkSync(aside); } catch { /* best effort */ } }
+    deps.log(holder ? `  Replaced a stale install lock (pid ${holder.pid} is gone, was installing ${holder.targetSpec}).`
+      : `  Replaced an unreadable or corrupt update lock; preserved it at ${aside}.`);
     try {
       if (claim()) return ours;
     } catch (err) {

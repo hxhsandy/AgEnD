@@ -55,7 +55,7 @@ async function completion(fm:any, adapter:any, pending:any, resume=true){
  const progress=new RestartProgress(2,pending.startedAt,fm.logger,{mode:"update"});
  if(resume)await progress.resume({adapter,chatId:"c"},pending.progress.target.messageId);
  const context=createContext({fm,fleet:fm.fleetConfig,topicMode:true,pendingUpdateProgress:pending,pendingProgressOperation:"update",
- startupProgress:progress,progressStart:Promise.resolve(true),updateMarkerIdentity,updateReceiptOf,formatRestartProgressCompletion,t:()=>"fleet ready",Date,
+ startupProgress:progress,progressStart:Promise.resolve(true),observedBootUpdateMarker:updateMarkerIdentity(fm.dataDir),savedUpdateProgress:pending,updateMarkerIdentity,updateReceiptOf,formatRestartProgressCompletion,t:()=>"fleet ready",Date,
  load:async(name:string)=>{if(name!=="node:module")throw Error("unexpected inert import");return {createRequire:()=>()=>({version:"2.2.1"})};}});
  const js=ts.transpileModule(`(async function(){ ${script} }).call(fm)`,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText
  .replaceAll("import.meta.url","'file:///inert/compiled.js'").replaceAll("import(","load(").replaceAll("export {};","");
@@ -122,10 +122,10 @@ describe("#1737: the real completion and startup clear — renders a landed outc
 describe("#1737: the old copy's folder is never named with a control or format character",()=>{
  const runner={run:()=>({status:1,signal:null,stdout:"",stderr:""}),log:()=>{}};
  it.each(["\u0085","\u009b","\u202e","\u2028","\u00a0"])("%j → not named",control=>{
-  expect(retireSystemCopy(runner,"/inert/npm",`/opt/a${control}/node_modules/@songsid/agend`)).toMatchObject({ok:true,warning:"Old system install was not removed (sudo refused); remove it by hand."});
+  expect(retireSystemCopy(runner,"/inert/npm",`/opt/a${control}/node_modules/@songsid/agend`,"/usr/local")).toMatchObject({ok:true,warning:"Old system install was not removed (sudo refused); remove it by hand."});
  });
  it("a plain path is still named (control)",()=>{
-  expect(retireSystemCopy(runner,"/inert/npm","/usr/local/lib/node_modules/@songsid/agend")).toMatchObject({ok:true,warning:"Old system install at /usr/local/lib/node_modules/@songsid/agend was not removed (sudo refused); remove it by hand."});
+  expect(retireSystemCopy(runner,"/inert/npm","/usr/local/lib/node_modules/@songsid/agend","/usr/local")).toMatchObject({ok:true,warning:"Old system install at /usr/local/lib/node_modules/@songsid/agend was not removed (sudo refused); remove it by hand."});
  });
 });
 

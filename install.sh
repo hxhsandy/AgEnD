@@ -234,38 +234,48 @@ else
   SUDO="sudo"
 fi
 
-# Remove old @suzuke/agend if present (bin name conflict)
-if npm list -g @suzuke/agend >/dev/null 2>&1; then
-  warn "Removing old @suzuke/agend to avoid conflicts..."
-  $SUDO npm uninstall -g @suzuke/agend 2>/dev/null || true
-  # Remove leftover binary symlink (npm uninstall sometimes leaves it)
-  rm -f "$(npm prefix -g)/bin/agend" 2>/dev/null || true
-elif command_exists agend; then
-  AGEND_REAL=$(readlink -f "$(command -v agend)" 2>/dev/null || true)
-  if [[ "$AGEND_REAL" == */AgEnD/* ]] || [[ "$AGEND_REAL" == *"@suzuke/agend"* ]] || [[ "$AGEND_REAL" == */Projects/* ]]; then
-    warn "Removing npm-linked @suzuke/agend..."
-    AGEND_BIN_DIR=$(dirname "$(command -v agend)")
-    $SUDO rm -f "$AGEND_BIN_DIR/agend" "$AGEND_BIN_DIR/agend-agent" 2>/dev/null || true
-    NVM_MODULES="$(dirname "$AGEND_BIN_DIR")/lib/node_modules/@suzuke"
-    $SUDO rm -rf "$NVM_MODULES" 2>/dev/null || true
+# Recovery is the same path as a fresh install. No config/transcript removal.
+INSTALL_VERSION=${AGEND_INSTALL_VERSION:-latest}
+if [[ ! "$INSTALL_VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z.+-]*$ ]]; then error "Invalid AGEND_INSTALL_VERSION"; fi
+# Pin the selected release once. New releases own their installer; the
+# fallback exists only for published releases that predate agend-install.
+INSTALL_TARGET=$($SUDO npm view "@songsid/agend@$INSTALL_VERSION" version)
+if [[ ! "$INSTALL_TARGET" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then error "Could not resolve an exact AgEnD release"; fi
+INSTALLER_HANDLED=0
+HAS_INSTALLER=$($SUDO npm view "@songsid/agend@$INSTALL_TARGET" bin.agend-install --json)
+if [ -n "$HAS_INSTALLER" ]; then
+  $SUDO npm exec --yes --package "@songsid/agend@$INSTALL_TARGET" -- agend-install --repair --version "$INSTALL_TARGET" --yes
+  INSTALLER_HANDLED=1
+else
+  RECOVERY_SCRIPT=$(mktemp)
+  if curl --connect-timeout 15 --max-time 60 -fsSL https://songsid.github.io/AgEnD/install-recovery.cjs -o "$RECOVERY_SCRIPT"; then
+    $SUDO node "$RECOVERY_SCRIPT" "$NPM_PREFIX"
+  else
+    warn "Could not fetch the install recovery helper; existing files were kept."
   fi
+  LEGACY_FORCE=()
+  if [ -s "$RECOVERY_SCRIPT" ] && $SUDO node "$RECOVERY_SCRIPT" "$NPM_PREFIX" --legacy-bin-conflict; then LEGACY_FORCE=(--force); fi
+  INSTALL_LOG=$(mktemp)
+  if $SUDO npm install -g "${LEGACY_FORCE[@]}" "@songsid/agend@$INSTALL_TARGET" >"$INSTALL_LOG" 2>&1; then
+    cat "$INSTALL_LOG"
+  else
+    cat "$INSTALL_LOG"
+    if grep -Eq 'ENOTEMPTY|EBUSY' "$INSTALL_LOG" && [ -s "$RECOVERY_SCRIPT" ]; then
+      $SUDO node "$RECOVERY_SCRIPT" "$NPM_PREFIX"
+      $SUDO npm install -g "${LEGACY_FORCE[@]}" "@songsid/agend@$INSTALL_TARGET" || { rm -f "$RECOVERY_SCRIPT" "$INSTALL_LOG"; error "Installation failed; existing data was kept. See the npm reason above."; }
+    else
+      rm -f "$RECOVERY_SCRIPT" "$INSTALL_LOG"
+      error "Installation failed; existing data was kept. See the npm reason above."
+    fi
+  fi
+  rm -f "$RECOVERY_SCRIPT" "$INSTALL_LOG"
 fi
-
-# Discord is now a built-in adapter — the standalone plugin is no longer needed.
-# Remove it if a previous (beta) install left it behind (best-effort; the
-# built-in adapter takes precedence over the plugin regardless, so this is just
-# cleanup, not a correctness requirement).
-if npm list -g @songsid/agend-plugin-discord >/dev/null 2>&1; then
-  warn "Removing obsolete @songsid/agend-plugin-discord (Discord is now built in)..."
-  $SUDO npm uninstall -g @songsid/agend-plugin-discord 2>/dev/null || true
-fi
-
-$SUDO npm install -g @songsid/agend
-
-if ! command_exists agend; then
-  error "Installation failed. Try: npm install -g @songsid/agend"
+if ! command_exists agend || ! agend --version; then
+  error "npm completed but agend does not run on PATH. Source ~/.profile and retry the same installer. Your data was kept."
 fi
 info "AgEnD $(agend --version) installed"
+# Discord is built in and takes precedence. Do not run a second npm reify
+# merely to remove an unused old plugin; leave it available to an old fleet.
 
 # ── Shell completion ───────────────────────────────────────
 # bash: static file in bash-completion's completions dir — no rc file touched,
@@ -294,6 +304,21 @@ if [ -n "$AGEND_BIN" ] && [[ "$AGEND_BIN" == */.nvm/* ]] && [ "$(id -u)" -eq 0 ]
   if [ -n "$KIRO_BIN" ]; then
     ln -sf "$KIRO_BIN" /usr/local/bin/kiro-cli 2>/dev/null && info "Symlinked kiro-cli → /usr/local/bin/kiro-cli" || true
   fi
+fi
+
+# A root non-login WSL shell needs a lingering user manager and its runtime.
+if [ "$INSTALLER_HANDLED" -eq 0 ] && [ "$(id -u)" -eq 0 ] && [ -d /run/systemd/system ] && command_exists loginctl; then
+  loginctl enable-linger root || warn "Could not enable linger. Run: loginctl enable-linger root"
+  systemctl start user@0.service || warn "Could not start root's user manager. Run: systemctl start user@0.service"
+  if [ -d /run/user/0 ]; then export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/0}; fi
+  systemctl --user daemon-reload || warn "User manager is not ready; retry: XDG_RUNTIME_DIR=/run/user/0 agend start"
+fi
+
+# Existing fleets are repaired in place; never reopen setup or overwrite them.
+if [ -f "${AGEND_HOME:-$HOME/.agend}/fleet.yaml" ]; then
+  info "AgEnD command restored. Existing configuration and transcripts were kept."
+  if [ "$INSTALLER_HANDLED" -eq 0 ]; then agend start || error "The command was restored but service startup failed; use the reason and recovery command above. Existing data was kept."; fi
+  exit 0
 fi
 
 # ── Step 5: Detect backend ───────────────────────────────

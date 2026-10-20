@@ -146,6 +146,7 @@ export function writeCleanupOutcome(
 export interface UpdateMarker {
   startedAt: number;
   pid: number;
+  updatedAt?: number;
   progress?: UpdateProgressState;
 }
 
@@ -221,6 +222,7 @@ export function setUpdateProgressStage(
   if (!marker?.progress) return false;
   const previousStage = marker.progress.stage;
   marker.pid = process.pid;
+  marker.updatedAt = Date.now();
   marker.progress = {
     ...marker.progress,
     stage,
@@ -232,6 +234,33 @@ export function setUpdateProgressStage(
     ...(stage === "failed" ? { failedStage: previousStage } : {}),
   };
   return writeMarker(dataDir, marker);
+}
+
+/** Download/preparation cannot silently outlive their updater. Activation can
+ * hand off to systemd, so its dead-owner check waits for the bounded deadline. */
+export function reconcileUpdateProgress(
+  dataDir: string,
+  now = Date.now(),
+  alive: (pid: number) => boolean = pid => {
+    try { process.kill(pid, 0); return true; } catch (err) { return (err as NodeJS.ErrnoException).code !== "ESRCH"; }
+  },
+): void {
+  const marker = readUpdateProgress(dataDir);
+  if (!marker || updateProgressOperation(marker.progress) !== "update" || ["failed", "complete"].includes(marker.progress.stage)) return;
+  const age = now - (marker.updatedAt ?? marker.startedAt);
+  const stopped = ["preparing", "downloading", "installed"].includes(marker.progress.stage) && !alive(marker.pid);
+  if (!stopped && age >= 0 && age < 35 * 60_000) return;
+  setUpdateProgressStage(dataDir, "failed", { error: stopped
+    ? "The updater exited before completion. Re-run the official installer; existing configuration and transcripts are kept."
+    : "The update exceeded its time limit. Check update.log, then re-run the official installer; existing data is kept." });
+}
+
+/** A boot of the OLD fleet is not evidence that a download succeeded. */
+export function updateCanResumeAtStartup(marker: UpdateMarker & { progress: UpdateProgressState }, version: string): boolean {
+  if (["failed", "complete"].includes(marker.progress.stage)) return false;
+  if (updateProgressOperation(marker.progress) === "full-restart") return true;
+  return ["installed", "stopping", "starting"].includes(marker.progress.stage)
+    && (!marker.progress.version || marker.progress.version === version);
 }
 
 /** Called by `agend update` before it touches anything. */

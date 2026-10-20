@@ -18,6 +18,8 @@ checkNodeVersion();
 
 import { Command } from "commander";
 import { registerBugReportCommand } from "./bug-report-cli.js";
+import { prepareSystemdUserEnvironment, systemdUserRecoveryHint } from "./systemd-user-environment.js";
+prepareSystemdUserEnvironment();
 import { join, dirname } from "node:path";
 import { SchedulerDb } from "./scheduler/db.js";
 import { Cron } from "croner";
@@ -1368,26 +1370,74 @@ program
   .option("--force", "Force reinstall and restart even when already up to date")
   .option("-y, --yes", "Confirm when run from a fleet agent session (this affects every instance)")
   .action(async (opts: { version?: string; alpha?: boolean; beta?: boolean; stable?: boolean; force?: boolean; yes?: boolean }) => {
+    if ([opts.alpha, opts.beta, opts.stable].filter(Boolean).length > 1) { console.error("Choose one update channel."); process.exitCode = 1; return; }
+    if (!gateFleetControl(DATA_DIR, "update", { yes: opts.yes })) { process.exitCode = 1; return; }
+    const { getServicePath, getSystemServicePath, detectPlatform } = await import("./service-installer.js");
+    if (detectPlatform() === "macos" && !getSystemServicePath() && getServicePath() && await handOffLaunchdActivation("update")) return;
+    const selector = getUpdateSelector(opts, pkgVersion);
+    const version = lookupTargetVersion(selector);
+    if (!version || !isExactVersion(version)) {
+      setUpdateProgressStage(DATA_DIR, "failed", { error: "Could not resolve an exact target version; nothing was changed." });
+      console.error("Could not resolve an exact target version; nothing was changed."); process.exitCode = 1; return;
+    }
+    if (isUnrequestedDowngrade(pkgVersion, version, opts)) {
+      console.error(`The selected v${version} is older than installed v${pkgVersion}; choose agend update --stable or agend update --version <version> to downgrade.`);
+      setUpdateProgressStage(DATA_DIR, "failed", { error: "The selected release is older; choose an explicit version to downgrade." });
+      process.exitCode = 1; return;
+    }
+    markUpdateInProgress(DATA_DIR);
+    setUpdateProgressStage(DATA_DIR, "downloading", { version });
+    const { targetInstallerCommand } = await import("./target-installer.js");
+    let hasInstaller = false;
+    try {
+      hasInstaller = !!execFileSync("npm", ["view", `@songsid/agend@${version}`, "bin.agend-install", "--json"], { encoding: "utf8", timeout: 15_000 }).trim();
+    } catch {
+      setUpdateProgressStage(DATA_DIR, "failed", { error: "Could not read the target installer metadata; nothing was changed." });
+      process.exitCode = 1; return;
+    }
+    // Published older releases cannot grow a new bin retroactively. Keep a
+    // narrow compatibility route for installer-less targets/downgrades.
+    const command = hasInstaller ? targetInstallerCommand(version, pkgVersion, !!opts.force)
+      : selfCommand(["_install-release", "--version", version, "--from-version", pkgVersion, "--yes", ...(opts.force ? ["--force"] : [])]);
+    const result = spawnSync(command.command, command.args, { stdio: "inherit", timeout: 30 * 60_000, env: withOrigin("agend-update") });
+    if (result.status !== 0 && result.status !== 75) {
+      setUpdateProgressStage(DATA_DIR, "failed", { error: `Target installer failed (${result.signal ?? result.status ?? "no status"}). Re-run the official installer; existing data was kept.` });
+    }
+    process.exitCode = result.status ?? 1;
+  });
+
+program
+  .command("_install-release", { hidden: true })
+  .description("Update AgEnD to the selected release and restart the fleet service")
+  .option("--version <ver>", "Specific version to install")
+  .option("--alpha", "Install from the alpha channel (the default when an alpha is installed)")
+  .option("--beta", "Install from the beta channel (the default when a beta is installed)")
+  .option("--stable", "Install from the stable channel, even from a beta install (may go back a version)")
+  .option("--force", "Force reinstall and restart even when already up to date")
+  .option("-y, --yes", "Confirm when run from a fleet agent session (this affects every instance)")
+  .option("--upgrade", "Upgrade using this installer")
+  .option("--repair", "Repair/install without deleting fleet configuration")
+  .option("--from-version <ver>", "Version that requested the upgrade")
+  .action(async (opts: { version?: string; alpha?: boolean; beta?: boolean; stable?: boolean; force?: boolean; yes?: boolean; repair?: boolean; fromVersion?: string }) => {
     if ([opts.alpha, opts.beta, opts.stable].filter(Boolean).length > 1) {
       console.error("  --alpha, --beta and --stable choose different channels; pass one.");
       process.exit(1);
     }
     if (!gateFleetControl(DATA_DIR, "update", { yes: opts.yes })) process.exit(1);
-    // #1871: on launchd the activation boots out the fleet this agent session runs in; the update must outlive that.
-    {
-      const { getServicePath, getSystemServicePath, detectPlatform } = await import("./service-installer.js");
-      if (detectPlatform() === "macos" && !getSystemServicePath() && getServicePath() && await handOffLaunchdActivation("update")) return;
-    }
     const { spawnSync } = await import("node:child_process");
-    // The channel follows the version being replaced — this CLI's own package — so an alpha or beta stays on its channel.
-    const tag = getUpdateSelector(opts, pkgVersion);
-    const looked = lookupTargetVersion(tag);
-    // Only a strict SemVer answer counts as the version this update is about; anything else is "unknown".
-    const targetVersion = looked !== null && isExactVersion(looked) ? looked.trim().replace(/^v/i, "") : null;
-    // Install exactly the version checked below: a dist-tag is a moving alias, and could point somewhere older
-    // by the time npm resolves it. Unknown target: the tag, as before.
-    const pkg = `@songsid/agend@${targetVersion ?? tag}`;
-
+    const targetVersion = opts.version ?? pkgVersion;
+    if (!isExactVersion(targetVersion)) { console.error("The installer needs an exact target version."); process.exitCode = 1; return; }
+    const pkg = `@songsid/agend@${targetVersion}`;
+    let previousVersion = opts.fromVersion;
+    if (!previousVersion) {
+      try {
+        const root = execFileSync("npm", ["root", "-g"], { encoding: "utf8", timeout: 15_000 }).trim();
+        const manifest = JSON.parse(readFileSync(join(root, "@songsid", "agend", "package.json"), "utf8"));
+        if (manifest.name === "@songsid/agend" && isExactVersion(manifest.version)) previousVersion = manifest.version;
+      } catch { /* first install or broken package */ }
+    }
+    previousVersion ??= "0.0.0";
+    if (opts.repair) opts.force = true;
     // The restart stage, shared by a real update and by the stale-fleet case.
     const restartFleetForUpdate = (command: string, args: string[], version: string): "restarted" | "pending" | "failed" => {
       console.log("  Restarting fleet...");
@@ -1424,7 +1474,7 @@ program
      * verified package, then restart through the verified binary — never through whatever invoked this command
      * (process.argv[1] may be another checkout). A failed target check leaves the running fleet alone.
      */
-    const activateVerified = async (verified: { agendPath: string; version: string; dir: string; bin: string; entry: string; node: string; rollback?: { root: string; prefix: string; preimage: import("./package-preimage.js").PackagePreimage | null }; retireSystemCopy?: true; npmPath?: string }, viaNvm: boolean): Promise<void> => {
+    const activateVerified = async (verified: { agendPath: string; version: string; dir: string; bin: string; entry: string; node: string; rollback?: { root: string; prefix: string; preimage: import("./package-preimage.js").PackagePreimage | null }; retireSystemCopy?: true; retirePrefix?: string; npmPath?: string }, viaNvm: boolean): Promise<void> => {
       const { newAgendInvocation, retireSystemCopy, activationSettled } = await import("./update-install.js");
       // What the restart came to — carried, never inferred from the exit code (pending ≠ restarted).
       let restartResult: "restarted" | "pending" | "failed" | null = null;
@@ -1497,7 +1547,7 @@ program
           // #1735: the old copy is the package this updater runs from (the nvm route is taken because its prefix is not
           // writable); the warning names it.
           const oldCopyDir = (() => { try { return realpathSync(dirname(__dirname)); } catch { return undefined; } })();
-          const retireResult = retireSystemCopy({ run: (command, args) => capture(command, args), log: message => console.log(message) }, verified.npmPath, oldCopyDir);
+          const retireResult = retireSystemCopy({ run: (command, args) => capture(command, args), log: message => console.log(message) }, verified.npmPath, oldCopyDir, verified.retirePrefix);
           // The marker write proves the pre-restart receipt still owns the
           // marker: refused when it is gone or belongs to another operation.
           const recordCleanup = async (result: { warning?: string; cleanupCommand?: string } | null): Promise<void> => {
@@ -1550,7 +1600,7 @@ program
       }
     };
 
-    if (shouldSkipUpdate(pkgVersion, targetVersion, opts.force)) {
+    if (shouldSkipUpdate(previousVersion, targetVersion, opts.force)) {
       // Installed already — but is the running fleet? An update whose restart
       // failed leaves the old process running against the new files (#1113
       // hotfix); "already up to date" must not leave it there.
@@ -1564,7 +1614,7 @@ program
       const verifyInstalled = async () => {
         const { verifyInstalledPackage } = await import("./update-install.js");
         const verified = verifyInstalledPackage(
-          { pkg: `@songsid/agend@${pkgVersion}`, targetVersion: pkgVersion, viaNvm: false, nvmSh },
+          { pkg: `@songsid/agend@${previousVersion}`, targetVersion: previousVersion, viaNvm: false, nvmSh },
           {
             run: (command, args, options = {}) => {
               const result = spawnSync(command, args, { encoding: "utf-8", timeout: options.timeoutMs, stdio: ["ignore", "pipe", "pipe"] });
@@ -1587,10 +1637,10 @@ program
         processStartMs: pid => processStartMs(pid),
         isFleetProcess: pid => isFleetStartCommandLine(readProcessCommandLine(pid)),
       })) {
-        console.log(`\n  v${pkgVersion} is installed, but the running fleet started before it was — verifying it before restarting onto it.`);
+        console.log(`\n  v${previousVersion} is installed, but the running fleet started before it was — verifying it before restarting onto it.`);
         const verified = await verifyInstalled();
         if (!verified.ok) return;
-        console.log(`  ✓ v${pkgVersion} verified — restarting the fleet onto it.\n`);
+        console.log(`  ✓ v${previousVersion} verified — restarting the fleet onto it.\n`);
         markUpdateInProgress(DATA_DIR);
         await activateVerified(verified, false);
         return;
@@ -1608,18 +1658,18 @@ program
       })) {
         const verified = await verifyInstalled();
         if (!verified.ok) return;
-        console.error(`\n  ✗ AgEnD v${pkgVersion} is installed but the fleet is not running — run: agend start\n`);
+        console.error(`\n  ✗ AgEnD v${previousVersion} is installed but the fleet is not running — run: agend start\n`);
         process.exitCode = 1;
         return;
       }
-      console.log(`\n  ✓ Already up to date (v${pkgVersion})\n`);
-      setUpdateProgressStage(DATA_DIR, "complete", { version: pkgVersion });
+      console.log(`\n  ✓ Already up to date (v${previousVersion})\n`);
+      setUpdateProgressStage(DATA_DIR, "complete", { version: previousVersion });
       await import("./windows-shortcuts.js").then(m => m.printUpdateShortcutsHint(DATA_DIR)).catch(() => { /* a hint never fails an update */ });
       return;
     }
 
-    if (isUnrequestedDowngrade(pkgVersion, targetVersion, opts)) {
-      const message = `AgEnD v${pkgVersion} is newer than ${tag} (v${targetVersion}); not going back to it. To switch to the stable release anyway: agend update --stable`;
+    if (isUnrequestedDowngrade(previousVersion, targetVersion, opts)) {
+      const message = `AgEnD v${previousVersion} is newer than the selected release (v${targetVersion}); not going back to it. To switch to the stable release anyway: agend update --stable`;
       console.error(`\n  ✗ ${message}\n`);
       // A chat-started /update is waiting on this: say why it stops here.
       setUpdateProgressStage(DATA_DIR, "failed", { error: message });
@@ -1630,7 +1680,7 @@ program
     // ── Check if npm global needs sudo (read-only; decides the nvm path the preflight judges) ──
     let needsSudo = false;
     try {
-      const prefix = execSync("npm config get prefix", { encoding: "utf-8" }).trim();
+      const prefix = execSync("npm config get prefix", { encoding: "utf-8", timeout: 15_000 }).trim();
       const { accessSync, constants } = await import("node:fs");
       try { accessSync(prefix, constants.W_OK); } catch { needsSudo = true; }
     } catch { /* assume no sudo needed */ }
@@ -1659,9 +1709,9 @@ program
     }
 
     if (targetVersion) {
-      console.log(`\n  Updating AgEnD v${pkgVersion} → v${targetVersion}...\n`);
+      console.log(`\n  Updating AgEnD v${previousVersion} → v${targetVersion}...\n`);
     } else {
-      console.log(`\n  Updating AgEnD to ${tag}...\n`);
+      console.log(`\n  Updating AgEnD to ${targetVersion}...\n`);
     }
 
     // Tell the running fleet that what happens next is planned. `npm install -g`
@@ -1685,7 +1735,7 @@ program
       if (!existsSync(nvmSh)) {
         console.log("  Installing nvm (npm global requires sudo)...");
         try {
-          execSync("curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash", { stdio: "inherit" });
+          execSync("curl --connect-timeout 15 --max-time 120 -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash", { stdio: "inherit", timeout: 150_000 });
         } catch {
           failUpdate("  Failed to install nvm. Install manually: https://github.com/nvm-sh/nvm");
         }
@@ -1711,11 +1761,11 @@ program
     process.once("exit", () => releaseLock());
     const installed = runUpdateInstall(
       {
-        pkg, targetVersion, viaNvm: needsSudo, nvmSh, rollback: true,
+        pkg, targetVersion, viaNvm: needsSudo, nvmSh, rollback: !opts.repair,
         ...(preflight && targetVersion && needsSudo
           ? { preflight: preflight.installPreflight(pkg, targetVersion, "the Node 22 nvm selected", { log: m => console.log(m), error: m => console.error(m) }) }
           : {}),
-        lock: prefix => {
+        lock: opts.repair ? undefined : prefix => {
           const lock = acquireInstallLock(prefix, { spec: pkg, agendHome: DATA_DIR }, {
             pid: process.pid, processStart: admission.processStart, startTicks: admission.startTicks, bootId: admission.bootId, newToken: () => randomBytes(16).toString("hex"),
             now: () => new Date(), log: message => console.log(message),
@@ -1745,6 +1795,17 @@ program
     console.log(`\n  ✓ Installed: v${newVersion} (${agendPath}; opened a database on its Node)`);
     setUpdateProgressStage(DATA_DIR, "installed", { version: newVersion });
 
+    if (process.platform === "linux" && process.getuid?.() === 0 && existsSync("/run/systemd/system")) {
+      const linger = spawnSync("loginctl", ["enable-linger", "root"], { encoding: "utf8", timeout: 15_000 });
+      const manager = spawnSync("systemctl", ["start", "user@0.service"], { encoding: "utf8", timeout: 30_000 });
+      prepareSystemdUserEnvironment();
+      if (linger.status !== 0 || manager.status !== 0) console.error(systemdUserRecoveryHint());
+    }
+    if (opts.repair && !existsSync(join(DATA_DIR, "fleet.yaml"))) {
+      console.log("AgEnD installed. Next: agend quickstart. Existing data was kept.");
+      setUpdateProgressStage(DATA_DIR, "complete", { version: newVersion });
+      return;
+    }
     await activateVerified(installed, needsSudo);
   });
 
@@ -1985,7 +2046,7 @@ program
       // A service file means the service manager owns this fleet. Falling back
       // to a detached process here creates a second fleet when the bus recovers.
       console.error("Failed to start the installed AgEnD service; refusing to start a detached duplicate.");
-      console.error("Check your service manager, then retry: systemctl --user status com.agend.fleet");
+      console.error(systemServicePath ? "Run: sudo systemctl status agend" : process.platform === "linux" ? systemdUserRecoveryHint() : "Run: launchctl print gui/$(id -u)/com.agend.fleet");
       process.exitCode = 1;
     }
   });
@@ -2070,6 +2131,7 @@ program
       if (systemdTarget.state === "unavailable") {
         console.error(`Cannot reach the ${scope} manager; refusing a detached restart that could duplicate the fleet.`);
         console.error(`Check: ${statusCommand}`);
+        if (systemdTarget.user) console.error(systemdUserRecoveryHint("restart"));
         process.exitCode = 1;
         return;
       }

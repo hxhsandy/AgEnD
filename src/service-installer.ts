@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, readdirSync, renameSync, statSync, chmodSync, realpathSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { prepareSystemdUserEnvironment } from "./systemd-user-environment.js";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { execFileSync, execSync, spawnSync } from "node:child_process";
@@ -282,6 +283,7 @@ function servicePathForLabel(label: string): string {
 
 /** Inspect the user service without changing it. `null` means manager unavailable. */
 export function inspectService(label = SERVICE_LABEL): ServiceInfo {
+  prepareSystemdUserEnvironment();
   const plat = detectPlatform();
   const path = servicePathForLabel(label);
   const manager = plat === "macos" ? "launchd" : "systemd --user";
@@ -772,6 +774,7 @@ export function classifySystemdServiceState(result: {
 }
 
 export function getSystemdServiceState(label: string, user = true): ServiceState {
+  if (user) prepareSystemdUserEnvironment();
   const args = [...(user ? ["--user"] : []), "is-active", label];
   const result = spawnSync("systemctl", args, { encoding: "utf8", timeout: 5000 });
   return classifySystemdServiceState(result);
@@ -803,6 +806,7 @@ export function systemdRestartOutcome(
   user = true,
   run: SystemctlRunner = execFileSync,
 ): SystemdRestartOutcome {
+  if (user) prepareSystemdUserEnvironment();
   try {
     run(
       "systemctl",
@@ -842,6 +846,7 @@ export function getSystemServicePath(): string | null {
 }
 
 export function stopService(): boolean {
+  prepareSystemdUserEnvironment();
   const plat = detectPlatform();
   try {
     if (plat === "macos") {
@@ -857,6 +862,7 @@ export function stopService(): boolean {
 }
 
 export function startService(): boolean {
+  prepareSystemdUserEnvironment();
   const plat = detectPlatform();
   try {
     if (plat === "macos") {

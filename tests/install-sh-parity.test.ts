@@ -27,7 +27,9 @@ describe("install.sh parity (#1296)", () => {
       expect(line, `install line must not mention agend-plugin-discord: ${line}`)
         .not.toContain("agend-plugin-discord");
     }
-    // The uninstall block must actively remove the plugin (not just warn).
-    expect(repo).toContain("npm uninstall -g @songsid/agend-plugin-discord");
+    // #2264: built-in Discord already wins; do not run another destructive
+    // npm reify just to remove an unused package before/after an upgrade.
+    expect(repo).not.toContain("npm uninstall -g @songsid/agend-plugin-discord");
+    expect(repo).toContain("agend-install --repair");
   });
 });

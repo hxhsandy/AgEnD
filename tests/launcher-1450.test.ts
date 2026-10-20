@@ -175,20 +175,21 @@ describe("postinstall: prove the bundled Node, write the receipt", () => {
     writeFileSync(join(f.root, "update-in-progress.json"), JSON.stringify({ startedAt: Date.now() - 30_000, pid: 4242 }));
     const r = postinstall(f);
     expect(r.status).toBe(1);
-    expect(r.stderr).toContain("npm is rolling this install back.\n");
+    expect(r.stderr).toContain("npm install failed; verify the previous command");
     expect(r.stderr).not.toMatch(/previous install(, if any,)? stays/);
-    expect(r.stderr).toContain("REMOVED the previous AgEnD");
-    expect(r.stderr).toMatch(/npm install -g @songsid\/agend@2\.1\.12\n\s+agend install/);
+    expect(r.stderr).not.toContain("REMOVED the previous AgEnD");
+    expect(r.stderr).toMatch(/npm install -g @songsid\/agend@[0-9A-Za-z.+-]+\n\s+agend start/);
+    expect(r.stderr).not.toContain("@2.1.12");
   });
 
   it("a plain npm install says it conditionally; 2.2's own updater (AGEND_UPDATE_KEEPS_PREVIOUS) says the previous one stays", () => {
     const plain = postinstall(fixture({ runtime: "wrong-version" }));
     expect(plain.status).toBe(1);
-    expect(plain.stderr).toContain("unless AgEnD 2.1's updater started this");
-    expect(plain.stderr).toContain("If this install was started by AgEnD 2.1's updater");
+    expect(plain.stderr).not.toContain("@2.1.12");
+    expect(plain.stderr).toContain("If the agend command is missing");
     const ours = postinstall(fixture({ runtime: "wrong-version" }), NOW, { AGEND_UPDATE_KEEPS_PREVIOUS: "1" });
     expect(ours.status).toBe(1);
-    expect(ours.stderr).toContain("the previous install stays.");
+    expect(ours.stderr).toContain("verify the previous command");
     expect(ours.stderr).not.toContain("2.1's updater");
   });
 
@@ -386,13 +387,22 @@ describe("the sh bins: AgEnD starts with no Node on PATH", () => {
 
   it("both bins are the same POSIX sh script, executable, and what package.json links", () => {
     const manifest = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8"));
-    expect(manifest.bin).toEqual({ agend: "./launcher/agend", "agend-agent": "./launcher/agend-agent" });
+    expect(manifest.bin).toEqual({ agend: "./launcher/agend", "agend-agent": "./launcher/agend-agent", "agend-install": "./launcher/agend-install" });
     const text = readFileSync(join(LAUNCHER, "agend"), "utf8");
     expect(readFileSync(join(LAUNCHER, "agend-agent"), "utf8")).toBe(text);
+    expect(readFileSync(join(LAUNCHER, "agend-install"), "utf8")).toBe(text);
     expect(text.startsWith("#!/bin/sh\n")).toBe(true);
     expect(text.replace(/^\s*#.*$/gm, "")).not.toMatch(/readlink -f|\[\[|\bfunction\b|\$\{[A-Za-z_]+\[/);       // POSIX only, no GNU readlink -f
     for (const name of ["agend", "agend-agent"]) expect(statSync(join(LAUNCHER, name)).mode & 0o111).toBe(0o111);
     expect(spawnSync("sh", ["-n", join(LAUNCHER, "agend")]).status).toBe(0);
+  });
+
+  it("#2264: the target installer uses its own selected Node and internal implementation", () => {
+    const f = fixture({ pin: null, runtime: "none" });
+    const result = spawnSync(join(f.pkg, "launcher", "agend-install"), ["--repair", "--version", "2.2.0"], { encoding: "utf8", timeout: 15_000, env: { ...process.env, AGEND_NODE: process.execPath } });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout).args).toEqual(["_install-release", "--repair", "--version", "2.2.0"]);
+    expect(JSON.parse(result.stdout).execPath).toBe(realpathSync(process.execPath));
   });
 
   it.skipIf(!ON_FIXTURE_HOST)("through a relative bin link and a link to it, in paths with spaces, no node on PATH: the bundled Node runs the CLI", () => {

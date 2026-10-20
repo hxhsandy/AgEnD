@@ -188,8 +188,8 @@ describe("#1735: the warning names the old copy's directory when it is plain", (
   const refused = { run: (command: string, args: string[]) => ({ status: command === "sudo" && args[0] === "-n" ? 1 : 99, signal: null, stdout: "", stderr: "" }), log: () => {} };
   const NPM = "/home/u/.nvm/versions/node/v22.23.3/bin/npm";
   it("a plain …/node_modules/@songsid/agend path is named; the command is unchanged", () => {
-    const r = retireSystemCopy(refused, NPM, "/usr/local/lib/node_modules/@songsid/agend");
-    expect(r).toEqual({ ok: true, warning: WARNING, cleanupCommand: `sudo '${NPM}' uninstall -g @songsid/agend` });
+    const r = retireSystemCopy(refused, NPM, "/usr/local/lib/node_modules/@songsid/agend", "/usr/local");
+    expect(r).toEqual({ ok: true, warning: WARNING, cleanupCommand: `sudo '${NPM}' uninstall -g --prefix '/usr/local' @songsid/agend` });
   });
   it.each([
     ["absent", undefined],
@@ -199,7 +199,7 @@ describe("#1735: the warning names the old copy's directory when it is plain", (
     ["another package", "/usr/local/lib/node_modules/@songsid/other"],
     ["too long", "/" + "a".repeat(200) + "/node_modules/@songsid/agend"],
   ])("%s → not named", (_label, dir) => {
-    const r = retireSystemCopy(refused, NPM, dir);
+    const r = retireSystemCopy(refused, NPM, dir, "/usr/local");
     expect(r).toMatchObject({ ok: true, warning: "Old system install was not removed (sudo refused); remove it by hand." });
   });
 });

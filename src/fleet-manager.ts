@@ -42,6 +42,8 @@ import {
   clearUpdateMarker,
   isUpdateInProgress,
   readUpdateProgress,
+  reconcileUpdateProgress,
+  updateCanResumeAtStartup,
   sameUpdateMarker,
   setUpdateProgressStage,
   updateMarkerIdentity,
@@ -3189,20 +3191,24 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     // Plain `agend update`: the CLI picks the channel from the version it is about to replace (a beta install
     // stays on beta). Deciding here, from the package.json next to THIS code, read a source checkout's 1.22.0 as
     // "not a beta" and sent a beta install to @latest. #1450 C5: the INSTALLED agend, verified, by absolute path.
+    const ownedMarker = updateMarkerIdentity(this.dataDir);
+    const fail = (message: string) => {
+      if (!ownedMarker || sameUpdateMarker(ownedMarker, updateMarkerIdentity(this.dataDir))) this.failUpdateProgress(message);
+    };
     const installed = await resolveInstalledAgend();
     if (!installed.ok) {
-      this.failUpdateProgress(`${t("update.failure.shell")} ${t("update.failure.installed", installed.reason)}`);
+      fail(`${t("update.failure.shell")} ${t("update.failure.installed", installed.reason)}`);
       return;
     }
     const origin = `slash /update by ${adapterId}:${data.userId}`;
     recordInternalRequest(this.dataDir, "update", origin);
     const launch = await resolveUpdateLaunch(installed.agend);
     if (!launch.ok) {
-      this.failUpdateProgress(`${t("update.failure.shell")} ${t("update.failure.independent", launch.reason)}`);
+      fail(`${t("update.failure.shell")} ${t("update.failure.independent", launch.reason)}`);
       return;
     }
     if (this.fleetAdminGate(data.userId, adapterId) !== "ok" || this.shuttingDown) {
-      this.failUpdateProgress(t("not_authorized"));
+      fail(t("not_authorized"));
       return;
     }
     const logPath = updateLogPath(this.dataDir);
@@ -3212,7 +3218,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       detached: true, stdio: ["ignore", logFd ? logFd.fd : "ignore", logFd ? logFd.fd : "ignore"], env: withOrigin(origin),
     });
     if (logFd) closeSync(logFd.fd); // parent closes its copy; the child's fd stays open
-    watchUpdateLaunch(child, message => this.failUpdateProgress(message), logFd ? logPath : undefined, logFd?.offset, installed.agend);
+    watchUpdateLaunch(child, message => fail(message), logFd ? logPath : undefined, logFd?.offset, installed.agend);
     child.unref();
   }
 
@@ -6971,6 +6977,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     if (this.updateProgressTimer) clearInterval(this.updateProgressTimer);
     const tick = async () => {
       if (this.updateProgressEditRunning) return;
+      reconcileUpdateProgress(this.dataDir);
       const marker = readUpdateProgress(this.dataDir);
       if (!marker) {
         if (this.updateProgressTimer) clearInterval(this.updateProgressTimer);
@@ -6996,6 +7003,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
           this.updateCleanupWatch = null;
         } else if (verdict.action === "release") {
           // Done silent, or the updater died past the max age: release it.
+          if (!sameUpdateMarker(updateMarkerIdentity(this.dataDir), { startedAt: marker.startedAt, receipt: updateReceiptOf(marker) })) return;
           clearUpdateMarker(this.dataDir);
           stopWatching();
           return;
@@ -7014,7 +7022,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         }
       }
       const target = marker.progress.target;
-      const adapter = this.adapters.get(target.adapterId) ?? (initialAdapter?.id === target.adapterId ? initialAdapter : undefined);
+      const adapter = this.adapters.get(target.adapterId) ?? (this.adapter?.id === target.adapterId ? this.adapter : undefined) ?? (initialAdapter?.id === target.adapterId ? initialAdapter : undefined);
       if (!adapter) return;
       // #1854: no tip on an update's completion (either path); tips come on their own schedule and from /tips.
       const text = formatUpdateProgress(marker);
@@ -7024,6 +7032,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         await adapter.editMessage(target.chatId, target.messageId, text, target.threadId);
         this.lastUpdateProgressText = text;
         if (marker.progress.stage === "failed" || marker.progress.stage === "complete") {
+          if (!sameUpdateMarker(updateMarkerIdentity(this.dataDir), { startedAt: marker.startedAt, receipt: updateReceiptOf(marker) })) return;
           clearUpdateMarker(this.dataDir);
           if (this.updateProgressTimer) clearInterval(this.updateProgressTimer);
           this.updateProgressTimer = null;
@@ -7072,19 +7081,23 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     this.logConfigWarningsAtStartup();
     setLocale(detectLocale(fleet)); // user-facing text language (fleet.yaml defaults.locale / timezone)
     // #1737 review: the marker this boot adopts — the startup clear may only ever clear this one.
-    const bootUpdateMarker = updateMarkerIdentity(this.dataDir);
+    const observedBootUpdateMarker = updateMarkerIdentity(this.dataDir);
+    reconcileUpdateProgress(this.dataDir);
     const savedUpdateProgress = readUpdateProgress(this.dataDir);
     const pendingUpdateProgress = savedUpdateProgress
-      && savedUpdateProgress.progress.stage !== "failed"
-      && savedUpdateProgress.progress.stage !== "complete"
+      && updateCanResumeAtStartup(savedUpdateProgress, this.currentVersion)
       ? savedUpdateProgress
       : null;
+    // Only adopt a receipt that this startup can actually complete. The
+    // independent monitor owns interrupted downloads/undelivered failures.
+    const bootUpdateMarker = savedUpdateProgress && !pendingUpdateProgress ? null : observedBootUpdateMarker;
     const pendingProgressOperation = pendingUpdateProgress
       ? updateProgressOperation(pendingUpdateProgress.progress)
       : null;
     if (pendingUpdateProgress) {
       setUpdateProgressStage(this.dataDir, "starting", { version: pendingUpdateProgress.progress.version });
     }
+    if (savedUpdateProgress && !pendingUpdateProgress) this.startUpdateProgressMonitor();
     this.initializeWebAuthTokens();
     // Must run before the first General/CLI spawn: pressure can hold startup.
     // Logs remain available even before the adapters and health listener exist.

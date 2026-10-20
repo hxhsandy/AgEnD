@@ -55,12 +55,12 @@ describe("install admission across a clock step (#1947)", () => {
     }
   });
 
-  it("…but a start more than 2 s off is another process (a reused pid): refused, and a foreign token too", () => {
+  it("…but a start more than 2 s off is another process (a reused pid): manual repair continues; a proven live foreign owner warns", () => {
     const p = prefix();
     lock(p.prefix);
-    expect(admission.admit(p.pkg, { env: own, exists: alive, processStart: () => "Fri Oct 16 09:01:05 2026" })).toMatchObject({ ok: false, reason: expect.stringContaining("is gone") });
-    expect(admission.admit(p.pkg, { env: { AGEND_INSTALL_TOKEN: "f".repeat(32) }, exists: alive, processStart: () => BEFORE })).toMatchObject({ ok: false, reason: expect.stringContaining("is installing into") });
-    expect(admission.admit(p.pkg, { env: {}, exists: alive, processStart: () => BEFORE })).toMatchObject({ ok: false, reason: expect.stringContaining("is installing into") });
+    expect(admission.admit(p.pkg, { env: own, exists: alive, processStart: () => "Fri Oct 16 09:01:05 2026" })).toMatchObject({ ok: true });
+    expect(admission.admit(p.pkg, { env: { AGEND_INSTALL_TOKEN: "f".repeat(32) }, exists: alive, processStart: () => BEFORE })).toMatchObject({ ok: true, warning: expect.stringContaining("agend update") });
+    expect(admission.admit(p.pkg, { env: {}, exists: alive, processStart: () => BEFORE })).toMatchObject({ ok: true, warning: expect.stringContaining("agend update") });
   });
 
   it("a lock with start ticks (Linux): judged by ticks and boot, never the wall clock", () => {
@@ -69,8 +69,8 @@ describe("install admission across a clock step (#1947)", () => {
     // The wall clock moved a whole minute: lstart says another time; the same boot and ticks say the same process.
     expect(admission.admit(p.pkg, { env: own, exists: alive, bootId: thisBoot, startTicks: () => "123456", processStart: () => "Fri Oct 16 09:02:00 2026" })).toMatchObject({ ok: true });
     // Other ticks this boot: a reused pid → gone; a foreign token stays refused.
-    expect(admission.admit(p.pkg, { env: own, exists: alive, bootId: thisBoot, startTicks: () => "999999", processStart: () => BEFORE })).toMatchObject({ ok: false, reason: expect.stringContaining("is gone") });
-    expect(admission.admit(p.pkg, { env: { AGEND_INSTALL_TOKEN: "f".repeat(32) }, exists: alive, bootId: thisBoot, startTicks: () => "123456" })).toMatchObject({ ok: false, reason: expect.stringContaining("is installing into") });
+    expect(admission.admit(p.pkg, { env: own, exists: alive, bootId: thisBoot, startTicks: () => "999999", processStart: () => BEFORE })).toMatchObject({ ok: true });
+    expect(admission.admit(p.pkg, { env: { AGEND_INSTALL_TOKEN: "f".repeat(32) }, exists: alive, bootId: thisBoot, startTicks: () => "123456" })).toMatchObject({ ok: true, warning: expect.stringContaining("agend update") });
   });
 
   it("#1949 review P2-1: a ticks lock whose ticks or boot cannot be read is UNKNOWN — never judged by wall time", () => {
@@ -78,8 +78,8 @@ describe("install admission across a clock step (#1947)", () => {
     lock(p.prefix, { startTicks: "123456", bootId: BOOT });
     const moved = () => "Fri Oct 16 09:02:00 2026";   // 60 s off: the wall-time rule would call it stale
     for (const d of [{ bootId: thisBoot, startTicks: () => null }, { bootId: () => null, startTicks: () => "123456" }]) {
-      expect(admission.admit(p.pkg, { env: {}, exists: alive, processStart: moved, ...d })).toMatchObject({ ok: false, reason: expect.stringContaining("cannot be told") });
-      expect(admission.admit(p.pkg, { env: own, exists: alive, processStart: moved, ...d })).toMatchObject({ ok: false, reason: expect.stringContaining("cannot be told") });
+      expect(admission.admit(p.pkg, { env: {}, exists: alive, processStart: moved, ...d })).toMatchObject({ ok: true });
+      expect(admission.admit(p.pkg, { env: own, exists: alive, processStart: moved, ...d })).toMatchObject({ ok: true });
     }
   });
 
@@ -87,8 +87,8 @@ describe("install admission across a clock step (#1947)", () => {
     const p = prefix();
     lock(p.prefix, { startTicks: "123456", bootId: OTHER_BOOT });
     const same = { exists: alive, bootId: thisBoot, startTicks: () => "123456", processStart: () => BEFORE };
-    expect(admission.admit(p.pkg, { env: {}, ...same })).toMatchObject({ ok: true, why: "a stale lock and no token: an external install" });
-    expect(admission.admit(p.pkg, { env: own, ...same })).toMatchObject({ ok: false, reason: expect.stringContaining("is gone") });
+    expect(admission.admit(p.pkg, { env: {}, ...same })).toMatchObject({ ok: true, why: "no proven live updater" });
+    expect(admission.admit(p.pkg, { env: own, ...same })).toMatchObject({ ok: true });
   });
 
   it("the beta-era lock fixture (no ticks) is still a lock, and admits its updater's own child", () => {
@@ -103,10 +103,10 @@ describe("install admission across a clock step (#1947)", () => {
     ["a malformed startTicks", { startTicks: "12x", bootId: BOOT }],
     ["startTicks without its boot", { startTicks: "123" }],
     ["a boot without startTicks", { bootId: BOOT }],
-  ])("%s makes the lock unreadable (blocks), never silently ignored", (_n, extra) => {
+  ])("%s makes lock parsing invalid but cannot block manual repair", (_n, extra) => {
     const p = prefix();
     lock(p.prefix, extra);
-    expect(admission.admit(p.pkg, { env: own, exists: alive, bootId: thisBoot, processStart: () => BEFORE })).toMatchObject({ ok: false, reason: expect.stringContaining("cannot be read as a lock") });
+    expect(admission.admit(p.pkg, { env: own, exists: alive, bootId: thisBoot, processStart: () => BEFORE })).toMatchObject({ ok: true });
   });
 });
 
@@ -167,7 +167,7 @@ describe("the updater side follows the same rule (src/install-lock.ts)", () => {
       expect(admission.admit(p.pkg, { env: own })).toMatchObject({ ok: true });
     } finally { holder.kill(); }
     await new Promise(r => setTimeout(r, 300));
-    expect(admission.admit(p.pkg, { env: own })).toMatchObject({ ok: false, reason: expect.stringContaining("is gone") });
+    expect(admission.admit(p.pkg, { env: own })).toMatchObject({ ok: true });
   });
 });
 

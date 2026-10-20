@@ -73,24 +73,24 @@ describe("retireSystemCopy: refused removal is a warning plus a verbatim command
   it("sudo-refused removal succeeds; the command is shell-quoted and single-word-safe", () => {
     const seen: string[][] = [];
     const logged: string[] = [];
-    const out = retireSystemCopy({ ...sudoRefusedRunner(seen), log: (m) => logged.push(m) }, NPM);
+    const out = retireSystemCopy({ ...sudoRefusedRunner(seen), log: (m) => logged.push(m) }, NPM, undefined, "/usr/local");
     expect(out.ok).toBe(true);
     if (!out.ok) throw Error("expected ok:true");
     expect(out.warning).toContain("Old system install was not removed (sudo refused)");
     expect(out.warning).not.toContain(NPM);
-    expect(out.cleanupCommand).toBe(`sudo '${NPM}' uninstall -g @songsid/agend`);
+    expect(out.cleanupCommand).toBe(`sudo '${NPM}' uninstall -g --prefix '/usr/local' @songsid/agend`);
     expect(logged.filter(m => m.includes("⚠️") || m.includes("was not removed")),
       "the warning itself is printed once, by the caller (P3-1)").toEqual([]);
-    expect(seen).toEqual([["sudo", "-n", NPM, "uninstall", "-g", "@songsid/agend"]]);
+    expect(seen).toEqual([["sudo", "-n", NPM, "uninstall", "-g", "--prefix", "/usr/local", "@songsid/agend"]]);
   });
 
   it("a spaced npm path stays one shell word in the manual command", () => {
     const spaced = "/home/u/with space/.nvm/versions/node/v22.0.0/bin/npm";
     const seen: string[][] = [];
-    const out = retireSystemCopy({ ...sudoRefusedRunner(seen), log: () => {} }, spaced);
+    const out = retireSystemCopy({ ...sudoRefusedRunner(seen), log: () => {} }, spaced, undefined, "/usr/local");
     expect(out.ok).toBe(true);
     if (!out.ok || !out.cleanupCommand) throw Error("expected ok:true with command");
-    expect(shellWords(out.cleanupCommand)).toEqual(["sudo", spaced, "uninstall", "-g", "@songsid/agend"]);
+    expect(shellWords(out.cleanupCommand)).toEqual(["sudo", spaced, "uninstall", "-g", "--prefix", "/usr/local", "@songsid/agend"]);
   });
 
   it("successful removal has no warning and runs one sudo", () => {
@@ -98,9 +98,9 @@ describe("retireSystemCopy: refused removal is a warning plus a verbatim command
     const out = retireSystemCopy({
       run: (command: string, args: string[]) => { seen.push([command, ...args]); return result(0); },
       log: () => {},
-    }, NPM);
+    }, NPM, undefined, "/usr/local");
     expect(out).toEqual({ ok: true });
-    expect(seen).toEqual([["sudo", "-n", NPM, "uninstall", "-g", "@songsid/agend"]]);
+    expect(seen).toEqual([["sudo", "-n", NPM, "uninstall", "-g", "--prefix", "/usr/local", "@songsid/agend"]]);
   });
 
   it("missing npm path is still a failure (caller error, #1490)", () => {
@@ -175,8 +175,8 @@ describe("cleanup receipt owner fence (update-marker helpers)", () => {
   it("cleanupCommand survives byte-exact (double spaces, long paths)", () => {
     const dir = seed({ adapterId: "a", chatId: "c", messageId: "m-6" });
     const receipt = markCleanupPending(dir);
-    const cmd = `sudo '/home/u/with  two/.nvm/versions/node/v22.0.0/bin/npm' uninstall -g @songsid/agend`;
-    const long = `sudo '/home/u/${"x".repeat(150)}/.nvm/versions/node/v22.23.3/bin/npm' uninstall -g @songsid/agend`;
+    const cmd = `sudo '/home/u/with  two/.nvm/versions/node/v22.0.0/bin/npm' uninstall -g --prefix '/usr/local' @songsid/agend`;
+    const long = `sudo '/home/u/${"x".repeat(150)}/.nvm/versions/node/v22.23.3/bin/npm' uninstall -g --prefix '/usr/local' @songsid/agend`;
     expect(writeCleanupOutcome(dir, receipt, { warning: "w", cleanupCommand: cmd })).toBe(true);
     expect(readUpdateProgress(dir)?.progress.cleanupCommand).toBe(cmd);
     const dir2 = seed({ adapterId: "a", chatId: "c", messageId: "m-7" });
@@ -247,7 +247,7 @@ function cliRig(sudoUninstallStatus: number) {
   const script = names.map(name => `const ${name} = ${closures.get(name)};`).join("\n");
   runInContext(ts.transpileModule(script, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText.replaceAll("import(", "load("), context);
   const activate = runInContext("activateVerified", context) as (verified: unknown, viaNvm: boolean) => Promise<void>;
-  const verified = { ...w.verified, agendPath: w.entry, version: "2.2.0", rollback: { root: w.npmRoot, prefix: w.prefix, preimage: w.preimage }, retireSystemCopy: true, npmPath: NPM };
+  const verified = { ...w.verified, agendPath: w.entry, version: "2.2.0", rollback: { root: w.npmRoot, prefix: w.prefix, preimage: w.preimage }, retireSystemCopy: true, retirePrefix: "/usr/local", npmPath: NPM };
   return { w, process, console, stages, commands, activate, verified, dataDir };
 }
 
@@ -259,7 +259,7 @@ describe("CLI: refused removal exits 0, prints once, records against its receipt
     expect(h.process.exitCode).toBe(0);
     const logged = h.console.log.mock.calls.flat().join("\n");
     expect(logged.match(/⚠️/g)?.length, "exactly one warning print (P3-1)").toBe(1);
-    expect(logged).toContain(`$ sudo '${NPM}' uninstall -g @songsid/agend`);
+    expect(logged).toContain(`$ sudo '${NPM}' uninstall -g --prefix '/usr/local' @songsid/agend`);
     expect(h.console.error.mock.calls.flat().join("\n")).not.toContain("✗");
     const sudoCalls = h.commands.filter(c => c[0] === "sudo");
     expect(sudoCalls.length).toBeGreaterThan(0);
@@ -267,7 +267,7 @@ describe("CLI: refused removal exits 0, prints once, records against its receipt
     const stored = readUpdateProgress(h.dataDir)?.progress;
     expect(stored?.cleanup).toBe("done");
     expect(stored?.warning).toContain("Old system install was not removed");
-    expect(stored?.cleanupCommand).toBe(`sudo '${NPM}' uninstall -g @songsid/agend`);
+    expect(stored?.cleanupCommand).toBe(`sudo '${NPM}' uninstall -g --prefix '/usr/local' @songsid/agend`);
   });
 });
 
@@ -373,7 +373,7 @@ describe("cleanup watch wiring on the fleet (Prism a/b)", () => {
 describe("chat /update shows success plus the cleanup lines", () => {
   it("complete summary carries warning and command; absent without them; ignored off update mode", () => {
     const base = { running: 2, total: 2, version: "2.2.1", pausedNames: [] as string[] };
-    const cmd = `sudo '/home/u/${"x".repeat(150)}/.nvm/versions/node/v22.23.3/bin/npm' uninstall -g @songsid/agend`;
+    const cmd = `sudo '/home/u/${"x".repeat(150)}/.nvm/versions/node/v22.23.3/bin/npm' uninstall -g --prefix '/usr/local' @songsid/agend`;
     const withWarning = formatRestartProgressCompletion(
       "update", { ...base, warningText: "Old system install was not removed (sudo refused); remove it by hand.", warningCommand: cmd }, 0, 25_000);
     expect(withWarning).toContain("✅ AgEnD updated to v2.2.1; 2/2 agents running");

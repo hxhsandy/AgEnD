@@ -36,6 +36,7 @@ import { compareSemver } from "./update-check.js";
 import { SYSINFO_BACKEND_IDS, type BackendCliVersionSnapshot, type SysInfoBackendId } from "./backend/types.js";
 import { recordInternalRequest, withOrigin } from "./fleet-control-audit.js";
 import { resolveInstalledAgend } from "./update-dispatch.js";
+import { sameUpdateMarker, updateMarkerIdentity } from "./update-marker.js";
 import { resolveUpdateLaunch, openUpdateLog, updateLogPath, watchUpdateLaunch } from "./update-launch.js";
 import { selfCommand } from "./cli-entry.js";
 import { GENERAL_POINTING_REFUSALS, placeSuffix } from "./topic-link.js";
@@ -1737,11 +1738,16 @@ export class TopicCommands {
     const sent = await adapter.sendText(chatId, t("update.progress.preparing", 0), { threadId });
     this.ctx.beginUpdateProgress?.(adapter, chatId, threadId, sent.messageId);
 
+    const ownedMarker = updateMarkerIdentity(this.ctx.dataDir);
+    const fail = (message: string) => {
+      if (!ownedMarker || sameUpdateMarker(ownedMarker, updateMarkerIdentity(this.ctx.dataDir))) this.ctx.failUpdateProgress?.(message);
+    };
+
     // The CLI picks the channel from the installed version it replaces; see UPDATE_COMMAND. #1450 C5: the INSTALLED
     // agend, verified by identity, by absolute path — or a refusal, never whatever `agend` is first on PATH.
     const installed = await resolveInstalledAgend();
     if (!installed.ok) {
-      this.ctx.failUpdateProgress?.(`${t("update.failure.shell")} ${t("update.failure.installed", installed.reason)}`);
+      fail(`${t("update.failure.shell")} ${t("update.failure.installed", installed.reason)}`);
       return;
     }
     const { spawn } = await import("node:child_process");
@@ -1749,11 +1755,11 @@ export class TopicCommands {
     recordInternalRequest(this.ctx.dataDir, "update", origin);
     const launch = await resolveUpdateLaunch(installed.agend);
     if (!launch.ok) {
-      this.ctx.failUpdateProgress?.(`${t("update.failure.shell")} ${t("update.failure.independent", launch.reason)}`);
+      fail(`${t("update.failure.shell")} ${t("update.failure.independent", launch.reason)}`);
       return;
     }
     if (!this.ctx.hasFleetAdmins(msg.adapterId) || !this.ctx.isFleetAdmin(msg.userId, msg.adapterId) || this.ctx.isFleetStopping()) {
-      this.ctx.failUpdateProgress?.(t("not_authorized"));
+      fail(t("not_authorized"));
       return;
     }
     const logPath = updateLogPath(this.ctx.dataDir);
@@ -1763,7 +1769,7 @@ export class TopicCommands {
       detached: true, stdio: ["ignore", logFd ? logFd.fd : "ignore", logFd ? logFd.fd : "ignore"], env: withOrigin(origin),
     });
     if (logFd) closeSync(logFd.fd);
-    watchUpdateLaunch(child, message => this.ctx.failUpdateProgress?.(message), logFd ? logPath : undefined, logFd?.offset, installed.agend);
+    watchUpdateLaunch(child, message => fail(message), logFd ? logPath : undefined, logFd?.offset, installed.agend);
     child.unref();
   }
 

@@ -459,8 +459,9 @@ function Find-ExistingAgend {
     if ($record) { $candidates += ,@($record.Distro, $record.User) }
     foreach ($d in @('Ubuntu-24.04', 'Ubuntu-22.04', 'Ubuntu')) { $candidates += ,@($d, 'root') }
     foreach ($c in $candidates) {
-        $r = Invoke-AgendInWsl $c[0] $c[1] 'command -v agend >/dev/null 2>&1 && echo AGEND_FOUND'
+        $r = Invoke-AgendInWsl $c[0] $c[1] 'set -f; IFS=; if agend --version >/dev/null 2>&1; then echo AGEND_FOUND; elif [ -f ${AGEND_HOME:-$HOME/.agend}/fleet.yaml ] || [ -f $(npm root -g 2>/dev/null)/@songsid/agend/package.json ]; then echo AGEND_BROKEN; fi'
         if ($r.Code -eq 0 -and $r.Text -match 'AGEND_FOUND') { return @{ Distro = $c[0]; User = $c[1] } }
+        if ($r.Code -eq 0 -and $r.Text -match 'AGEND_BROKEN') { return @{ Distro = $c[0]; User = $c[1]; Broken = $true } }
     }
     return $null
 }
@@ -993,6 +994,15 @@ Write-Host ""
 if (-not $Force -and -not (Test-Path $ProgressFile)) {
     $existing = Find-ExistingAgend
     if ($existing) {
+        if ($existing.Broken) {
+            Write-Warn "找到現有 AgEnD 設定，但 agend 指令無法執行。正在修復安裝；不會重新設定 Linux、後端或 fleet.yaml。"
+            $repair = Invoke-AgendInWsl $existing.Distro $existing.User 'set -o pipefail; curl --connect-timeout 15 --max-time 120 -fsSL https://songsid.github.io/AgEnD/install.sh | bash && agend --version'
+            Write-Host $repair.Text
+            if ($repair.Code -ne 0) {
+                Write-Warn "修復沒有完成，現有資料仍保留。請依上面的原因處理後，再執行同一行安裝指令。"
+                Read-Host "按 Enter 結束"; exit 1
+            }
+        }
         Write-Ok ("這台電腦已經裝好 AgEnD（{0}，使用者 {1}）。不會重新安裝，也不會動到現有的設定。" -f $existing.Distro, $existing.User)
         $ans = Read-Host "  要更新桌面捷徑嗎？（「AgEnD 儀表板」和「AgEnD 重新啟動」）(Y/n)"
         if ($ans -notmatch '^\s*[nN]') {

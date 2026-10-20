@@ -78,12 +78,15 @@ describe("the updater's prefix lock", () => {
     expect(acquireInstallLock(p.prefix, target("/h"), reused.deps(400)).ok).toBe(true);
   });
 
-  it("a lock that cannot be parsed blocks, naming the file — it is never taken", () => {
+  it("a corrupt lock is reclaimed automatically and preserved for diagnosis", () => {
     const p = prefix(), w = world({ 100: "s1" });
     writeFileSync(join(p.prefix, INSTALL_LOCK_FILE), "{ not json");
     const r = acquireInstallLock(p.prefix, target("/h"), w.deps(100));
-    expect(r).toMatchObject({ ok: false, reason: expect.stringContaining("cannot be read as a lock") });
-    expect(readFileSync(join(p.prefix, INSTALL_LOCK_FILE), "utf8")).toBe("{ not json");
+    expect(r).toMatchObject({ ok: true });
+    expect(parseInstallLock(readFileSync(join(p.prefix, INSTALL_LOCK_FILE), "utf8"))).toMatchObject({ pid: 100 });
+    const preserved = readdirSync(p.prefix).find(name => name.includes(".stale-"));
+    expect(preserved).toBeTruthy();
+    expect(readFileSync(join(p.prefix, preserved!), "utf8")).toBe("{ not json");
   });
 
   it("no own start time → refuses (its lock could not be told from a stale one)", () => {
@@ -146,12 +149,12 @@ describe("#1472 review: ownership under stale recovery and uncertain reads", () 
     expect(acquireInstallLock(p.prefix, target("/a"), w.deps(100))).toMatchObject({ ok: true });
     expect(readdirSync(realpathSync(p.prefix)).filter(f => f.startsWith(INSTALL_LOCK_FILE))).toEqual([INSTALL_LOCK_FILE]);
   });
-  it("a holder that exists but whose start time cannot be read is UNKNOWN: blocks the updater and the postinstall, never stale", () => {
+  it("a holder that exists but whose start time cannot be read is UNKNOWN: blocks a concurrent updater but not manual repair, never stale", () => {
     const p = prefix(), w = world({ 100: "s1" });
     stale(p, 300, "s-old");
     const deps = { ...w.deps(100), exists: (pid: number) => pid === 300 || pid === 100 };
     expect(acquireInstallLock(p.prefix, target("/a"), deps)).toMatchObject({ ok: false, reason: expect.stringContaining("cannot be told") });
-    expect(admission.admit(p.pkg, { env: {}, processStart: () => null, exists: () => true })).toMatchObject({ ok: false, reason: expect.stringContaining("cannot be told") });
+    expect(admission.admit(p.pkg, { env: {}, processStart: () => null, exists: () => true })).toMatchObject({ ok: true });
   });
   it("a reused pid (another start time) is proven stale; a gone pid is proven stale", () => {
     const p = prefix(), w = world({ 100: "s1", 300: "s-new" });
@@ -165,11 +168,11 @@ describe("#1472 review: ownership under stale recovery and uncertain reads", () 
     expect(read("Etc/GMT+12")).toBe(utc);
     expect(read("Asia/Taipei")).toBe(utc);
   });
-  it.each([["a fractional pid", 100.5], ["a negative pid", -1], ["a pid as text", "100"]] as const)("the postinstall refuses a lock record with %s, as the updater does", (_n, pid) => {
+  it.each([["a fractional pid", 100.5], ["a negative pid", -1], ["a pid as text", "100"]] as const)("manual npm ignores a malformed lock with %s; parsing remains strict", (_n, pid) => {
     const p = prefix();
     writeFileSync(join(p.prefix, INSTALL_LOCK_FILE), JSON.stringify({ pid, processStart: "s1", prefix: realpathSync(p.prefix), targetSpec: "x", agendHome: "/h", token: "e".repeat(36), createdAt: "t" }));
     expect(parseInstallLock(readFileSync(join(p.prefix, INSTALL_LOCK_FILE), "utf8"))).toBeNull();
-    expect(admission.admit(p.pkg, { env: {}, processStart: () => "s1", exists: () => true })).toMatchObject({ ok: false, reason: expect.stringContaining("cannot be read as a lock") });
+    expect(admission.admit(p.pkg, { env: {}, processStart: () => "s1", exists: () => true })).toMatchObject({ ok: true });
   });
 });
 
@@ -188,34 +191,34 @@ describe("the postinstall's admission (launcher/install-admission.cjs)", () => {
     expect(admission.admit(p.pkg, { env: { AGEND_INSTALL_TOKEN: lock.token }, processStart: start, exists })).toMatchObject({ ok: true, why: "the updater's own install" });
   });
 
-  it.each([["no token", {}], ["another token", { AGEND_INSTALL_TOKEN: "f".repeat(36) }]])("a foreign install during the transition refuses: %s", (_n, env) => {
+  it.each([["no token", {}], ["another token", { AGEND_INSTALL_TOKEN: "f".repeat(36) }]])("manual npm continues with a live-updater warning: %s", (_n, env) => {
     const { p, start, exists } = held();
-    expect(admission.admit(p.pkg, { env, processStart: start, exists })).toMatchObject({ ok: false, reason: expect.stringContaining("is installing into") });
+    expect(admission.admit(p.pkg, { env, processStart: start, exists })).toMatchObject({ ok: true, warning: expect.stringContaining("agend update") });
   });
 
-  it("a late token (the transition settled, the lock is gone) refuses", () => {
+  it("a leftover token cannot prevent manual repair", () => {
     const { p, lock, start, exists } = held();
     lock.release();
-    expect(admission.admit(p.pkg, { env: { AGEND_INSTALL_TOKEN: lock.token }, processStart: start, exists })).toMatchObject({ ok: false, reason: expect.stringContaining("late or stale token") });
+    expect(admission.admit(p.pkg, { env: { AGEND_INSTALL_TOKEN: lock.token }, processStart: start, exists })).toMatchObject({ ok: true });
   });
 
-  it("a stale token (its owner died) refuses; with no token a stale lock is just an external install", () => {
+  it("manual repair continues for dead owners, with or without a leftover token", () => {
     const { p, lock } = held();
-    expect(admission.admit(p.pkg, { env: { AGEND_INSTALL_TOKEN: lock.token }, processStart: () => null, exists: () => false })).toMatchObject({ ok: false, reason: expect.stringContaining("is gone") });
+    expect(admission.admit(p.pkg, { env: { AGEND_INSTALL_TOKEN: lock.token }, processStart: () => null, exists: () => false })).toMatchObject({ ok: true });
     expect(admission.admit(p.pkg, { env: {}, processStart: () => null, exists: () => false })).toMatchObject({ ok: true });
   });
 
-  it("no lock, no token: a plain external install proceeds; an unreadable lock refuses", () => {
+  it("no lock, no token: a plain external install proceeds; an unreadable lock does not block repair", () => {
     const p = prefix();
-    expect(admission.admit(p.pkg, { env: {} })).toMatchObject({ ok: true, why: "no lock: an external install" });
+    expect(admission.admit(p.pkg, { env: {} })).toMatchObject({ ok: true, why: "no readable lock: an external install" });
     writeFileSync(join(p.prefix, INSTALL_LOCK_FILE), "garbage");
-    expect(admission.admit(p.pkg, { env: {} })).toMatchObject({ ok: false, reason: expect.stringContaining("cannot be read as a lock") });
+    expect(admission.admit(p.pkg, { env: {} })).toMatchObject({ ok: true });
   });
 
-  it("the prefix comes from where the package is, never from the environment; a non-global install with a token refuses", () => {
+  it("the prefix comes from where the package is, never from the environment; a non-global install with a token still proceeds", () => {
     expect(admission.globalPrefix("/usr/local/lib/node_modules/@songsid/agend")).toBe("/usr/local");
     expect(admission.globalPrefix("/home/u/proj/node_modules/@songsid/agend")).toBeNull();
-    expect(admission.admit("/home/u/proj", { env: { AGEND_INSTALL_TOKEN: "a".repeat(32) } })).toMatchObject({ ok: false });
+    expect(admission.admit("/home/u/proj", { env: { AGEND_INSTALL_TOKEN: "a".repeat(32) } })).toMatchObject({ ok: true });
     expect(admission.admit("/home/u/proj", { env: {} })).toMatchObject({ ok: true });
   });
 
@@ -229,7 +232,7 @@ describe("the postinstall's admission (launcher/install-admission.cjs)", () => {
       expect(admission.admit(p.pkg, { env: { AGEND_INSTALL_TOKEN: "c".repeat(32) } })).toMatchObject({ ok: true });
       holder.kill("SIGKILL");
       await new Promise(r => holder.once("exit", r));
-      expect(admission.admit(p.pkg, { env: { AGEND_INSTALL_TOKEN: "c".repeat(32) } })).toMatchObject({ ok: false, reason: expect.stringContaining("is gone") });
+      expect(admission.admit(p.pkg, { env: { AGEND_INSTALL_TOKEN: "c".repeat(32) } })).toMatchObject({ ok: true });
     } finally { holder.kill("SIGKILL"); }
   });
 });

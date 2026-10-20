@@ -35,9 +35,7 @@ var PROOF = [
 function refuse(reason, recovery) {
   // #1487: "the previous install stays" is true only when AgEnD 2.1's updater did not start this install.
   var state = oldUpdater.oldUpdaterState(process.env);
-  var back = state === "removed" ? "npm is rolling this install back.\n"
-    : state === "kept" ? "npm is rolling this install back; the previous install stays.\n"
-    : "npm is rolling this install back; a previous install, if any, stays — unless AgEnD 2.1's updater started this.\n";
+  var back = "npm install failed; verify the previous command before restarting the service.\n";
   var note = oldUpdater.oldUpdaterNote(state);
   process.stderr.write("\n  AgEnD cannot be installed here: " + reason + ".\n  " + back + "  " + recovery + "\n" + (note ? note : "") + "\n");
   process.exit(1);
@@ -62,9 +60,9 @@ function main(deps) {
     try { fs.unlinkSync(file); } catch (e) { /* checked below */ }
     if (!select.absent(file)) refuse("an old runtime receipt at " + file + " cannot be removed", "remove it, then: npm install -g @songsid/agend@" + pkg.manifest.version);
   });
-  // C1: an `agend update` owns this prefix right now → only its own npm child may install (install-admission.cjs).
+  // #2264: warn for a proven live updater; no lock can block manual npm repair.
   var admitted = admission.admit(pkg.dir, { env: d.env, processStart: d.processStart });
-  if (!admitted.ok) refuse(admitted.reason, "Never run two installs of @songsid/agend into one prefix at once, or one while `agend update` runs.");
+  if (admitted.warning) process.stderr.write("  Warning: " + admitted.warning + "\n");
   var host = d.host || platform.hostPlatform();
   var running = d.versions || { node: process.versions.node, napi: Number(process.versions.napi) };
   var engines = (pkg.manifest.engines && pkg.manifest.engines.node) || ">=22.14.0";

@@ -1,13 +1,7 @@
 "use strict";
-// #1450 C1: may this install of @songsid/agend proceed? Called by the postinstall, inside npm's transaction (a refusal
-// makes npm roll the install back). The lock is the updater's (src/install-lock.ts): `<prefix>/.agend-install.lock`,
-// next to the package it guards. The prefix comes from WHERE this package is — never from the environment.
-//   - no lock, no token            → a plain external install: proceed (the documented restriction covers the rest);
-//   - a live lock, its own token   → the updater's own npm child: proceed;
-//   - a live lock, other/no token  → a foreign install while AgEnD owns the prefix: refuse;
-//   - a token, but no live lock    → late or stale (it cannot authorise a successor): refuse;
-//   - a lock that cannot be read   → refuse, naming the file (unknown ownership blocks).
-// Same syntax constraints as runtime-platform.cjs: this may run on an old Node.
+// #2264: manual npm is the recovery path. A lock can only warn, never refuse
+// an install. Process identity readers are also shared by the updater mutex.
+// Keep syntax compatible with the old system Node that runs npm.
 var fs = require("fs");
 var path = require("path");
 var childProcess = require("child_process");
@@ -132,26 +126,22 @@ function admit(pkgDir, deps) {
   var real;
   try { real = fs.realpathSync(pkgDir); } catch (e) { real = pkgDir; }
   var prefix = globalPrefix(real);
-  if (!prefix) return token ? { ok: false, reason: "an AgEnD install token was presented, but this is not a global install it could belong to" } : { ok: true, why: "not a global install" };
+  if (!prefix) return { ok: true, why: "not a global install" };
   try { prefix = fs.realpathSync(prefix); } catch (e) { /* as derived */ }
   var lockPath = path.join(prefix, LOCK);
   var text = null;
   try { text = fs.readFileSync(lockPath, "utf8"); } catch (e) {
-    if (e.code !== "ENOENT") return { ok: false, reason: "the install lock " + lockPath + " cannot be read (" + e.code + ")" };
+    // Manual npm is the recovery path: no install-lock condition refuses it.
   }
   if (text === null) {
-    return token ? { ok: false, reason: "an AgEnD install token was presented, but no update holds " + lockPath + " (a late or stale token)" } : { ok: true, why: "no lock: an external install" };
+    return { ok: true, why: "no readable lock: an external install" };
   }
   var lock = parse(text);
-  if (!lock) return { ok: false, reason: "the install lock " + lockPath + " cannot be read as a lock; if no `agend update` is running, remove it and retry" };
+  if (!lock) return { ok: true, why: "a corrupt lock cannot block npm recovery" };
   var state = holderState(lock, d);
-  if (state === "unknown") return { ok: false, reason: "whether the AgEnD update that holds " + lockPath + " (pid " + lock.pid + ") is still running cannot be told; retry" };
-  if (state === "stale") {
-    return token ? { ok: false, reason: "the AgEnD update that held " + lockPath + " is gone, so its token cannot authorise this install" } : { ok: true, why: "a stale lock and no token: an external install" };
-  }
-  if (lock.prefix !== prefix) return { ok: false, reason: "the install lock " + lockPath + " names another prefix (" + lock.prefix + ")" };
+  if (state !== "live" || lock.prefix !== prefix) return { ok: true, why: "no proven live updater" };
   if (token && token === lock.token) return { ok: true, why: "the updater's own install" };
-  return { ok: false, reason: "an `agend update` (pid " + lock.pid + ") is installing into " + prefix + " right now; wait for it, then retry" };
+  return { ok: true, why: "manual npm recovery is allowed", warning: "An `agend update` (pid " + lock.pid + ") is active in " + prefix + "; manual npm recovery continues. Avoid concurrent updates." };
 }
 
 module.exports = {

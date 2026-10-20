@@ -100,7 +100,7 @@ describe("#1487: a refusal after AgEnD 2.1's updater says the previous AgEnD is 
   const note = createRequire(import.meta.url)("../launcher/old-updater-note.cjs") as {
     oldUpdaterState(env: Record<string, string | undefined>, now?: number): "removed" | "maybe" | "kept"; FRESH_MS: number;
   };
-  const RESTORE = /npm install -g @songsid\/agend@2\.1\.12\n\s+agend install/;
+  const RESTORE = /npm install -g @songsid\/agend@[0-9A-Za-z.+-]+\n\s+agend start/;
   const home = () => { const d = mkdtempSync(join(tmpdir(), "agend-1487-")); return d; };
   const marker = (dir: string, startedAt: number | string) => writeFileSync(join(dir, "update-in-progress.json"), JSON.stringify({ startedAt, pid: 4242 }));
 
@@ -108,7 +108,7 @@ describe("#1487: a refusal after AgEnD 2.1's updater says the previous AgEnD is 
     const now = Date.parse("2026-10-10T06:00:00Z");
     const d = home();
     expect(note.oldUpdaterState({ AGEND_HOME: d }, now)).toBe("maybe");
-    marker(d, now - 60_000); expect(note.oldUpdaterState({ AGEND_HOME: d }, now)).toBe("removed");
+    marker(d, now - 60_000); expect(note.oldUpdaterState({ AGEND_HOME: d }, now)).toBe("maybe");
     expect(note.oldUpdaterState({ AGEND_HOME: d, AGEND_UPDATE_KEEPS_PREVIOUS: "1" }, now)).toBe("kept");
     marker(d, now - note.FRESH_MS - 1); expect(note.oldUpdaterState({ AGEND_HOME: d }, now), "stale").toBe("maybe");
     marker(d, now + 60_000); expect(note.oldUpdaterState({ AGEND_HOME: d }, now), "from the future").toBe("maybe");
@@ -121,8 +121,9 @@ describe("#1487: a refusal after AgEnD 2.1's updater says the previous AgEnD is 
     const d = home(); marker(d, Date.now() - 30_000);
     const { exitCode, stderr } = runGuard("20.19.0", GUARD, { AGEND_HOME: d });
     expect(exitCode).toBe(1);
-    expect(stderr).toContain("ALREADY\n  REMOVED the previous AgEnD");
-    expect(stderr).toContain("there is no `agend`");
+    expect(stderr).not.toContain("REMOVED the previous AgEnD");
+    expect(stderr).not.toContain("@2.1.12");
+    expect(stderr).toContain("If the agend command is missing");
     expect(stderr).toMatch(RESTORE);
     rmSync(d, { recursive: true, force: true });
   });
@@ -130,7 +131,7 @@ describe("#1487: a refusal after AgEnD 2.1's updater says the previous AgEnD is 
   it("the guard, a plain npm install: the same commands, said conditionally; 2.2's own updater: no such note", () => {
     const plain = runGuard("20.19.0");
     expect(plain.exitCode).toBe(1);
-    expect(plain.stderr).toContain("If this install was started by AgEnD 2.1's updater");
+    expect(plain.stderr).toContain("If the agend command is missing");
     expect(plain.stderr).toMatch(RESTORE);
     const ours = runGuard("20.19.0", GUARD, { AGEND_UPDATE_KEEPS_PREVIOUS: "1" });
     expect(ours.exitCode).toBe(1);

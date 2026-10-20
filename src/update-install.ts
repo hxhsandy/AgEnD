@@ -2,17 +2,19 @@
  * The install half of `agend update` (#1446): install the target release, prove the installed `agend` is that
  * release and can load its native module, and only then clean up anything the old install left behind.
  *
- * Order is the point. The current install is never removed before the new one has succeeded: npm replaces a global
- * package in place — including a global `npm link` in the same prefix — and leaves it untouched when the install
- * fails (verified with a failing-preinstall package on npm 10). The old updater ran `npm unlink -g @songsid/agend`
- * first, on a check that matched every normal global install, so a failed install left no agend at all.
+ * npm owns replacement; AgEnD never unlinks the modern install first.
+ * Lifecycle rollback is normal, but a failed/signal result must still prove
+ * the predecessor before discarding AgEnD's exceptional recovery copy.
  *
  * Every command goes through an injected runner, so the sequence is testable without npm, nvm or a fleet.
  */
 import { dirname, join } from "node:path";
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { shellQuote } from "./backend/types.js";
 import { restorePackagePreimage, takePackagePreimage, type PackagePreimage } from "./package-preimage.js";
+import { createRequire } from "node:module";
+const recovery = createRequire(import.meta.url)("../launcher/install-recovery.cjs") as { heal(prefix: string, options?: { noNpmRunning: boolean }): string[]; legacyBinConflict(prefix: string): boolean };
+export const UPDATE_INSTALL_TIMEOUT_MS = 10 * 60_000;
 
 export interface CommandResult {
   status: number | null;
@@ -65,7 +67,7 @@ export interface UpdateInstallPlan {
 }
 
 export type UpdateInstallOutcome =
-  | { ok: true; agendPath: string; version: string; dir: string; bin: string; entry: string; node: string; rollback?: { root: string; prefix: string; preimage: PackagePreimage | null }; /** nvm transition: retire the old system copy once activation settles. */ retireSystemCopy?: true; /** Absolute path of the npm binary used to install this version — same binary passed to sudo for retirement. */ npmPath?: string }
+  | { ok: true; agendPath: string; version: string; dir: string; bin: string; entry: string; node: string; rollback?: { root: string; prefix: string; preimage: PackagePreimage | null }; retireSystemCopy?: true; retirePrefix?: string; npmPath?: string }
   | { ok: false; stage: "preflight" | "lock" | "install" | "verify"; message: string };
 
 /**
@@ -220,20 +222,31 @@ export function verifyInstalledPackage(plan: UpdateInstallPlan, runner: CommandR
 }
 
 export function runUpdateInstall(plan: UpdateInstallPlan, runner: CommandRunner): UpdateInstallOutcome {
+  const heal = (prefix: string): string[] => {
+    const scan = runner.run("ps", ["-A", "-o", "comm="], { timeoutMs: 5_000 });
+    return recovery.heal(prefix, { noNpmRunning: scan.status === 0 && !scan.stdout.split("\n").some(line => /(?:^|\/)npm(?:\s|$)/.test(line.trim())) });
+  };
   // A real local link is only reported: the install below replaces it in place, and a failed install leaves it.
   const root = runner.run("npm", ["root", "-g"], { timeoutMs: 15_000 });
+  let legacyPrefix: string | undefined;
+  let localLink = false;
   if (root.status === 0 && root.stdout.trim()) {
     const entry = join(root.stdout.trim(), "@songsid", "agend");
+    try {
+      const manifest = JSON.parse(readFileSync(join(entry, "package.json"), "utf8"));
+      if (manifest.name === "@songsid/agend" && /^2\.1\./.test(manifest.version) && root.stdout.trim().endsWith("/lib/node_modules")) legacyPrefix = dirname(dirname(root.stdout.trim()));
+    } catch { /* no positively identified legacy layout */ }
     const link = runner.run("readlink", [entry], { timeoutMs: 5_000 });
     if (link.status === 0) {
       const real = runner.run("readlink", ["-f", entry], { timeoutMs: 5_000 });
       if (real.status === 0 && isLocalLinkTarget(true, real.stdout.trim())) {
+        localLink = true;
         runner.log(`  ⚠️  The global agend is a local npm link (${real.stdout.trim()}); the release install replaces it.`);
       }
     }
   }
 
-  if (plan.viaNvm && runner.run("bash", ["-c", NVM_PREPARE_SCRIPT, "bash", plan.nvmSh], { inherit: true }).status !== 0) {
+  if (plan.viaNvm && runner.run("bash", ["-c", NVM_PREPARE_SCRIPT, "bash", plan.nvmSh], { inherit: true, timeoutMs: 5 * 60_000 }).status !== 0) {
     return { ok: false, stage: "install", message: "  Failed to install Node 22 via nvm. The current install was not touched." };
   }
   if (plan.viaNvm) {
@@ -267,10 +280,13 @@ export function runUpdateInstall(plan: UpdateInstallPlan, runner: CommandRunner)
   // tell that apart from AgEnD 2.1's updater, which removes it before installing (launcher/old-updater-note.cjs).
   const env: Record<string, string> = { AGEND_UPDATE_KEEPS_PREVIOUS: "1" };
   let rollback: { root: string; prefix: string; preimage: PackagePreimage | null } | undefined;
+  // Repair/fresh install uses npm directly and never consults an updater lock.
+  // Both entry points still heal known leftovers before npm can hit reify.
+  const prefix = inInstallEnv(runner, plan, [npmBin, "prefix", "-g"], { timeoutMs: 15_000 });
+  const where = prefix.stdout.trim().split("\n").pop()?.trim() ?? "";
+  if (prefix.status !== 0 || !where) return { ok: false, stage: "install", message: "Could not read npm's install prefix; nothing was changed." };
+  for (const path of heal(where)) runner.log(`  Preserved abandoned install artifact at ${path}`);
   if (plan.lock) {
-    const prefix = inInstallEnv(runner, plan, [npmBin, "prefix", "-g"], { timeoutMs: 15_000 });
-    const where = prefix.stdout.trim().split("\n").pop()?.trim() ?? "";
-    if (prefix.status !== 0 || !where) return { ok: false, stage: "lock", message: "  ✗ Could not ask npm which prefix it installs into; nothing was changed." };
     const lock = plan.lock(where);
     if (!lock.ok) return { ok: false, stage: "lock", message: `  ✗ Not updating: ${lock.reason}. Nothing was changed.` };
     env.AGEND_INSTALL_TOKEN = lock.token;
@@ -283,14 +299,35 @@ export function runUpdateInstall(plan: UpdateInstallPlan, runner: CommandRunner)
       rollback = { root, prefix: where, preimage: taken.preimage };
     }
   }
-  const install = inInstallEnv(runner, plan, [npmBin, "install", "-g", plan.pkg], { inherit: true, env });
+  // A positively identified old @suzuke bin conflict can be overwritten by
+  // npm without uninstalling its still-working payload first.
+  const installArgs = [npmBin, "install", "-g", ...(recovery.legacyBinConflict(where) ? ["--force"] : []), plan.pkg];
+  let install = inInstallEnv(runner, plan, installArgs, { env, timeoutMs: UPDATE_INSTALL_TIMEOUT_MS });
+  // One bounded retry of npm's known rename collision. Cleanup itself proves
+  // quiescence/type/owner/age; unknown files are never wildcard-deleted.
+  if (install.status !== 0 && /\b(?:ENOTEMPTY|EBUSY)\b/.test(install.stderr)) {
+    const prefix = rollback?.prefix ?? inInstallEnv(runner, plan, [npmBin, "prefix", "-g"], { timeoutMs: 15_000 }).stdout.trim();
+    if (prefix && heal(prefix).length) install = inInstallEnv(runner, plan, installArgs, { env, timeoutMs: UPDATE_INSTALL_TIMEOUT_MS });
+  }
+  if (install.stdout) runner.log(install.stdout);
+  if (install.stderr) runner.log(install.stderr);
   if (install.status !== 0) {
-    // npm rolled its own install back: the copy is not needed.
-    if (rollback?.preimage) rmSync(rollback.preimage.dir, { recursive: true, force: true });
+    if (rollback?.preimage) {
+      const previous = rollback.preimage;
+      let back = verifyInstalledPackage({ ...plan, targetVersion: previous.version }, runner, npmBin);
+      if (!back.ok) {
+        const restored = restorePackagePreimage(rollback.root, rollback.prefix, previous);
+        if (!restored.ok) return { ok: false, stage: "install", message: `  npm failed (${install.signal ?? install.status}); ${restored.reason}. Recovery copy retained at ${previous.dir}.` };
+        back = verifyInstalledPackage({ ...plan, targetVersion: previous.version }, runner, npmBin);
+        return { ok: false, stage: "install", message: back.ok
+          ? `  npm failed (${install.signal ?? install.status}); rolled back to v${previous.version}, which verifies. The running fleet was not restarted.`
+          : `  npm failed and the restored v${previous.version} did not verify: ${back.message}. Re-run the official installer; your data was not removed.` };
+      }
+      rmSync(previous.dir, { recursive: true, force: true });
+    }
     return {
       ok: false, stage: "install",
-      message: plan.viaNvm ? "  Failed to install via nvm. The current install was not touched."
-        : `  Failed to update; the current install was not touched. Try: npm install -g ${plan.pkg}`,
+      message: `  npm install failed (${install.signal ?? install.status}); ${rollback?.preimage ? `the previous v${rollback.preimage.version} verifies and was kept` : "the existing prefix was not retired"}. Re-run the official installer if the command is missing.`,
     };
   }
 
@@ -311,7 +348,7 @@ export function runUpdateInstall(plan: UpdateInstallPlan, runner: CommandRunner)
   if (rollback) Object.assign(verified, { rollback });
   // The old system copy an nvm install leaves behind is what the current service still runs: it is removed only once
   // the activation has settled on the new install (retireSystemCopy, called by the caller), never here.
-  if (plan.viaNvm) Object.assign(verified, { retireSystemCopy: true, npmPath: resolvedNpmPath ?? undefined });
+  if (plan.viaNvm && legacyPrefix && !localLink && legacyPrefix !== where) Object.assign(verified, { retireSystemCopy: true, retirePrefix: legacyPrefix, npmPath: resolvedNpmPath ?? undefined });
   return verified;
 }
 
@@ -355,7 +392,7 @@ export type RetireSystemCopyResult =
  *   (`\p{C}`: C0, DEL, C1 such as U+0085/U+009B, bidi overrides), ≤ 200 chars (#1737 review) — so
  *   the prose (whitespace-collapsed and sliced in the marker) can never mangle it. Anything else is left unnamed.
  */
-export function retireSystemCopy(runner: CommandRunner, npmPath?: string, oldCopyDir?: string): RetireSystemCopyResult {
+export function retireSystemCopy(runner: CommandRunner, npmPath?: string, oldCopyDir?: string, oldPrefix?: string): RetireSystemCopyResult {
   runner.log("  Note: removing old system install (may require sudo)...");
   // Use the exact npm binary that performed this install, so retirement uses the
   // same identity rather than re-querying a potentially-different sudo secure_path.
@@ -364,14 +401,15 @@ export function retireSystemCopy(runner: CommandRunner, npmPath?: string, oldCop
     runner.log(`  ✗ ${reason}`);
     return { ok: false, reason };
   }
-  const result = runner.run("sudo", ["-n", npmPath, "uninstall", "-g", "@songsid/agend"], { inherit: true, timeoutMs: 10_000 });
+  if (!oldPrefix || !oldPrefix.startsWith("/")) return { ok: true, warning: "The old install was kept: its exact legacy prefix was not proven." };
+  const result = runner.run("sudo", ["-n", npmPath, "uninstall", "-g", "--prefix", oldPrefix, "@songsid/agend"], { inherit: true, timeoutMs: 10_000 });
   if (result.status !== 0) {
     // #1660: retiring the old copy is cleanup. The new version is installed,
     // verified and running at this point, so a refused removal must not fail
     // the update — it becomes a warning plus a verbatim manual command.
     // `-n` is non-interactive: sudo fails fast here, it never prompts. No
     // further sudo calls on this path. The caller prints once (P3-1).
-    const cleanupCommand = `sudo ${shellQuote(npmPath)} uninstall -g @songsid/agend`;
+    const cleanupCommand = `sudo ${shellQuote(npmPath)} uninstall -g --prefix ${shellQuote(oldPrefix)} @songsid/agend`;
     const where = oldCopyDir && oldCopyDir.length <= 200 && /^\/[^\s\p{C}]*\/node_modules\/@songsid\/agend$/u.test(oldCopyDir)
       ? ` at ${oldCopyDir}` : "";
     const warning = `Old system install${where} was not removed (sudo refused); remove it by hand.`;
