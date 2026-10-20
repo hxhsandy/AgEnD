@@ -650,6 +650,12 @@ instance 的 statusline 寫下的額度。尚未登入的 profile 會顯示「�
 `/login claude-code <profile>` 與在主機上登入用的那行指令，不會顯示其他帳號的數字。沒有 Claude profile 的 fleet 仍只有一列 `Claude`，
 與以前完全相同。
 
+這台主機上的每個 Claude 登入都有一列，不論有沒有 instance 在用（#2236）：預設登入（有 profile 時顯示為
+`Claude (default)`），以及 `credential-profiles/claude-code/` 下的每個 profile。額度用完的訂閱通常正是已經沒有
+instance 在用的那個，所以它會留在畫面上，顯示 100% 與重置時間，或顯示用量端點限流。沒有 instance 使用且尚未登入的
+profile 不顯示。兩個登入若是同一個帳號，會顯示成兩列（AgEnD 無法從檔案判斷一個登入實際用的是哪個帳號）。Discord bot
+的活動狀態列仍只計算它自己執行中的 instance 用到的訂閱。
+
 有效的 Kiro profile 沒有可讀登入資料時仍顯示 signed-out 提示。是否顯示也依 provider
 而異：Codex 缺少 OAuth 額度查詢憑證時會省略，包括只有 API key 的 profile。各列不相加；
 不同 profile 名稱不保證不同計費帳號。
