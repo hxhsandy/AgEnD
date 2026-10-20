@@ -139,6 +139,7 @@ agend doctor                    # 執行 fleet 健康診斷
 agend doctor mcp                # 全 fleet MCP 健康檢查（IPC、配置路徑、重複、binary PATH）
 agend health                    # Fleet 健康檢查——列出問題與診斷
 agend validate                  # 驗證 fleet.yaml 與 classicBot.yaml
+agend validate --connections    # 印出 CONNECTIONS=<n>：fleet.yaml 的聊天連線數（給腳本用）
 agend backend doctor [backend]  # 檢查後端環境（執行檔、驗證、tmux、TERM）
 agend delivery scan-forged-envelopes --instance <name>  # 檢查 kiro instance 的 transcript 裡是否有 fleet 從未投遞過的 peer envelope（--all、--json）
 ```
@@ -158,6 +159,8 @@ agend setup --tunnel            # ……並公開出去，讓手機也能開
 `agend setup` 在健康 port 上開一個小表單，並印出**兩樣**東西：設定頁網址與設定碼。網址只代表頁面在哪，不是使用許可——隨機路徑只是讓人用猜的猜不到。真正的憑證是打進頁面的設定碼；憑證不進網址，轉發的訊息、shell 歷史、聊天軟體的連結預覽才帶不走完整權限。打錯五次就關頁，錯的碼與重播的 session cookie 共用額度；打錯路徑不算——否則找到主機的人不用找到頁面就能把它關掉。
 
 頁面在完成、15 分鐘到、或閒置 10 分鐘後自己關掉——沒人看著的設定表單就是暴露面。
+
+**Web only (no bot)**（#2233）是 Telegram、Discord 之外的第三個選項：不用 bot token、不用管理員 ID、也沒有要驗證的東西。它只寫入第一個 agent、不建立聊天連線，所以 AgEnD 從網頁儀表板使用（在機器上用 `agend web --code` 取得登入碼），後端 CLI 也在那裡登入（設定 → Agent → 登入）。之後可以在設定加上 Discord 或 Telegram。主機確認（`agend settings confirm <id>`）一樣要做。
 
 `--tunnel` 每次都要你親口確認，沒有旗標或設定可以預先答應；沒有終端的執行直接拒絕，不當作你同意了。手機設定走 Cloudflare 通道，你打進去的 bot token 會經過 Cloudflare 的邊緣——不能接受就回機器上設。
 
