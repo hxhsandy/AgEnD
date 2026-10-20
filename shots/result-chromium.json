@@ -1,0 +1,36 @@
+{
+ "engine": "chromium",
+ "cases": {
+  "desk-light-en": {
+   "mounted": true,
+   "barNamesSender": true,
+   "sent200": true,
+   "handedReplyTo": true,
+   "barGone": true,
+   "quoteShown": true,
+   "jumpFlashes": true,
+   "menuItems": true,
+   "escCancels": true,
+   "rReplies": true,
+   "noPageErrors": true,
+   "errors": [],
+   "engineOwn": []
+  },
+  "phone-dark-zh-TW": {
+   "mounted": true,
+   "drawerShut": true,
+   "barNamesSender": true,
+   "sent200": true,
+   "handedReplyTo": true,
+   "barGone": true,
+   "quoteShown": true,
+   "jumpFlashes": true,
+   "menuItems": true,
+   "escCancels": true,
+   "noPageErrors": true,
+   "errors": [],
+   "engineOwn": []
+  }
+ },
+ "pass": true
+}

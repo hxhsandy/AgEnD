@@ -1,0 +1,48 @@
+{
+ "engine": "webkit",
+ "cases": {
+  "desk-light-en": {
+   "mounted": true,
+   "barNamesSender": true,
+   "sent200": true,
+   "handedReplyTo": true,
+   "barGone": true,
+   "quoteShown": true,
+   "jumpFlashes": true,
+   "menuItems": true,
+   "escCancels": true,
+   "rReplies": true,
+   "noPageErrors": true,
+   "sheetPerShot": true,
+   "errors": [],
+   "engineOwn": [
+    "Viewport argument key \"interactive-widget\" not recognized and ignored. @ http://127.0.0.1:48791/ui",
+    "Refused to apply a stylesheet because its hash, its nonce, or 'unsafe-inline' does not appear in the style-src directive of the Content Security Policy. @ http://127.0.0.1:48791/ui/chat/demo-agent",
+    "Refused to apply a stylesheet because its hash, its nonce, or 'unsafe-inline' does not appear in the style-src directive of the Content Security Policy. @ http://127.0.0.1:48791/ui/chat/demo-agent",
+    "Refused to apply a stylesheet because its hash, its nonce, or 'unsafe-inline' does not appear in the style-src directive of the Content Security Policy. @ http://127.0.0.1:48791/ui/chat/demo-agent"
+   ]
+  },
+  "phone-dark-zh-TW": {
+   "mounted": true,
+   "drawerShut": true,
+   "barNamesSender": true,
+   "sent200": true,
+   "handedReplyTo": true,
+   "barGone": true,
+   "quoteShown": true,
+   "jumpFlashes": true,
+   "menuItems": true,
+   "escCancels": true,
+   "noPageErrors": true,
+   "sheetPerShot": true,
+   "errors": [],
+   "engineOwn": [
+    "Viewport argument key \"interactive-widget\" not recognized and ignored. @ http://127.0.0.1:48791/ui",
+    "Refused to apply a stylesheet because its hash, its nonce, or 'unsafe-inline' does not appear in the style-src directive of the Content Security Policy. @ http://127.0.0.1:48791/ui/chat/demo-agent",
+    "Refused to apply a stylesheet because its hash, its nonce, or 'unsafe-inline' does not appear in the style-src directive of the Content Security Policy. @ http://127.0.0.1:48791/ui/chat/demo-agent",
+    "Refused to apply a stylesheet because its hash, its nonce, or 'unsafe-inline' does not appear in the style-src directive of the Content Security Policy. @ http://127.0.0.1:48791/ui/chat/demo-agent"
+   ]
+  }
+ },
+ "pass": true
+}
