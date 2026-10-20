@@ -1531,6 +1531,8 @@ program
         const { planPath } = await import("./service-plan.js");
         planDeps().removeFile(planPath(DATA_DIR));
       }
+      // #1853: in a WSL terminal without the Windows desktop shortcuts, say once how to make them (never makes them).
+      if (outcome.ok) await import("./windows-shortcuts.js").then(m => m.printUpdateShortcutsHint(DATA_DIR)).catch(() => { /* a hint never fails an update */ });
       if (outcome.ok && outcome.via === "launchd-activation") {
         console.log("  ✓ Service restarted (launchd loaded the verified job)");
         // The new fleet clears the update marker once it is up.
@@ -1612,6 +1614,7 @@ program
       }
       console.log(`\n  ✓ Already up to date (v${pkgVersion})\n`);
       setUpdateProgressStage(DATA_DIR, "complete", { version: pkgVersion });
+      await import("./windows-shortcuts.js").then(m => m.printUpdateShortcutsHint(DATA_DIR)).catch(() => { /* a hint never fails an update */ });
       return;
     }
 
@@ -1855,6 +1858,20 @@ program
     } else {
       console.log(t("install.updated"));
     }
+  });
+
+program
+  .command("shortcuts")
+  .description("WSL: create or update the Windows desktop shortcuts (the dashboard and restart)")
+  .action(async () => {
+    // #1853: for an install that predates the installer's shortcuts, or that is only ever updated with `agend update`.
+    const { runShortcuts, realShortcutsDeps } = await import("./windows-shortcuts.js");
+    const { spawnSync } = await import("node:child_process");
+    const { userInfo } = await import("node:os");
+    process.exitCode = runShortcuts(realShortcutsDeps(DATA_DIR, userInfo().username, (command, args) => {
+      const r = spawnSync(command, args, { encoding: "utf-8", timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] });
+      return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "", error: r.error };
+    }));
   });
 
 program
