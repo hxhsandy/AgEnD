@@ -154,8 +154,10 @@ function Limit-Width([string]$text, [int]$max) {
 }
 
 # 讀取子程序寫到檔案的新輸出，用這一步已知的編碼（不從位元組猜：純中文的 UTF-16 開頭可以是合法的 ASCII，
-# 「上」U+4E0A 也含 0x0A，#2228 審查）。'utf8'：WSL 裡的程式（Linux 的輸出原樣傳過來）；'utf16'：舊版 wsl.exe 自己的訊息；
-# 'oem'：Windows 主控台程式（dism），用主控台的字碼頁。解碼器會接住切在兩次讀取之間的多位元組字元。
+# 「上」U+4E0A 也含 0x0A，#2228 審查）。'utf8'：WSL 裡的程式（Linux 的輸出原樣傳過來）；'utf16'：wsl.exe 自己的指令
+# （--update、--install）——這一步會拿掉 WSL_UTF8，而沒有它時每一版 wsl.exe（系統內建、Store、MSI）自己的訊息都是
+# UTF-16LE（WSL_UTF8=1 從 0.64.0 起才會改成 UTF-8，所以不必知道裝的是哪一版）；'oem'：Windows 主控台程式（dism），
+# 用主控台的字碼頁。解碼器會接住切在兩次讀取之間的多位元組字元。
 function New-OutputTail([string]$path, [string]$encoding = 'utf8') {
     $enc = switch ($encoding) {
         'utf16' { [Text.Encoding]::Unicode }
@@ -177,14 +179,6 @@ function Read-OutputTail($tail) {
     }
     return ($text -replace [char]0xFEFF, '')
 }
-# wsl.exe 自己的訊息用哪種編碼，只看檔案、不執行任何程式（#2228 審查：乾淨的 Windows 上 wsl --version 會停在
-# 「Press any key to install」等按鍵）。新版 WSL（2.0 起，認得 WSL_UTF8=1）裝在 %ProgramFiles%\WSL\wsl.exe，
-# System32 的 wsl.exe 會轉給它，輸出是 UTF-8；沒有它，就是系統內建的舊版，自己的訊息是 UTF-16LE。
-function Get-WslOutputEncoding([string]$ProgramFiles = $env:ProgramFiles) {
-    if ($ProgramFiles -and (Test-Path -LiteralPath (Join-Path (Join-Path $ProgramFiles 'WSL') 'wsl.exe'))) { return 'utf8' }
-    return 'utf16'
-}
-
 # 工具輸出的一段文字 → 已完成的行、還沒換行的尾巴、目前的進度字樣。去掉色彩控制碼；一行裡的 \r 是工具原地更新的
 # 進度，只留最後一段（Windows 上子程序直接寫檔，\r 原樣保留）。
 function Get-LastSegment([string]$s) { return (@($s -split "`r" | Where-Object { $_.Trim() }) | Select-Object -Last 1) }
@@ -218,8 +212,10 @@ function Invoke-Watched {
 
     $live = Test-LiveConsole
     $consoleSaved = $null
+    # wsl.exe 自己的訊息：'utf16' 的步驟拿掉 WSL_UTF8（每一版都是 UTF-16LE），其他步驟設成 1（UTF-8，和 Linux 的輸出一致）。
+    # 這一步結束後（含停止）還原成原本的值或原本沒有。
     $prevUtf8 = $env:WSL_UTF8
-    $env:WSL_UTF8 = '1'                                                   # 讓 wsl.exe 自己的訊息用 UTF-8
+    if ($Encoding -eq 'utf16') { Remove-Item Env:WSL_UTF8 -ErrorAction SilentlyContinue } else { $env:WSL_UTF8 = '1' }
     # 這一步的狀態（scriptblock 之間共用同一個 hashtable）。
     $st = @{ Tails = @((New-OutputTail $outFile $Encoding), (New-OutputTail $errFile $Encoding)); Pending = @('', ''); Progress = ''; Shown = $false }
     $clock = [Diagnostics.Stopwatch]::StartNew()
@@ -418,11 +414,11 @@ if (Stage-Done 1) {
 
     # ── 1b: 更新 WSL 核心 ──
     Write-Info "更新 WSL 核心元件..."
-    $wslUpdateCode = Invoke-Watched -Label "更新 WSL 核心元件" -Usually "通常需要 1–5 分鐘" -UpperMinutes 8 -Encoding (Get-WslOutputEncoding) -File "wsl.exe" -Arguments @("--update")
+    $wslUpdateCode = Invoke-Watched -Label "更新 WSL 核心元件" -Usually "通常需要 1–5 分鐘" -UpperMinutes 8 -Encoding utf16 -File "wsl.exe" -Arguments @("--update")
     if ($wslUpdateCode -ne 0) {
         # Microsoft Store 被擋（公司電腦常見）時，改從 GitHub 下載同一個更新。
         Write-Warn "從 Microsoft Store 更新失敗，改從 GitHub 下載..."
-        $wslUpdateCode = Invoke-Watched -Label "從 GitHub 更新 WSL" -Usually "通常需要 1–5 分鐘" -UpperMinutes 8 -Encoding (Get-WslOutputEncoding) -File "wsl.exe" -Arguments @("--update", "--web-download")
+        $wslUpdateCode = Invoke-Watched -Label "從 GitHub 更新 WSL" -Usually "通常需要 1–5 分鐘" -UpperMinutes 8 -Encoding utf16 -File "wsl.exe" -Arguments @("--update", "--web-download")
     }
     if ($wslUpdateCode -ne 0) {
         Write-Warn "wsl --update 失敗，從 GitHub 下載最新版 WSL..."
@@ -556,7 +552,7 @@ if (Stage-Done 1) {
 
         # 安裝
         Write-Info "正在安裝 $UBUNTU_DISTRO，請不要關閉視窗..."
-        $null = Invoke-Watched -Label "下載並安裝 $UBUNTU_DISTRO" -Usually "通常需要 3–10 分鐘" -UpperMinutes 15 -Encoding (Get-WslOutputEncoding) -File "wsl.exe" -Arguments @("--install", "-d", $UBUNTU_DISTRO, "--location", $wslPath, "--no-launch")
+        $null = Invoke-Watched -Label "下載並安裝 $UBUNTU_DISTRO" -Usually "通常需要 3–10 分鐘" -UpperMinutes 15 -Encoding utf16 -File "wsl.exe" -Arguments @("--install", "-d", $UBUNTU_DISTRO, "--location", $wslPath, "--no-launch")
 
         # 驗證
         Write-Info "正在驗證安裝結果..."

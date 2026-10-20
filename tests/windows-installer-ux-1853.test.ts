@@ -44,7 +44,8 @@ describe("the installer's long steps and console guards (static)", () => {
   });
   it("each step reads its output in the encoding it is known to use", () => {
     expect(code.match(/-Encoding oem -File "dism\.exe"/g)).toHaveLength(2);
-    expect(code.match(/-Encoding \(Get-WslOutputEncoding\) -File "wsl\.exe"/g)).toHaveLength(3);
+    expect(code.match(/-Encoding utf16 -File "wsl\.exe"/g)).toHaveLength(3);    // wsl.exe's own commands, WSL_UTF8 removed
+    expect(code).not.toMatch(/Get-WslOutputEncoding/);                          // no probe of which wsl.exe (#2228 review)
   });
   it("a plain notice at the start, and again at the login and quickstart steps", () => {
     for (const line of ["複製：用滑鼠選取文字，再按右鍵（或 Enter）。", "貼上：在視窗裡按一下右鍵。", "請不要按 Ctrl+C：在這個視窗裡，它不是「複製」，而是「停止」。",
@@ -103,21 +104,26 @@ $want4 = "中文輸出完成\`n"; $all4 = $u8.GetBytes($want4); $got4 = Feed 'c4
 Write-Output ("EXACT=" + ($got1 -ceq $want1) + "," + ($got2 -ceq $want2) + "," + ($got3 -ceq $want3) + "," + ($got4 -ceq $want4))`);
     expect(out).toContain("EXACT=True,True,True,True");
   });
-  it("wsl.exe's own encoding comes from which wsl.exe is installed — no process is run, so nothing can wait for a key", () => {
-    // #2228 review: a clean Windows's `wsl --version` can stop at "Press any key to install". A wsl.exe on PATH that
-    // would hang and read the keyboard proves the check never runs it.
-    const { out, dir } = withHelpers(`$bin = Join-Path $env:TMPDIR 'bin'; New-Item -ItemType Directory -Path $bin | Out-Null
-foreach ($n in @('wsl.exe', 'wsl')) { $f = Join-Path $bin $n; Set-Content -LiteralPath $f -Value "#!/bin/sh\`ntouch '$env:TMPDIR/ran'\`nread x\`nsleep 30"; chmod +x $f }
-$env:PATH = $bin + [IO.Path]::PathSeparator + $env:PATH
-$pf = Join-Path $env:TMPDIR 'pf'; New-Item -ItemType Directory -Path (Join-Path $pf 'WSL') -Force | Out-Null
-$clock = [Diagnostics.Stopwatch]::StartNew()
-$old = Get-WslOutputEncoding (Join-Path $env:TMPDIR 'empty')
-New-Item -ItemType File -Path (Join-Path (Join-Path $pf 'WSL') 'wsl.exe') | Out-Null
-$new = Get-WslOutputEncoding $pf
-$none = Get-WslOutputEncoding ''
-Write-Output ("ENC=" + $old + "," + $new + "," + $none + " FAST=" + ($clock.Elapsed.TotalSeconds -lt 3))`);
-    expect(out).toContain("ENC=utf16,utf8,utf16 FAST=True");
-    expect(() => readFileSync(join(dir, "ran"))).toThrow();                  // the fake wsl.exe never ran
+  it("WSL_UTF8 for a step: removed for wsl.exe's own (UTF-16LE in every version), 1 for the others; put back as it was, set or not", () => {
+    // #2228 review: WSL_UTF8=1 makes wsl.exe write UTF-8 from 0.64.0 on (an old Store install too), so the step that
+    // reads UTF-16LE must make sure it is not set.
+    const { out } = withHelpers(`function Show([string]$n) { return ('printf "%s" "[$WSL_UTF8]" > "' + $env:TMPDIR + '/env-' + $n + '.txt"') }
+function Seen([string]$n) { return (Get-Content -Raw -LiteralPath (Join-Path $env:TMPDIR "env-$n.txt")) }
+Remove-Item Env:WSL_UTF8 -ErrorAction SilentlyContinue
+$null = Invoke-Watched -Label 'a' -Usually 'x' -Encoding utf16 -File 'sh' -Arguments @('-c', (Show 'a'))
+Write-Output ("A=" + (Seen 'a') + " AFTER=[" + $env:WSL_UTF8 + "]")
+$env:WSL_UTF8 = '1'
+$null = Invoke-Watched -Label 'b' -Usually 'x' -Encoding utf16 -File 'sh' -Arguments @('-c', (Show 'b'))
+Write-Output ("B=" + (Seen 'b') + " AFTER=[" + $env:WSL_UTF8 + "]")
+$env:WSL_UTF8 = '0'
+$null = Invoke-Watched -Label 'c' -Usually 'x' -File 'sh' -Arguments @('-c', (Show 'c'))
+Write-Output ("C=" + (Seen 'c') + " AFTER=[" + $env:WSL_UTF8 + "]")
+$f = Join-Path $env:TMPDIR 'w16.txt'; [IO.File]::WriteAllBytes($f, [Text.Encoding]::Unicode.GetBytes("WSL 版本: 1.2.5.0\`r\`n"))
+$tail = New-OutputTail $f 'utf16'; Write-Output ("DECODED=" + ((Read-OutputTail $tail) -replace "\`r\`n", '<CRLF>'))`);
+    expect(out).toContain("A=[] AFTER=[]\n");                                 // not set before: removed for the step, still not set
+    expect(out).toContain("B=[] AFTER=[1]\n");                                // set before: removed for the step, then put back
+    expect(out).toContain("C=[1] AFTER=[0]\n");                               // another step: 1 for it, then its old value
+    expect(out).toContain("DECODED=WSL 版本: 1.2.5.0<CRLF>");
   });
   it("the console's input mode (a bit-accurate model): one snapshot, put back exactly — after a step, after Enter carries on, after y stops it", () => {
     const model = (keys: string) => `$script:mode = [uint32]0xC7
