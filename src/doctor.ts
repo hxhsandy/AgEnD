@@ -8,6 +8,8 @@ import { validateFleetConfig } from "./config-validator.js";
 import { hasPausedMarker } from "./pause-marker.js";
 import { getTmuxSessionName, getTmuxSocketName } from "./paths.js";
 import { BACKENDS } from "./setup-wizard.js";
+import { getSystemServicePath, serviceLeftovers } from "./service-installer.js";
+import { homedir } from "node:os";
 import type { ServiceInfo } from "./service-installer.js";
 import { t } from "./locale.js";
 import { collectResourceReport, resourceChecks, type ResourceReport } from "./resource-report.js";
@@ -39,6 +41,8 @@ interface DoctorDeps {
   processAlive: (pid: number) => boolean;
   connectSocket: (path: string) => Promise<boolean>;
   networkFamily: () => NetworkFamilyState;
+  /** #2331: the legacy system unit, when one runs the fleet (it wins over a user unit, as `agend restart` picks it). */
+  systemUnitPath: () => string | null;
   collectResources: (dataDir: string) => Promise<ResourceReport>;
   fetchFleetHealth: (port: number) => Promise<{
     adapters?: { details?: Record<string, { status?: string; isReady?: boolean; reconnectCount?: number; heartbeatAgeMs?: number | null; shards?: Array<{ heartbeatAgeMs?: number | null }> }> };
@@ -49,6 +53,7 @@ const defaultDeps: DoctorDeps = {
   env: process.env,
   platform: platform(),
   run: (file, args) => spawnSync(file, args, { encoding: "utf8", timeout: 5000 }),
+  systemUnitPath: () => getSystemServicePath(),
   processAlive: pid => {
     try {
       process.kill(pid, 0);
@@ -202,6 +207,31 @@ export async function collectDoctorReport(
       t("doctor.service_active"),
       service.active == null ? managerUnavailable : service.active ? t("doctor.service_running") : t("doctor.inactive_start"),
     );
+  }
+
+  // #2331: the unit as systemd LOADED it (never the file), the files it came from, and leftovers that change how the
+  // fleet starts. A Type=notify unit without NotifyAccess=all refuses the fleet's READY: restarted every 15 minutes.
+  const systemUnitPath = deps.platform === "linux" ? deps.systemUnitPath() : null;
+  const unitPath = systemUnitPath ?? (service.installed ? service.path : null);
+  if (deps.platform === "linux" && unitPath) {
+    const system = !unitPath.includes("/.config/systemd/user/");
+    const unit = unitPath.split("/").pop()!.replace(/\.service$/, "");
+    const shown = deps.run("systemctl", [...(system ? [] : ["--user"]), "show", "-p", "Type,NotifyAccess,TimeoutStartUSec,FragmentPath,DropInPaths", unit]);
+    const loaded = new Map<string, string>();
+    if (!shown.error && shown.status === 0) {
+      for (const line of String(shown.stdout ?? "").split("\n")) { const at = line.indexOf("="); if (at > 0) loaded.set(line.slice(0, at), line.slice(at + 1).trim()); }
+    }
+    const type = loaded.get("Type"), notifyAccess = loaded.get("NotifyAccess");
+    if (type && notifyAccess) {
+      const refused = type === "notify" && notifyAccess !== "all";
+      add("Service", refused ? "error" : "ok", t("doctor.loaded_unit"),
+        `Type=${type} NotifyAccess=${notifyAccess} TimeoutStartSec=${loaded.get("TimeoutStartUSec") || "?"}${refused ? ` — ${t("doctor.notify_refused")}` : ""}`);
+      const dropIns = (loaded.get("DropInPaths") ?? "").split(/\s+/).filter(Boolean);
+      add("Service", "ok", t("doctor.unit_files"), [loaded.get("FragmentPath") || unitPath, ...dropIns].join(", "));
+      for (const l of serviceLeftovers({ home: deps.env.HOME || homedir(), dropIns, systemUnit: system ? unit : null })) {
+        add("Service", "warn", t("doctor.leftover"), `${l.path}: ${l.detail}`);
+      }
+    }
   }
 
   if (deps.platform === "linux") {

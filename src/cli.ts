@@ -1881,6 +1881,13 @@ program
         process.exitCode = 1;
       }
     }
+    // #2331: a host whose fleet runs under the system unit gets no second, user unit from the refresh — it would only
+    // sit beside it unused, and be named as a leftover on every update after.
+    if (systemUnit) {
+      console.log(t("install.path", systemUnit));
+      console.log(t("install.updated"));
+      return;
+    }
     const svcPath = installService(serviceVars);
     console.log(t("install.path", svcPath));
     if (opts.activate !== false) {
@@ -2080,6 +2087,7 @@ program
       ensureSystemdUnitHardening,
       effectiveUnitDropIns,
       unitCoredumpFilterState,
+      loadedUnitCheck,
     } = await import("./service-installer.js");
     const { spawn, spawnSync } = await import("node:child_process");
     const plat = detectPlatform();
@@ -2192,7 +2200,10 @@ program
       const updated = Object.entries(hardening)
         .filter(([key, state]) => key !== "KillMode" && (state === "added" || state === "upgraded"))
         .map(([key]) => key);
-      if (updated.length > 0) console.log(`  ✓ ${unitPath}: updated ${updated.join(", ")} (#908/#1071/#1113: graceful stop, small crash dumps, bounded start, start limit)`);
+      if (updated.length > 0) console.log(`  ✓ ${unitPath}: updated ${updated.join(", ")} (#908/#1071/#1113/#2331: graceful stop, small crash dumps, bounded start, start limit, the fleet's ready signal)`);
+      // #2331: what systemd LOADED — a drop-in that refuses the fleet's READY is overridden by AgEnD's own, leftovers
+      // are named. Not a gate: the fleet still restarts, and the line says what will happen and what to remove.
+      for (const line of loadedUnitCheck({ user: systemdTarget.user, unit: systemdTarget.unit, unitPath })) console.log(line);
       // Re-judged after the reload, against what systemd now applies: an
       // operator's own mask (anywhere — main file, unit or type drop-in, or a
       // trailing empty assignment that restores the inherited one) is warned
