@@ -1,0 +1,50 @@
+<section class="card s-guests" id="mock">
+  <h3>Guests</h3>
+  <p class="note">People who are not fleet admins can sign in to the web dashboard as themselves and see only the agents you grant them, with the agent's chat as their channel showed it.</p>
+  <label class="check"><input type="checkbox" checked /><span>Guest sign-in</span></label>
+  <label class="check"><input type="checkbox" checked /><span>Guests may chat (off: read-only)</span></label>
+
+  <h4>People with access</h4>
+  <ul class="guest-list">
+    <li class="guest-row">
+      <div class="g-head"><span class="g-av">A</span><div class="g-id"><strong>Ada Chen</strong> <span class="note">Discord · @ada.chen</span></div>
+        <span class="g-state on">Signed in · 2 devices</span></div>
+      <div class="g-chips"><span class="g-chip">reviewer</span><span class="g-chip">docs-writer</span></div>
+      <div class="guest-actions"><button class="btn btn-sm">Edit agents</button><button class="btn btn-sm g-send">Send sign-in code</button><button class="btn btn-sm btn-danger">Remove access</button></div>
+    </li>
+    <li class="guest-row">
+      <div class="g-head"><span class="g-av g-tg">M</span><div class="g-id"><strong>Mei Lin</strong> <span class="note">Telegram · @mei_lin</span></div>
+        <span class="g-state sent">Code sent 18:42 · expires 18:52</span></div>
+      <div class="g-chips"><span class="g-chip">support-bot</span></div>
+      <div class="guest-actions"><button class="btn btn-sm">Edit agents</button><button class="btn btn-sm g-send" disabled>Send again in 0:41</button><button class="btn btn-sm btn-danger">Remove access</button></div>
+    </li>
+    <li class="guest-row">
+      <div class="g-head"><span class="g-av">B</span><div class="g-id"><strong>Bob</strong> <span class="note">Discord · @bobby</span></div>
+        <span class="g-state warn">Couldn't DM Bob: their Discord privacy settings block DMs from this server</span></div>
+      <div class="g-chips"><span class="g-chip">reviewer</span></div>
+      <div class="guest-actions"><button class="btn btn-sm">Edit agents</button><button class="btn btn-sm g-send">Send sign-in code</button><button class="btn btn-sm btn-danger">Remove access</button></div>
+    </li>
+  </ul>
+
+  <h4>Add a person</h4>
+  <div class="g-search"><input type="search" class="input" value="sa" aria-label="Search people" placeholder="Search people who have written to your agents" /></div>
+  <ul class="g-pick">
+    <li class="g-cand sel"><span class="g-av">S</span><div class="g-id"><strong>Sam Ortiz</strong> <span class="note">Discord · @sam.o · last seen today 17:05</span>
+      <div class="note">Wrote to: reviewer, builder</div></div><span class="g-picked">Chosen</span></li>
+    <li class="g-cand"><span class="g-av g-tg">S</span><div class="g-id"><strong>Sara K.</strong> <span class="note">Telegram · @sarak · last seen 3 days ago</span>
+      <div class="note">Wrote to: support-bot</div></div><button class="btn btn-sm">Choose</button></li>
+  </ul>
+  <div class="g-grant">
+    <p><strong>Sam Ortiz</strong> may see:</p>
+    <div class="guest-names">
+      <label class="check guest-name"><input type="checkbox" checked /><span>reviewer <span class="note">wrote here</span></span></label>
+      <label class="check guest-name"><input type="checkbox" checked /><span>builder <span class="note">wrote here</span></span></label>
+      <label class="check guest-name"><input type="checkbox" /><span>docs-writer</span></label>
+      <label class="check guest-name"><input type="checkbox" /><span>support-bot</span></label>
+      <label class="check guest-name"><input type="checkbox" /><span>release-manager</span></label>
+      <label class="check guest-name"><input type="checkbox" /><span>codex-1</span></label>
+    </div>
+    <p class="note">They will see each ticked agent's chat as its channel showed it: other people's messages there too, never web-only ones. Granting access waits for a fleet admin's confirmation in General; taking it away applies at once.</p>
+  </div>
+  <div class="save-row"><button class="btn btn-primary">Review changes</button><span class="note">Send sign-in code appears once the grant is applied.</span></div>
+</section>
