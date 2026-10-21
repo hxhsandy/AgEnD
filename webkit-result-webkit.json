@@ -4,6 +4,7 @@
     "desk-light-en": {
       "mounted": true,
       "typing": true,
+      "nativeMenuMixed": "n/a (no CDP in WebKit)",
       "completion": true,
       "argumentFill": true,
       "sentNotUndone": true,
