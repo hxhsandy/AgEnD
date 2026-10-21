@@ -5,6 +5,10 @@
       "mounted": true,
       "typing": true,
       "nativeMenuMixed": true,
+      "execCommandEvents": [
+        "input:historyUndo"
+      ],
+      "execCommandUndo": true,
       "completion": true,
       "argumentFill": true,
       "sentNotUndone": true,
