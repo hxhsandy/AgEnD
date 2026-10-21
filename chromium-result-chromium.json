@@ -1,0 +1,25 @@
+{
+  "engine": "chromium",
+  "cases": {
+    "desk-light-en": {
+      "mounted": true,
+      "typing": true,
+      "completion": true,
+      "argumentFill": true,
+      "sentNotUndone": true,
+      "putBack": true,
+      "asText": true,
+      "perField": true,
+      "filterEscUndo": true,
+      "buttonNotTaken": true,
+      "hoursAsTyped": true,
+      "hoursUndo": true,
+      "noErrors": true
+    },
+    "phone-dark-zh-TW": {
+      "mounted": true,
+      "phoneSends": true,
+      "noErrors": true
+    }
+  }
+}
