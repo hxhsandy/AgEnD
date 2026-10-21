@@ -1,0 +1,34 @@
+{
+  "desk-light-en": {
+    "cspAtLoad": 7,
+    "startsDefault": true,
+    "headStartsBundled": true,
+    "saved": true,
+    "versioned": true,
+    "headFollows": true,
+    "manifest": true,
+    "sizes": "/favicon.ico 48x48, /apple-touch-icon.png 180x180, /icon-192.png 192x192, /icon-512.png 512x512",
+    "sizesOk": true,
+    "cacheByVersion": true,
+    "signinLinks": true,
+    "reset": true,
+    "headBack": true,
+    "noNewCspViolation": true
+  },
+  "phone-dark-zh-TW": {
+    "cspAtLoad": 7,
+    "startsDefault": true,
+    "headStartsBundled": true,
+    "saved": true,
+    "versioned": true,
+    "headFollows": true,
+    "manifest": true,
+    "sizes": "/favicon.ico 48x48, /apple-touch-icon.png 180x180, /icon-192.png 192x192, /icon-512.png 512x512",
+    "sizesOk": true,
+    "cacheByVersion": true,
+    "signinLinks": true,
+    "reset": true,
+    "headBack": true,
+    "noNewCspViolation": true
+  }
+}
