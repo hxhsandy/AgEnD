@@ -181,6 +181,24 @@ describe("Settings → Guests, as rendered (#2348)", () => {
     expect([after, w.writes().map((x) => x.body)]).toEqual([[true, true],
       [{ guests: { chat: false } }, { guests: { grants: { "dc:111": { name: "Alice", instances: ["alpha", "beta"] } } } }]]);
   });
+  it("#2367 r2: a failed Save never puts its own version back over an edit made while it ran", async () => {
+    let release!: () => void;
+    webHold = new Promise<void>((r) => { release = r; });
+    webAnswer = { status: 400, body: { error: "refused" } };
+    const w = await open();
+    await w.check(w.$("#guestsChat"), false);
+    await w.apply(); await settle(4);
+    await w.check(w.$("#guestsEnabled"), false);                    // the newer word, while the Save is held
+    release();
+    const { appStore } = await import("/assets/app-store.js");
+    for (let i = 0; i < 50 && (appStore.get() as any).settingsOp?.phase !== "failed"; i++) await settle(4);
+    await settle(12);
+    const after = [w.$("#guestsEnabled").checked, w.$("#guestsChat").checked, !!p.root.querySelector(".s-pending")];
+    const { resetOperation } = await import("/ui/js/settings-apply.js");
+    resetOperation(); webAnswer = null; await settle(4);
+    await w.apply(); await settle(12);
+    expect([after, w.writes().map((x) => x.body).slice(1)]).toEqual([[false, false, true], [{ guests: { enabled: null, chat: false } }]]);          // off is the default: null
+  });
   it("#2367 review: the real Save tells the section how it went — failed (the section says why) and waiting", async () => {
     const { appStore } = await import("/assets/app-store.js");
     webAnswer = { status: 400, body: { error: "grant names someone not seen in chat" } };

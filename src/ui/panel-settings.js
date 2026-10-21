@@ -185,7 +185,12 @@ export function SettingsPanel({ route, navKey }) {
     if (!back.length) return;
     setStaged((s) => {
       const m = new Map(s);
-      for (const c of back) { const k = c.stageKey || newKey("left"); m.set(k, { ...(submittedStaged.current.get(k) || {}), ...c, stageKey: k }); }
+      // #2367 review: a change staged for the same thing since that Save began is the newer word (its draft and
+      // request carry everything still unsaved): it stays, and the failed one is not put back over it.
+      for (const c of back) {
+        const k = c.stageKey || newKey("left");
+        if (!m.has(k)) m.set(k, { ...(submittedStaged.current.get(k) || {}), ...c, stageKey: k });
+      }
       return m;
     });
   }, [op && op.leftover]);
@@ -196,9 +201,11 @@ export function SettingsPanel({ route, navKey }) {
     const phase = op ? op.phase : null;
     if (lastPhase.current !== phase && (phase === "done" || phase === "failed")) {
       settle(op);
-      if (phase === "done" && submitted.current) dropDrafts(submitted.current);
-      submitted.current = null;
-      reload();
+      // After a Save that went through, its drafts go once the configuration it wrote is read back — not before: a
+      // section shown on the old configuration would take an edit back to the old value for no edit at all.
+      const saved = phase === "done" ? submitted.current : null;
+      if (!saved) submitted.current = null;
+      reload().finally(() => { if (saved && submitted.current === saved) { dropDrafts(saved); submitted.current = null; } });
     }
     lastPhase.current = phase;
   }, [op && op.phase]);
@@ -275,7 +282,7 @@ export function SettingsPanel({ route, navKey }) {
   // #2347: sections read `staged` (each change as staged, its extra fields kept: Guests carries its whole draft) and
   // `drafts` to come back to their edits; `draftEpoch` moves on Discard and after a Save to start them from what is saved.
   const ctx = data && !data.error ? makeCtx(data, setData, stage, unstage, reload, reloadLive, () => mount.current(),
-    { drafts: drafts.current, draftEpoch, readOnly, staged }) : null;
+    { drafts: drafts.current, draftEpoch, readOnly, staged, savingDrafts: () => submitted.current }) : null;
   // #1519 P7: "Connect a chat app" on the first-run card elsewhere came here for the wizard: it opens once the data is in.
   useEffect(() => { if (ctx && takeWizardRequest()) setDialog({ kind: "wizard", key: navKey }); }, [!!ctx, navKey]);
   // #1523 N2: "Edit in Settings" on an instance's Details: that agent's dialog, once the data is in — only an agent this
