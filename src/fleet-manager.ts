@@ -107,6 +107,7 @@ import { routeToolCall } from "./channel/tool-router.js";
 import { Scheduler } from "./scheduler/index.js";
 import { boardActivity, boardCardLimit, boardToolAction } from "./task-board-tool.js";
 import { TaskBoardWaker } from "./task-board-waker.js";
+import { TaskBoardError, wrapUpGap, type Actor } from "./scheduler/task-board.js";
 import type { SchedulerDb } from "./scheduler/db.js";
 import type { Schedule, ScheduleRetry, ScheduleRetryDrop, SchedulerConfig } from "./scheduler/index.js";
 import { escapeTelegramHtml, scheduleClock, scheduleRetryLabel } from "./scheduler/retry-label.js";
@@ -116,6 +117,7 @@ import type { FleetContext } from "./fleet-context.js";
 import { TopicCommands, saveCommandForBackend, parseSaveFilename, parsePauseWakeCommand, parseCompactCommand, SAVE_FILENAME_RE, resolveInstanceContext, forgetInstanceContext, readStatuslineJson, statuslineModel } from "./topic-commands.js";
 import type { HangDetector } from "./hang-detector.js";
 import { DailySummary } from "./daily-summary.js";
+import { TaskBoardSummaryClock, buildSummary, isQuiet, renderSummary, summaryMarkFile, summaryTime } from "./task-board-summary.js";
 import { WebhookEmitter } from "./webhook-emitter.js";
 import { TmuxControlClient } from "./tmux-control.js";
 import { safeHandler } from "./safe-async.js";
@@ -1089,6 +1091,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
   costGuard: CostGuard | null = null;
   private statuslineWatcher: StatuslineWatcher;
   private dailySummary: DailySummary | null = null;
+  /** #2246 step 3: the task board's daily summary for the person (task-board-summary.ts). */
+  private taskBoardSummary: TaskBoardSummaryClock | null = null;
   private dailyTipScheduler: DailyTipScheduler | null = null;
   /** The task board's wakes (step 2): an instance hears when someone else changes a card it owns or handed out. */
   private taskBoardWaker: TaskBoardWaker | null = null;
@@ -7326,6 +7330,17 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       );
     });
     this.dailySummary.start();
+    // #2246 step 3: the task board's daily summary — its own time (defaults.task_board.summary_at, read at every look),
+    // in the fleet's zone; a summary missed while the fleet was down goes out when it is back.
+    this.taskBoardSummary = new TaskBoardSummaryClock({
+      at: () => summaryTime(this.fleetConfig?.defaults?.task_board?.summary_at) ?? null,
+      zone: () => this.usageZone(),
+      now: () => new Date(),
+      mark: summaryMarkFile(join(this.dataDir, "task-board-summary.json")),
+      send: (since, until) => this.postTaskBoardSummary(since, until),
+      failed: (err) => this.logger.warn({ err }, "The task board's daily summary failed; the next minute tries again"),
+    });
+    this.taskBoardSummary.start();
 
     // Rotate classic channel chat logs daily (piggyback on daily summary timer)
     this.classicChannels?.rotateLogs();
@@ -9132,6 +9147,22 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         "Inbound message dropped before the dedup claim — key not consumed",
       );
       return;
+    }
+
+    // #2246 step 3 (#2341 review r2): a reply to a Needs you Send back / Answer prompt is the card's reason or answer, not
+    // input for an instance — judged by the PROMPT's world (its admins, its instance, its room as it is now; the hub's
+    // handleReply), before the room's generic access below: in a shared group the room may be another bot's, whose
+    // policy has no say over that world's prompt. Only that exact reply, by the admin who clicked, while the prompt
+    // stands. Taken once: another bot's copy of a taken reply is dropped here. All else flows on.
+    if (!msg.isBotMessage && msg.replyTo && this.needsYou) {
+      if (this.needsYou.wasTakenReply(msg.chatId, msg.messageId)) {
+        this.logger.debug({ adapterId: msg.adapterId, messageId: msg.messageId }, "Another bot's copy of a Needs you answer already taken — dropped");
+        return;
+      }
+      if (this.needsYou.handleReply({
+        adapterId: msg.adapterId, chatId: msg.chatId, ...(threadId !== undefined ? { threadId } : {}), replyTo: msg.replyTo,
+        messageId: msg.messageId, userId: msg.userId, ...(msg.username ? { username: msg.username } : {}), text: msg.text ?? "",
+      })) return;
     }
 
     // Access control — classic channels are open to all, others require an allowed
@@ -13031,6 +13062,48 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
   }
 
   /**
+   * #2246 step 3: the task board's daily summary of [since, until) (task-board-summary.ts). Each chat world's General
+   * gets its own instances' cards — a card that no world's instance holds (nobody's, a person's) goes to the primary
+   * one — and each of that world's Generals shows the same text in the web chat. A world with nothing to say gets
+   * nothing. A web-only fleet: everything, in the web chat.
+   */
+  private postTaskBoardSummary(since: Date, until: Date): void {
+    const board = this.scheduler?.db.board;
+    if (!board) return;
+    const read = board.summaryRead(since.toISOString(), until.toISOString());
+    const projects = board.listProjects(true);
+    const stats = board.projectStats();
+    const names = new Map(projects.map((p) => [p.id, p.name]));
+    const configured = this.getPrimaryAdapterId();
+    const primary = configured !== undefined && this.worlds.has(configured) ? configured : this.worlds.keys().next().value as string | undefined;
+    const worldOf = (assignee: string | null): string | undefined => {
+      const owner = assignee ? this.getInstanceAdapterId(assignee) : undefined;
+      return owner !== undefined && this.worlds.has(owner) ? owner : primary;
+    };
+    const zone = this.usageZone();
+    for (const world of this.worlds.size ? [...this.worlds.keys()] : [undefined]) {
+      const summary = buildSummary(read, since, until, { inChat: (assignee) => worldOf(assignee) === world, projects, stats });
+      if (isQuiet(summary)) continue;
+      const text = renderSummary(summary, { zone, t: (key, ...args) => t(key, ...args), projectOf: (c) => (c.projectId === null ? null : names.get(c.projectId) ?? null) });
+      const cards = [...new Set([...summary.review, ...summary.blocked, ...summary.done, ...summary.created].map((c) => c.code))];
+      if (world !== undefined) {
+        const adapter = this.worlds.get(world)?.adapter;
+        const target = this.fleetNoticeTarget(world);
+        if (adapter && target) {
+          adapter.sendText(target.chatId, text, target.opts).catch(e => this.logger.warn({ err: e, world }, "Failed to send the task board's daily summary"));
+        } else {
+          this.logger.warn({ world }, "The task board's daily summary has no postable target — set a General topic or channel.options.general_channel_id");
+        }
+      }
+      for (const [name, cfg] of Object.entries(this.fleetConfig?.instances ?? {})) {
+        if (cfg.general_topic !== true || (world !== undefined && this.getInstanceAdapterId(name) !== world)) continue;
+        // #2341 review: with the cards it names, so the public link withholds it while one of them is hidden there.
+        this.emitSseEvent("message", { instance: name, sender: name, role: "status", text, ts: new Date().toISOString(), cards });
+      }
+    }
+  }
+
+  /**
    * Post the daily summary where fleet-wide notices go.
    *
    * A named method rather than an inline closure so a test can drive the real
@@ -13756,6 +13829,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         if (topic != null) return String(topic);
         return this.classicChannels?.getChannelIdByInstance(instance) ?? undefined;
       },
+      laneTarget: instance => this.instanceChannelTarget(instance),
+      taskRoute: code => this.needsYouRoute(code),
       isFleetAdmin: (userId, world) => this.isFleetAdmin(userId, world),
       fleetAdmins: world => (this.getChannelConfig(world)?.access?.allowed_users ?? []).map(String),
       emitSse: (event, data) => this.emitSseEvent(event, data),
@@ -13763,6 +13838,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         if (!this.deliveryOutbox?.isOpen) throw new Error("the delivery outbox is not open");
         return this.deliveryOutbox.acknowledge(deliveryId, by);
       },
+      tasks: () => this.needsYouTasks(),
+      taskAction: action => this.taskActionFromChat(action),
       settings: () => ({
         liveMessage: this.fleetConfig?.needs_you?.live_message !== false,
         dm: this.fleetConfig?.needs_you?.dm === true,
@@ -13772,6 +13849,91 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       log: (level, message, extra) => this.logger[level](extra ?? {}, message),
     });
     this.needsYou.start();
+  }
+
+  /**
+   * #2352: where an instance's own notices go — its topic in its world's group, or its ClassicBot room — as a Needs you
+   * lane's place; null when it has neither (or its world has no group).
+   */
+  private instanceChannelTarget(instance: string): { chatId: string; threadId?: string } | null {
+    const cfg = this.fleetConfig?.instances && Object.hasOwn(this.fleetConfig.instances, instance) ? this.fleetConfig.instances[instance] : undefined;
+    if (!cfg) return null;
+    const groupId = this.getChannelConfig(this.getInstanceAdapterId(instance))?.group_id;
+    if (cfg.topic_id != null && groupId != null) return { chatId: String(groupId), threadId: String(cfg.topic_id) };
+    const classic = this.classicChannels?.getChannelIdByInstance(instance);
+    return classic ? { chatId: classic } : null;
+  }
+
+  /**
+   * #2352: the instance whose own channel lists a waiting card — the instance that handed it out, else its project's
+   * lead — when that channel can be used now (a fleet instance of a live world, with a topic or room). undefined: its
+   * assignee's world's General, as before.
+   */
+  private needsYouLane(card: import("./scheduler/task-board.js").Card, leads: ReadonlyMap<number, string | null>): string | undefined {
+    const usable = (name: string | null | undefined): name is string => {
+      if (!name || !this.fleetConfig?.instances || !Object.hasOwn(this.fleetConfig.instances, name)) return false;
+      const world = this.getInstanceAdapterId(name);
+      return world !== undefined && this.worlds.has(world) && this.instanceChannelTarget(name) !== null;
+    };
+    const dispatcher = card.dispatcher?.kind === "instance" && card.dispatcher.name !== card.assignee ? card.dispatcher.name : null;
+    if (dispatcher) return usable(dispatcher) ? dispatcher : undefined;
+    const lead = card.projectId != null ? leads.get(card.projectId) : null;
+    return usable(lead) ? lead : undefined;
+  }
+
+  /**
+   * #2355 review: where a card's Needs you buttons belong now — read from the board and the fleet at the moment of a click
+   * or a reply, never from the last render. null: it no longer waits for the person.
+   */
+  private needsYouRoute(code: string): { lane?: string } | null {
+    const board = this.scheduler?.db.board;
+    const card = board?.findCard(code);
+    if (!board || !card || !(card.status === "blocked" || (card.status === "review" && card.needsReview))) return null;
+    const leads = new Map(board.listProjects(true).map((p) => [p.id, p.leadInstance] as const));
+    const lane = this.needsYouLane(card, leads);
+    return lane ? { lane } : {};
+  }
+
+  /**
+   * #2246 step 3: the task board's cards that wait for the person, for Needs you — under each card's assignee, listed in
+   * its lane's channel (#2352: the instance that handed it out, else the project's lead), else in General.
+   */
+  private needsYouTasks(): import("./needs-you.js").TaskInput[] {
+    const board = this.scheduler?.db.board;
+    if (!board) return [];
+    const leads = new Map(board.listProjects(true).map((p) => [p.id, p.leadInstance] as const));
+    return board.waitingForPerson().map(({ card, since }) => {
+      const gap = card.status === "review" ? wrapUpGap(card) : null;
+      const lane = this.needsYouLane(card, leads);
+      return {
+        uuid: card.uuid, code: card.code, title: card.title, status: card.status as "review" | "blocked", version: card.version,
+        assignee: card.assignee, since: Date.parse(since) || 0, ...(gap ? { gap } : {}), ...(lane ? { lane } : {}),
+        note: card.status === "blocked" ? card.blockedReason : gap ? t("needs.task_gap", [
+          gap.unchecked ? t("needs.task_gap_unchecked", gap.unchecked) : "", gap.noResult ? t("needs.task_gap_no_result") : "",
+        ].filter(Boolean).join(t("needs.task_gap_join"))) : "",
+      };
+    });
+  }
+
+  /**
+   * #2246 step 3: the person's move on a card from a chat's Needs you list — a fleet admin of that world (checked by the
+   * hub), acting as the person, through the board's rules, at the version the button showed.
+   */
+  private taskActionFromChat(action: import("./needs-you-hub.js").TaskAction): { ok: boolean; message: string } {
+    const board = this.scheduler?.db.board;
+    if (!board) return { ok: false, message: t("needs.task_board_closed") };
+    const person: Actor = { kind: "person", name: action.by.username || `${action.by.platform}:${action.by.userId}` };
+    try {
+      if (action.verb === "confirm") board.moveCard(person, action.code, "done", { version: action.version });
+      else if (action.verb === "back") board.moveCard(person, action.code, "claimed", { version: action.version, reason: action.text });
+      else board.moveCard(person, action.code, "claimed", { version: action.version, comment: action.text });
+      const done = { confirm: "needs.task_confirmed", back: "needs.task_sent_back", answer: "needs.task_answered" }[action.verb];
+      this.logger.info({ code: action.code, verb: action.verb, by: `${action.by.platform}:${action.by.userId}` }, "Task board: the person moved a card from the chat");
+      return { ok: true, message: t(done, action.code) };
+    } catch (err) {
+      if (err instanceof TaskBoardError && err.code === "conflict") return { ok: false, message: t("needs.task_changed", action.code) };
+      return { ok: false, message: t("needs.task_refused", action.code, (err as Error).message) };
+    }
   }
 
   /** The prompts open on the dashboard right now (a page that loads after one was posted asks for them). */
@@ -16656,7 +16818,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     const onError = (err: unknown) => this.logger.debug({ err }, "SSE client write failed; evicting");
     if (event === "message" && data && typeof data === "object") {
       // A chat message: record it, and send it WITH its id so a reconnecting stream can ask for what it missed.
-      const m = data as { instance?: unknown; sender?: unknown; text?: unknown; ts?: unknown; attachments?: unknown; messageId?: unknown; role?: unknown; buttons?: unknown; click?: unknown; links?: unknown; channel?: unknown; from?: unknown; replyTo?: unknown };
+      const m = data as { instance?: unknown; sender?: unknown; text?: unknown; ts?: unknown; attachments?: unknown; messageId?: unknown; role?: unknown; buttons?: unknown; click?: unknown; links?: unknown; channel?: unknown; from?: unknown; replyTo?: unknown; cards?: unknown };
       const recorded = this.webChatHistory.record({
         instance: String(m.instance ?? ""), sender: String(m.sender ?? ""), text: String(m.text ?? ""), ts: String(m.ts ?? new Date().toISOString()),
         attachments: Array.isArray(m.attachments) ? m.attachments as WebChatAttachment[] : undefined,
@@ -16668,6 +16830,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         channel: m.channel,
         from: m.from,
         replyTo: m.replyTo,
+        cards: m.cards,
       });
       broadcastSseEvent(this.sseClients, event, recorded, onError, this.webChatHistory.cursorOf(recorded));
       this.searchIndex?.record(chatDoc(recorded));
@@ -16699,11 +16862,22 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       isInstance: (name) => this.fleetConfig?.instances?.[name] != null,
       holds: (wake) => db.board.wakeHolds(wake),
       card: (uuid) => db.board.findCard(uuid),
+      // #2352: the card's Needs you buttons are in this instance's own channel (it is the card's lane).
+      buttonsHere: (instance, uuid) => {
+        // #2355 review: no live message, no buttons — the old words then.
+        if (this.fleetConfig?.needs_you?.live_message === false) return false;
+        const card = db.board.findCard(uuid);
+        if (!card) return false;
+        const leads = new Map(db.board.listProjects(true).map((p) => [p.id, p.leadInstance] as const));
+        return this.needsYouLane(card, leads) === instance;
+      },
       log: (level, message, extra) => this.logger[level](extra ?? {}, message),
     });
     db.board.onChange(({ rev, ids, projects, wakes }) => {
       this.emitSseEvent("tasks", { rev, ids, projects });
       waker.note(wakes);
+      // step 3: cards waiting for the person are Needs you items; #2355 review: a project's lead routes them too.
+      if (ids.length || projects) this.needsYou?.poke();
     });
   }
 
@@ -19647,6 +19821,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     this.clearStatuslineWatchers();
     this.costGuard?.stop();
     this.dailySummary?.stop();
+    this.taskBoardSummary?.stop();
     this.dailyTipScheduler?.stop();
     this.dailyTipScheduler = null;
     if (this.updateCheckTimer) { clearTimeout(this.updateCheckTimer as any); clearInterval(this.updateCheckTimer as any); this.updateCheckTimer = null; }
