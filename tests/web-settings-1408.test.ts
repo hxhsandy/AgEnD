@@ -262,6 +262,14 @@ describe("#2347: one save model — an edit is unsaved at once, the bar's Save w
       expect([!!bar(), !!p.root.querySelector(".s-readonly"), writes()]).toEqual([false, true, []]);
     } finally { p.document.body.removeAttribute("data-public-link"); }
   });
+  it("over the public link a dialog's Done stages nothing that could be saved: no bar", async () => {
+    p.document.body.setAttribute("data-public-link", "1");
+    try {
+      await mount(); await settle(6);
+      await stageDescription("alpha", "A2");
+      expect([!!bar(), !!p.root.querySelector(".s-readonly"), writes()]).toEqual([false, true, []]);
+    } finally { p.document.body.removeAttribute("data-public-link"); }
+  });
   it("the edited-field marker is the shared straight bar (.lbar's rule), never a border", async () => {
     const { readFileSync } = await import("node:fs");
     const css = readFileSync("src/ui/shared/app.css", "utf8");
