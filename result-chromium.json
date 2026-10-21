@@ -1,0 +1,148 @@
+{
+ "engine": "chromium",
+ "cases": {
+  "desk-light-en": {
+   "mounted": true,
+   "opensFitted": {
+    "pass": true,
+    "detail": {
+     "scale": 0.148361,
+     "level": "15%"
+    }
+   },
+   "levelShown": true,
+   "fitWidth": {
+    "pass": true,
+    "detail": {
+     "level": "89%"
+    }
+   },
+   "wheelScrollsTall": {
+    "pass": true,
+    "detail": {
+     "dy": -1200
+    }
+   },
+   "clickIsActualSize": {
+    "pass": true,
+    "detail": {
+     "level": "100%"
+    }
+   },
+   "clickPointStays": {
+    "pass": true,
+    "detail": {
+     "before": {
+      "x": 749.9949447631116,
+      "y": 1644.637067692992
+     },
+     "after": {
+      "x": 750,
+      "y": 1644.64
+     }
+    }
+   },
+   "clickDidNotClose": true,
+   "dragPans": {
+    "pass": true,
+    "detail": {
+     "dx": -60,
+     "dy": -300
+    }
+   },
+   "dragDidNotCloseOrToggle": true,
+   "ctrlWheelZooms": {
+    "pass": true,
+    "detail": {
+     "level": "332%"
+    }
+   },
+   "plusKey": {
+    "pass": true,
+    "detail": {
+     "level": "415%"
+    }
+   },
+   "minusKey": true,
+   "noStyleAttribute": true,
+   "escCloses": true,
+   "noPageErrors": true,
+   "errors": []
+  },
+  "phone-dark-zh-TW": {
+   "mounted": true,
+   "opensFitted": {
+    "pass": true,
+    "detail": {
+     "scale": 0.128292,
+     "level": "13%"
+    }
+   },
+   "levelShown": true,
+   "doubleTapActualSize": {
+    "pass": true,
+    "detail": {
+     "level": "100%"
+    }
+   },
+   "doubleTapPointStays": {
+    "pass": true,
+    "detail": {
+     "before": {
+      "x": 765.5917750132511,
+      "y": 1764.2045749799936
+     },
+     "after": {
+      "x": 765.589,
+      "y": 1764.2033333333331
+     }
+    }
+   },
+   "doubleTapDidNotClose": true,
+   "oneFingerPans": {
+    "pass": true,
+    "detail": {
+     "dx": -90,
+     "dy": -180
+    }
+   },
+   "levelButtonFits": {
+    "pass": true,
+    "detail": {
+     "level": "13%"
+    }
+   },
+   "pinchZooms": {
+    "pass": true,
+    "detail": {
+     "from": "13%",
+     "to": "38%"
+    }
+   },
+   "pinchAroundFingers": {
+    "pass": true,
+    "detail": {
+     "before": {
+      "x": 750.0023384154897,
+      "y": 2852.8668973903286
+     },
+     "after": {
+      "x": 750.0003897349022,
+      "y": 2852.8594849783176
+     }
+    }
+   },
+   "pinchDidNotClose": true,
+   "darkAreaBeside": {
+    "pass": true,
+    "detail": {
+     "tx": 98.7807
+    }
+   },
+   "darkTapCloses": true,
+   "noPageErrors": true,
+   "errors": []
+  }
+ },
+ "pass": true
+}
