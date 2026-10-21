@@ -281,10 +281,12 @@ describe("#2347: one save model — an edit is unsaved at once, the bar's Save w
     expect([model, writes().filter((r) => r.url === "/api/settings/fleet/defaults")[1].body]).toEqual(["other-admins-model", { auto_pause_after: 2 }]);
   });
   it("#2367 r2: an edit made while a Save runs that puts a field back to its old value is an edit too", async () => {
-    const g = gate<{ body: unknown }>();
+    const g = gate<{ body: unknown }>(), slow = gate<void>();
     let sent: any = null;
+    const after_ = { body: { ...structuredClone(FLEET), defaults: { backend: "claude-code", auto_pause_after: 1 } } };
     routes.push((r) => (r.method === "PUT" && r.url === "/api/settings/fleet/defaults" && !sent ? (sent = r.body, g.p) : undefined));
-    routes.push((r) => (sent && r.method === "GET" && r.url === "/api/settings/fleet/raw" ? { body: { ...structuredClone(FLEET), defaults: { backend: "claude-code", auto_pause_after: 1 } } } : undefined));
+    // The configuration is read back slowly (a slow link): nothing may be decided on the old one meanwhile.
+    routes.push((r) => (sent && r.method === "GET" && r.url === "/api/settings/fleet/raw" ? slow.p.then(() => after_) as any : undefined));
     await general();
     const was = p.root.querySelector("#g-auto").value;
     await type("#g-auto", "1");
@@ -292,6 +294,8 @@ describe("#2347: one save model — an edit is unsaved at once, the bar's Save w
     await type("#g-auto", was);                                   // back to what was saved before
     g.open({ body: { ok: true } });
     await vi.waitFor(() => expect(op().phase).toBe("done"), { timeout: 6000 });
+    await settle(12);
+    slow.open();
     await settle(12);
     const after = [was, sent, p.root.querySelector("#g-auto").value, rowClass("#g-auto"), bar()?.textContent.includes("1 unsaved change(s)")];
     save().click(); await settle(4);
