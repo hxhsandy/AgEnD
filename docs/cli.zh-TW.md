@@ -2,14 +2,14 @@
 
 ## 聊天指令（Telegram fleet 選單／Discord slash）
 
-Telegram fleet 選單列出 23 個指令，ClassicBot 選單列出 11 個；Discord 註冊 29 個 slash 名稱，包含 `/web` 與別名 `/dashboard`。Telegram 也處理未列入選單的 `/cancel`、`/save`。🔒 代表該範圍的管理員；所屬 fleet／ClassicBot 身分及平台差異請見[指令參考](commands.md)。選單與鎖頭由 `src/command-table.ts` 產生。
+Telegram fleet 選單列出 23 個指令，ClassicBot 選單列出 11 個；Discord 註冊 29 個 slash 名稱。主要指令是 `/web`；`/dashboard` 仍列在選單／slash 上，說明為「已棄用 — 請用 /web」，執行時先印一行提示再跑 `/web`。Telegram 也處理未列入選單的 `/cancel`、`/save`。🔒 代表該範圍的管理員；所屬 fleet／ClassicBot 身分及平台差異請見[指令參考](commands.md)。選單與鎖頭由 `src/command-table.ts` 產生。
 
 
 | 指令 | 描述 | 選項 / 參數 | 權限 |
 |---------|-------------|----------------|------------|
 | `/status` | Fleet 表格：Backend、Model、Context、推理強度、花費、執行狀態 | — | 🔒 管理員 |
 | `/sysinfo` | 詳細系統診斷（版本、負載、IPC 狀態、各 backend CLI 版本）；Telegram 另可用 `/sys-info`、`/sys_info` | — | 所有人 |
-| `/web` (`/dashboard` 別名) | 開啟登入選單，按登入按鈕才會私送一次性登入碼。Discord 私訊失敗可改用僅自己可見的回覆；Telegram 私送被拒時會說明如何先私訊啟動 bot。`/web revoke` 登出所有瀏覽器 | `[revoke]` | 🔒 管理員 |
+| `/web` (`/dashboard` 別名) | 開啟登入選單，按登入按鈕才會私送一次性登入碼。Discord 私訊失敗可改用僅自己可見的回覆；Telegram 私送被拒時會說明如何先私訊啟動 bot。`/web revoke` 登出所有瀏覽器。`/dashboard` 列為已棄用，會先印提示再做同一件事 | `[revoke]` | 🔒 管理員 |
 | `/backend` | 切換 fleet instance 的 backend；ClassicBot 用設定頁或 `classicBot.yaml` | 名稱或選單 | 🔒 管理員 |
 | `/visibility` | 跨 instance 訊息顯示方式 | `full\|summary\|hidden`；Telegram 限 General | 🔒 管理員 |
 | `/profile` | 在 General 錄製執行中 fleet 的 CPU profile（預設 60 秒，上限 1,800 秒） | `[seconds]` | 🔒 管理員 |
@@ -69,9 +69,6 @@ agend fleet restart [<name>]    # 已淘汰，2.4 移除：改執行 `agend rest
 在已安裝 AgEnD 服務的主機上（systemd 使用者或系統 unit，或 launchd job），手動執行 `agend fleet start`、`agend fleet stop` 會改交給 `agend start` / `agend stop` 並提示一行，讓服務管理器繼續管理 fleet：不會在服務旁邊多出一個沒人管的 fleet，也不會出現被 systemd 復原的停止（#2356）。服務管理器自己的 `fleet start`（unit 的 `ExecStart`、launchd job）以及沒有安裝服務的主機（Docker、手動設定）照舊直接啟動。指定實例名稱（`fleet start <name>`、`fleet stop <name>`）的用法不變。`agend stop` 也會停止系統 unit（`agend.service`）。若已安裝的服務在這台主機上無法執行（檔案寫好了但從未啟用，或 launchd 沒有可用的 session），`agend start` 會拒絕在它旁邊啟動 fleet 並說明原因；從你自己的 shell（不是 agent session）執行 `agend fleet start --direct`，就會不經服務直接啟動 fleet。fleet 自己的鎖仍會拒絕同一個 AgEnD home 上的第二個 fleet。
 
 ```bash
-agend fleet status              # 顯示實例狀態概覽
-agend fleet status --json       # JSON 輸出
-agend fleet logs                # 別名——會提示改用 agend logs
 agend fleet history             # 顯示事件歷史（成本、輪轉、懸掛）
 agend fleet history --instance <name> --type <type> --since <date> --limit <n> --json
 agend fleet activity            # 顯示活動日誌（協作、工具呼叫、訊息）
@@ -81,24 +78,31 @@ agend fleet cleanup             # 移除孤兒實例目錄
 agend fleet cleanup --dry-run   # 只預覽，不刪除
 ```
 
+`agend fleet status` 是 `agend ls --resources` 的隱藏別名。`agend fleet logs` 已移除，請用 `agend logs`。
+
 ## 實例工具 (Instance Tools)
 
 ```bash
 agend ls                        # 列出實例（狀態、backend、team、context、活動）
 agend ls --json                 # JSON 輸出
 agend ls --names-only           # 每行一個名稱（shell 補全用）
+agend ls --resources            # 一併回報工作區磁碟、未列名目錄、主機記憶體／swap
 agend ls --running              # 只列出執行中的實例
 agend ls --team <name>          # 依 team 篩選
 agend ls --backend <name>       # 依 backend 篩選
 agend ls --display              # 在最後一欄顯示 display name（預設隱藏）
 agend attach [name]             # 接入實例的 tmux 視窗（接受真名、display name、列號或子字串）
-agend logs                      # 顯示 fleet 日誌
+agend logs                      # 顯示 fleet 日誌（daemon.log；還沒有時改讀 fleet.log）
 agend logs -n 100               # 顯示最後 100 行（預設 50）
 agend logs -f                   # 追蹤模式（tail -f）
 agend logs --instance <name>    # 只看指定實例
 agend export-chat               # 把 fleet 活動匯出成 HTML 聊天記錄
 agend export-chat --from <date> --to <date> -o <path>
+agend profile [seconds]         # 錄製執行中 fleet 的 CPU profile（僅本機操作者；預設 60 秒，上限 1800）
+agend delivery show             # 讀取一筆耐久 delivery 狀態（操作者；查詢會寫入本機稽核）
 ```
+
+`agend status` 是 `agend ls` 的隱藏別名（已送出的更新訊息與 Windows 捷徑仍寫 `agend status`）。
 
 `agend logs` 讀取 `~/.agend/daemon.log` 的 Fleet 執行日誌。服務的 stdout/stderr 留在 `~/.agend/fleet.log`，用來查啟動錯誤和 Node 警告；若服務無法啟動，請查看該檔。`daemon.log` 尚未建立時，`agend logs` 會先讀 `fleet.log`。在互動式終端執行時，結構化日誌也會顯示在 stdout。
 
@@ -139,9 +143,9 @@ zsh 需要先初始化補全系統。若還沒做，`autoload -Uz compinit && co
 ## 診斷與驗證 (Diagnostics & Validation)
 
 ```bash
-agend doctor                    # 執行 fleet 健康診斷
+agend doctor                    # 主機／安裝診斷（backend、tmux、服務、D-Bus、fleet、IPC、網路）
 agend doctor mcp                # 全 fleet MCP 健康檢查（IPC、配置路徑、重複、binary PATH）
-agend health                    # Fleet 健康檢查——列出問題與診斷
+agend health                    # 執行中 fleet 的即時健康（HTTP、tmux、IPC）；不能代替 doctor
 agend validate                  # 驗證 fleet.yaml 與 classicBot.yaml
 agend validate --connections    # 印出 CONNECTIONS=<n>：fleet.yaml 的聊天連線數（給腳本用）
 agend backend doctor [backend]  # 檢查後端環境（執行檔、驗證、tmux、TERM）
@@ -215,7 +219,6 @@ agend schedule delete <id>      # 刪除排程
 agend schedule enable <id>      # 啟用排程
 agend schedule disable <id>     # 停用排程
 agend schedule history <id>     # 顯示排程執行紀錄（--limit <n>）
-agend schedule trigger <id>     # 只印出作法：CLI 自己無法觸發排程——fleet manager 跑著時請用 Telegram 介面觸發
 ```
 
 ## 樣板部署 (Template Deployments)
@@ -251,8 +254,9 @@ agend access pair <name> <uid>  # 產生配對碼
 ## 設定與安裝 (Setup & Installation)
 
 ```bash
-agend quickstart                # 簡化設定（新使用者建議）
-agend init                      # 完整互動式設定精靈
+agend quickstart                # CLI 引導式第一次設定：backend、聊天頻道、專案、fleet 服務（建議）
+agend setup                     # 瀏覽器第一次設定頁，在 fleet 存在之前
+agend init                      # 進階互動精靈（setup-wizard）；第一次設定請用 quickstart 或 setup
 agend install                   # 安裝、啟用並啟動系統服務 (launchd/systemd)
 agend install --no-activate     # 只寫入/更新 service 檔案
 agend uninstall                 # 移除系統服務
@@ -337,7 +341,7 @@ fleet 與 macOS 維持原有啟動路徑。Scope 隔離的是 fleet 停止，無
 ```bash
 agend settings confirm <id>        # 列出來源／請求人／完整遮蔽 diff，再詢問 y/N
 agend settings confirm <id> --yes  # 無 TTY 時明確確認剛檢查的 diff
-agend settings reject <id>
+agend settings reject <id>         # 拒絕這台主機上待確認的 Settings 變更
 ```
 
 在 host 上以 fleet 或 SetupHost 的相同使用者執行。它不會啟動 fleet；確認由私有本機 socket 負責。Agent session（存在 `AGEND_INSTANCE_NAME`）不能使用。套用前會再次核對 id、socket owner generation，以及檢查過的 effect／summary。過期或 stale 請求需重新提出；pending 不會跨重啟保存。

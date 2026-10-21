@@ -4622,6 +4622,17 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
   private async dispatchSlashCore(slash: ClassicStartSlashData, adapterId: string, adapter: ChannelAdapter): Promise<void> {
     // #1569: an alias (/web) is its command (/dashboard) from here on — the door, the table and the handler see one name.
     const data: ClassicStartSlashData = { ...slash, command: canonicalCommand(slash.command) };
+    // #2359: /dashboard stays listed; prefix its reply with the deprecation notice, then run /web's handler.
+    const noteDeprecatedDashboard = () => {
+      if (slash.command !== "dashboard") return;
+      const prefix = `${t("dashboard.deprecated")}\n\n`;
+      const respond = data.respond;
+      data.respond = async (text: string) => respond(prefix + text);
+      if (data.respondButtons) {
+        const respondButtons = data.respondButtons;
+        data.respondButtons = async (text, choices) => respondButtons(prefix + text, choices);
+      }
+    };
     const door = this.slashDoor(data, adapterId);
     if ("refusal" in door) {
       await data.respond(t(door.refusal)).catch(() => { /* the interaction may already be gone */ });
@@ -4632,6 +4643,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     // — before the table, which keeps /web for fleet admins. Per account: it touches no instance binding.
     // Decided synchronously, so an admin's /web still reaches the table with no await after the door (#1399).
     if (data.command === "dashboard" && this.isGuestWebAsk(adapterId, data.userId)) {
+      noteDeprecatedDashboard();
       await this.guestWebCommand({ adapterId, userId: data.userId, username: data.username,
         arg: String(data.options?.action ?? "").trim().toLowerCase(), replyHere: text => data.respond(text), replyPrivately: text => data.respond(text) });
       return;
@@ -4660,6 +4672,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       await data.respond(reply).catch(() => { /* the interaction may already be gone */ });
       return;
     }
+
+    noteDeprecatedDashboard();
 
     if (data.command === "start") {
       await this.handleClassicStartSlash(data, adapterId);
@@ -9292,6 +9306,10 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         // #1920 step 4b-3: /web typed in a ClassicBot room (a group: `/web@ThisBot`) by someone who is not a fleet admin,
         // while guest sign-in is on: their guest code, privately — as anywhere else. An admin's goes on as before.
         if (/^\/(?:web|dashboard)(?:\s|$)/i.test(text) && msgAdapter && this.isGuestWebAsk(msg.adapterId, msg.userId)) {
+          // #2359: this door must not skip the deprecation notice TopicCommands shows on /dashboard.
+          if (/^\/dashboard(?:\s|$)/i.test(text)) {
+            await msgAdapter.sendText(chatId, t("dashboard.deprecated")).catch(() => {});
+          }
           await this.guestWebCommand({ adapterId: msg.adapterId!, userId: msg.userId, username: msg.username,
             arg: text.replace(/^\/(?:web|dashboard)/i, "").trim().toLowerCase(), replyHere: body => msgAdapter.sendText(chatId, body) });
           return;
