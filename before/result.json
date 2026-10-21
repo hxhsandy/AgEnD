@@ -1,0 +1,498 @@
+{
+ "1-reply-bar/desk-light": [
+  {
+   "cls": "reply-bar",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(10, 98, 194)",
+   "bar": null
+  }
+ ],
+ "2-msg-quote/desk-light": [
+  {
+   "cls": "msg-quote",
+   "contentLeft": 11,
+   "borderLeft": "3px rgb(133, 133, 133)",
+   "bar": null
+  }
+ ],
+ "3-log-error/desk-light": [
+  {
+   "cls": "log-item k-assistant",
+   "contentLeft": 12,
+   "borderLeft": "0px rgb(13, 13, 13)",
+   "bar": null
+  },
+  {
+   "cls": "log-item k-error",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(196, 34, 43)",
+   "bar": null
+  },
+  {
+   "cls": "log-item k-tool s-failed",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(196, 34, 43)",
+   "bar": null
+  }
+ ],
+ "4-org-node/desk-light": [
+  {
+   "cls": "org-node st-working",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(26, 127, 55)",
+   "bar": null
+  },
+  {
+   "cls": "org-node st-needs",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(138, 90, 0)",
+   "bar": null
+  },
+  {
+   "cls": "org-node st-crashed",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(196, 34, 43)",
+   "bar": null
+  },
+  {
+   "cls": "org-node st-idle",
+   "contentLeft": 15,
+   "borderLeft": "3px rgba(0, 0, 0, 0)",
+   "bar": null
+  }
+ ],
+ "5-us-basis/desk-light": [
+  {
+   "cls": "us-basis",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(10, 98, 194)",
+   "bar": null
+  }
+ ],
+ "6-us-partial/desk-light": [
+  {
+   "cls": "us-partial",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(138, 90, 0)",
+   "bar": null
+  }
+ ],
+ "7-cmd-card/desk-light": [
+  {
+   "cls": "cmd-card",
+   "contentLeft": 12,
+   "borderLeft": "0px rgb(13, 13, 13)",
+   "bar": null
+  },
+  {
+   "cls": "cmd-card bad",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(196, 34, 43)",
+   "bar": null
+  }
+ ],
+ "8-tb-tile/desk-light": [
+  {
+   "cls": "tb-tile st-open",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(105, 105, 105)",
+   "bar": null
+  },
+  {
+   "cls": "tb-tile st-claimed",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(10, 98, 194)",
+   "bar": null
+  },
+  {
+   "cls": "tb-tile st-blocked",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(196, 34, 43)",
+   "bar": null
+  },
+  {
+   "cls": "tb-tile st-review",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(138, 90, 0)",
+   "bar": null
+  },
+  {
+   "cls": "tb-tile st-done",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(26, 127, 55)",
+   "bar": null
+  }
+ ],
+ "1-reply-bar/desk-dark": [
+  {
+   "cls": "reply-bar",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(122, 183, 255)",
+   "bar": null
+  }
+ ],
+ "2-msg-quote/desk-dark": [
+  {
+   "cls": "msg-quote",
+   "contentLeft": 11,
+   "borderLeft": "3px rgb(122, 122, 122)",
+   "bar": null
+  }
+ ],
+ "3-log-error/desk-dark": [
+  {
+   "cls": "log-item k-assistant",
+   "contentLeft": 12,
+   "borderLeft": "0px rgb(236, 236, 236)",
+   "bar": null
+  },
+  {
+   "cls": "log-item k-error",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(255, 138, 128)",
+   "bar": null
+  },
+  {
+   "cls": "log-item k-tool s-failed",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(255, 138, 128)",
+   "bar": null
+  }
+ ],
+ "4-org-node/desk-dark": [
+  {
+   "cls": "org-node st-working",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(76, 195, 138)",
+   "bar": null
+  },
+  {
+   "cls": "org-node st-needs",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(227, 179, 65)",
+   "bar": null
+  },
+  {
+   "cls": "org-node st-crashed",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(255, 138, 128)",
+   "bar": null
+  },
+  {
+   "cls": "org-node st-idle",
+   "contentLeft": 15,
+   "borderLeft": "3px rgba(0, 0, 0, 0)",
+   "bar": null
+  }
+ ],
+ "5-us-basis/desk-dark": [
+  {
+   "cls": "us-basis",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(122, 183, 255)",
+   "bar": null
+  }
+ ],
+ "6-us-partial/desk-dark": [
+  {
+   "cls": "us-partial",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(227, 179, 65)",
+   "bar": null
+  }
+ ],
+ "7-cmd-card/desk-dark": [
+  {
+   "cls": "cmd-card",
+   "contentLeft": 12,
+   "borderLeft": "0px rgb(236, 236, 236)",
+   "bar": null
+  },
+  {
+   "cls": "cmd-card bad",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(255, 138, 128)",
+   "bar": null
+  }
+ ],
+ "8-tb-tile/desk-dark": [
+  {
+   "cls": "tb-tile st-open",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(163, 163, 163)",
+   "bar": null
+  },
+  {
+   "cls": "tb-tile st-claimed",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(122, 183, 255)",
+   "bar": null
+  },
+  {
+   "cls": "tb-tile st-blocked",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(255, 138, 128)",
+   "bar": null
+  },
+  {
+   "cls": "tb-tile st-review",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(227, 179, 65)",
+   "bar": null
+  },
+  {
+   "cls": "tb-tile st-done",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(76, 195, 138)",
+   "bar": null
+  }
+ ],
+ "1-reply-bar/phone-light": [
+  {
+   "cls": "reply-bar",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(10, 98, 194)",
+   "bar": null
+  }
+ ],
+ "2-msg-quote/phone-light": [
+  {
+   "cls": "msg-quote",
+   "contentLeft": 11,
+   "borderLeft": "3px rgb(133, 133, 133)",
+   "bar": null
+  }
+ ],
+ "3-log-error/phone-light": [
+  {
+   "cls": "log-item k-assistant",
+   "contentLeft": 12,
+   "borderLeft": "0px rgb(13, 13, 13)",
+   "bar": null
+  },
+  {
+   "cls": "log-item k-error",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(196, 34, 43)",
+   "bar": null
+  },
+  {
+   "cls": "log-item k-tool s-failed",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(196, 34, 43)",
+   "bar": null
+  }
+ ],
+ "4-org-node/phone-light": [
+  {
+   "cls": "org-node st-working",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(26, 127, 55)",
+   "bar": null
+  },
+  {
+   "cls": "org-node st-needs",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(138, 90, 0)",
+   "bar": null
+  },
+  {
+   "cls": "org-node st-crashed",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(196, 34, 43)",
+   "bar": null
+  },
+  {
+   "cls": "org-node st-idle",
+   "contentLeft": 15,
+   "borderLeft": "3px rgba(0, 0, 0, 0)",
+   "bar": null
+  }
+ ],
+ "5-us-basis/phone-light": [
+  {
+   "cls": "us-basis",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(10, 98, 194)",
+   "bar": null
+  }
+ ],
+ "6-us-partial/phone-light": [
+  {
+   "cls": "us-partial",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(138, 90, 0)",
+   "bar": null
+  }
+ ],
+ "7-cmd-card/phone-light": [
+  {
+   "cls": "cmd-card",
+   "contentLeft": 12,
+   "borderLeft": "0px rgb(13, 13, 13)",
+   "bar": null
+  },
+  {
+   "cls": "cmd-card bad",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(196, 34, 43)",
+   "bar": null
+  }
+ ],
+ "8-tb-tile/phone-light": [
+  {
+   "cls": "tb-tile st-open",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(105, 105, 105)",
+   "bar": null
+  },
+  {
+   "cls": "tb-tile st-claimed",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(10, 98, 194)",
+   "bar": null
+  },
+  {
+   "cls": "tb-tile st-blocked",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(196, 34, 43)",
+   "bar": null
+  },
+  {
+   "cls": "tb-tile st-review",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(138, 90, 0)",
+   "bar": null
+  },
+  {
+   "cls": "tb-tile st-done",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(26, 127, 55)",
+   "bar": null
+  }
+ ],
+ "1-reply-bar/phone-dark": [
+  {
+   "cls": "reply-bar",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(122, 183, 255)",
+   "bar": null
+  }
+ ],
+ "2-msg-quote/phone-dark": [
+  {
+   "cls": "msg-quote",
+   "contentLeft": 11,
+   "borderLeft": "3px rgb(122, 122, 122)",
+   "bar": null
+  }
+ ],
+ "3-log-error/phone-dark": [
+  {
+   "cls": "log-item k-assistant",
+   "contentLeft": 12,
+   "borderLeft": "0px rgb(236, 236, 236)",
+   "bar": null
+  },
+  {
+   "cls": "log-item k-error",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(255, 138, 128)",
+   "bar": null
+  },
+  {
+   "cls": "log-item k-tool s-failed",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(255, 138, 128)",
+   "bar": null
+  }
+ ],
+ "4-org-node/phone-dark": [
+  {
+   "cls": "org-node st-working",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(76, 195, 138)",
+   "bar": null
+  },
+  {
+   "cls": "org-node st-needs",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(227, 179, 65)",
+   "bar": null
+  },
+  {
+   "cls": "org-node st-crashed",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(255, 138, 128)",
+   "bar": null
+  },
+  {
+   "cls": "org-node st-idle",
+   "contentLeft": 15,
+   "borderLeft": "3px rgba(0, 0, 0, 0)",
+   "bar": null
+  }
+ ],
+ "5-us-basis/phone-dark": [
+  {
+   "cls": "us-basis",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(122, 183, 255)",
+   "bar": null
+  }
+ ],
+ "6-us-partial/phone-dark": [
+  {
+   "cls": "us-partial",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(227, 179, 65)",
+   "bar": null
+  }
+ ],
+ "7-cmd-card/phone-dark": [
+  {
+   "cls": "cmd-card",
+   "contentLeft": 12,
+   "borderLeft": "0px rgb(236, 236, 236)",
+   "bar": null
+  },
+  {
+   "cls": "cmd-card bad",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(255, 138, 128)",
+   "bar": null
+  }
+ ],
+ "8-tb-tile/phone-dark": [
+  {
+   "cls": "tb-tile st-open",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(163, 163, 163)",
+   "bar": null
+  },
+  {
+   "cls": "tb-tile st-claimed",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(122, 183, 255)",
+   "bar": null
+  },
+  {
+   "cls": "tb-tile st-blocked",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(255, 138, 128)",
+   "bar": null
+  },
+  {
+   "cls": "tb-tile st-review",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(227, 179, 65)",
+   "bar": null
+  },
+  {
+   "cls": "tb-tile st-done",
+   "contentLeft": 15,
+   "borderLeft": "3px rgb(76, 195, 138)",
+   "bar": null
+  }
+ ]
+}
