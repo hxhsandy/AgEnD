@@ -74,6 +74,28 @@ function isPublicSettingsRoute(method: string, path: string): boolean {
   return ["POST", "PATCH", "DELETE"].includes(method) && /^\/api\/settings\/fleet\/instances\/[^/]+$/.test(path);
 }
 
+/**
+ * #2347 (the leader's default, for the user to confirm): over the temporary public link the fleet's settings are
+ * read-only — this is the server's half of the page's FLEET_READ_ONLY_OVER_PUBLIC_LINK (src/ui), and the two move
+ * together. A page-only policy is not read-only: these writes are refused here, before any handler.
+ */
+export const FLEET_READ_ONLY_OVER_PUBLIC_LINK = true;
+
+/**
+ * A public-link request that changes fleet.yaml, or applies, reloads or restarts it: every Settings write (deny by
+ * default) but a handful of operations — the emoji preview, the quick-start probe and plan (reads of a token), pausing
+ * or waking an agent, withdrawing one's own pending request — and the older /ui routes that change fleet.yaml (New
+ * agent, Fleet's config, deleting an agent). Starting, stopping, restarting one agent and chatting stay.
+ */
+export function isPublicFleetWrite(method: string, path: string): boolean {
+  if (method === "GET" || method === "HEAD") return false;
+  if (method === "POST" && /^\/ui\/(?:instances|config|instances\/[^/]+\/delete)$/.test(path)) return true;
+  if (!path.startsWith("/api/settings/")) return false;
+  if (method === "POST" && /^\/api\/settings\/(?:status-emojis\/preview|quickstart\/(?:probe|plan)|instances\/[^/]+\/(?:pause|wake))$/.test(path)) return false;
+  if (method === "DELETE" && /^\/api\/settings\/pending\/[0-9a-f]{32}$/.test(path)) return false;
+  return true;
+}
+
 export interface PublicGateway {
   readonly server: Server;
   readonly readinessMarker: string;
@@ -109,6 +131,11 @@ export function createPublicWebGateway(opts: {
       const decoded = decodeURIComponent(url.pathname);
       if (decoded.includes("\\") || decoded.includes("\0") || /%2f|%5c/i.test(url.pathname)) return reject(res, 400);
       if (!isPublicWebRoute(req.method ?? "GET", url.pathname)) return reject(res, 404);
+      if (FLEET_READ_ONLY_OVER_PUBLIC_LINK && isPublicFleetWrite(req.method ?? "GET", url.pathname)) {
+        res.writeHead(403, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "fleet_settings_read_only_over_public_link" }));
+        return;
+      }
       if (!opts.isOpen()) {
         if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/signin") {
           res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }); res.end(`<html><body>${marker}</body></html>`); return;
