@@ -1,0 +1,11 @@
+{
+ "leadSelected": "web-claude",
+ "errors": [],
+ "lane": "📥 Needs you here — 2\n• sol — Blocked: asks you: S-1 Score query and ranking — Which scores count: ranked games only, or casual too? (<1m)\n• sol — Waiting for your confirmation: M-2 Cache the top 100 — not wrapped up: 2 checklist item(s) unchecked (<1m)",
+ "buttons": [
+  "💬 Answer S-1",
+  "✅ Confirm M-2",
+  "↩️ Send back M-2"
+ ],
+ "summary": "📋 Task board — daily summary, 10/20 22:25 – 10/21 22:26\n\nWaiting for your confirmation (1)\n• M-2 \"Cache the top 100\" · Leaderboard\n\nBlocked (1)\n• S-1 \"Score query and ranking\" @sol: Which scores count: ranked games only, or casual too?\n\nDone (1)\n• M-3 \"Refund flow\" · Billing\n\nNew (7)\n• M-1 \"Serve the weekly leaderboard\" · Leaderboard\n• M-2 \"Cache the top 100\" · Leaderboard\n• M-3 \"Refund flow\" · Billing\n• M-4 \"Invoice PDF\" · Billing\n• 3 sub task(s): S-1, S-2, S-3\n\nProjects\n• Leaderboard 0% (0/4), 2 waiting for you, 1 blocked\n• Billing 50% (1/2)\n\nThe board: Fleet › Tasks on the dashboard."
+}
