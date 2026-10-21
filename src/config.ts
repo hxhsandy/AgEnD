@@ -99,6 +99,11 @@ export function getEffectiveInstanceDefaults(
     max_cross_instance_message_bytes: _maxCrossInstanceMessageBytes,
     // #1302: read by the fleet when it posts a notice, so changing the default never touches a daemon's config.
     cross_instance_visibility: _crossInstanceVisibility,
+    // Fleet-level startup controls (concurrency, stagger_delay_ms) are read
+    // directly from fleetConfig.defaults.startup by the fleet manager and must
+    // NOT be merged into instance configs — they have no meaning there and cause
+    // every instance to appear "changed" when defaults.startup is updated.
+    startup: _startup,
     ...instanceDefaults
   } = fleetDefaults as FleetDefaults;
   return deepMergeGeneric(
