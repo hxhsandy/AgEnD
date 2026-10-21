@@ -94,7 +94,7 @@ def field(lab, help_, control, key=None, dirty=None, tags=(), err=None):
     was = f'<div class="sx-was">{dirty}</div>' if dirty else ""
     keyl = f'<div class="sx-key">{key}</div>' if key else ""
     errl = f'<div class="sx-errmsg">⚠ {err}</div>' if err else ""
-    return f"""<div class="sx-field{' dirty' if dirty or tags else ''}"><div><div class="sx-lab">{lab}{tg}</div><div class="sx-help">{help_}</div>{was}{keyl}</div>{control}{errl}</div>"""
+    return f"""<div class="sx-field{' dirty lbar' if dirty or tags else ''}"><div><div class="sx-lab">{lab}{tg}</div><div class="sx-help">{help_}</div>{was}{keyl}</div>{control}{errl}</div>"""
 
 def inp(v, ph=False, err=False): return f'<div class="sx-input{" ph" if ph else ""}{" err" if err else ""}">{v}</div>'
 def tog(on): return f'<div class="sx-toggle{" on" if on else ""}"></div>'

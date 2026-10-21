@@ -29,7 +29,7 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .sx-card { background: var(--surface); border-radius: 12px; padding: 16px 20px; margin-bottom: 14px; display: flex; flex-direction: column; gap: 12px; }
 .sx-card h3 { margin: 0; font-size: 15px; }
 .sx-card .sx-cardnote { font-size: 12.5px; color: var(--text-3); margin: -6px 0 0; }
-.sx-field { display: grid; grid-template-columns: 1fr 260px; gap: 16px; align-items: center; padding: 8px 10px 8px 12px; margin: 0 -10px 0 -12px; border-radius: 8px; border-left: 3px solid transparent; }
+.sx-field { display: grid; grid-template-columns: 1fr 260px; gap: 16px; align-items: center; padding: 8px 10px 8px 15px; margin: 0 -10px 0 -15px; border-radius: 8px; }
 .sx-field .sx-lab { font-size: 14px; font-weight: 500; }
 .sx-field .sx-help { font-size: 12.5px; color: var(--text-3); margin-top: 2px; }
 .sx-field .sx-key { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--text-3); margin-top: 3px; }
@@ -42,7 +42,8 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .sx-toggle.on { background: var(--accent-fill, var(--accent)); border-color: transparent; }
 .sx-toggle.on::after { left: 18px; background: #fff; }
 /* An unsaved field: the accent edge, a dot, what it was, and its effect. */
-.sx-field.dirty { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
+/* #2330: the left accent is the shared straight bar (.lbar: 3px, inset top and bottom, square), never a rounded border. */
+.sx-field.dirty { --lbar-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
 .sx-was { font-size: 12px; color: var(--text-3); margin-top: 3px; }
 .sx-was s { color: var(--text-3); }
 .sx-tag { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; margin-left: 6px; vertical-align: 1px; }
@@ -131,3 +132,4 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .mk-desk .sx-field { padding-top: 6px; padding-bottom: 6px; }
 
 .sx-bar .btn-primary:disabled, .sx-bar .btn-primary[disabled] { opacity: 1 !important; background: transparent !important; color: var(--text-3) !important; border: 1px dashed var(--border-strong, var(--border)) !important; }
+.sx-bar .btn-primary:disabled, .sx-bar .btn-primary[disabled] { background: var(--surface-2) !important; color: var(--text-3) !important; border: 1px solid var(--border) !important; }
