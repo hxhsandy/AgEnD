@@ -357,7 +357,7 @@ Tabs (`/settings/<tab>`): **Preferences**, **Web appearance**, **Agents**, **Con
 **Save**: a field edit in General/Web/Web authority is unsaved at once (a straight bar on its left); a dialog's **Done**
 adds its changes. The bar **N unsaved change(s)** shows the cost — **Immediately**, **Restart this Agent** or **Restart
 AgEnD** — then **Save** or **Discard**; an invalid field keeps Save waiting (**Fix 1 field(s) to save**). Over a public
-link the fleet's settings are read-only.
+link the fleet's settings are read-only (the server refuses the writes too, New agent included).
 Confirmations (e.g. opening access) are asked at Apply. A change that loosens access waits for a fleet admin to confirm
 in the General chat ("Waiting for confirmation", **Withdraw**) — unless the browser is web-verified (#2170): an
 account that is a fleet admin of every connection the change affects, on their platform, confirms it by its own Apply
