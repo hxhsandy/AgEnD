@@ -130,11 +130,15 @@ html:has(.shell), html:has(.shell) body { overflow: hidden; }
    A short box that clips to its corners (.msg-quote) moves the bar in (--lbar-left) and shortens it (--lbar-inset) so
    the corner never cuts its ends round.
    tests/web-left-bar-2330.test.ts keeps a coloured border-left off rounded boxes. */
-.lbar, .reply-bar, .msg-quote, .p-log .log-item.k-error, .p-log .log-item.s-failed, .org-node, .us-basis, .us-partial, .cmd-card.bad, .tb-tile { position: relative; }
+.lbar, .reply-bar, .msg-quote, .p-log .log-item.k-error, .p-log .log-item.s-failed, .org-node, .us-basis, .us-partial, .cmd-card.bad, .tb-tile, .s-dirty { position: relative; }
 .lbar::before, .reply-bar::before, .msg-quote::before, .p-log .log-item.k-error::before, .p-log .log-item.s-failed::before, .org-node::before,
-.us-basis::before, .us-partial::before, .cmd-card.bad::before, .tb-tile::before {
+.us-basis::before, .us-partial::before, .cmd-card.bad::before, .tb-tile::before, .s-dirty::before {
   content: ""; position: absolute; left: var(--lbar-left, 0); top: var(--lbar-inset, var(--s-2)); bottom: var(--lbar-inset, var(--s-2)); width: 3px;
   background: var(--lbar-color, var(--accent)); pointer-events: none; }
+/* #2347: a Settings field edited and not saved yet — the shared straight bar (above), a light tint, and the 3px the bar
+   takes added to its padding (and taken back from its margin), so the field's text stays put. */
+.s-dirty { --lbar-color: var(--accent); --lbar-inset: var(--s-1); background: color-mix(in srgb, var(--accent) 7%, transparent);
+  padding-left: calc(var(--s-2) + 3px); margin-left: calc(-1 * (var(--s-2) + 3px)); border-radius: var(--r-sm); }
 .idc-swatches, .idc-places { border: 0; padding: 0; margin: 0 0 var(--s-3); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .idc-swatches legend, .idc-places legend { font-weight: var(--fw-semibold); margin-bottom: 6px; width: 100%; }
 .idc-swatch { --sw: var(--sw-dark); width: 28px; height: 28px; border-radius: 50%; border: 2px solid transparent; background: var(--sw); cursor: pointer; padding: 0; }

@@ -353,9 +353,11 @@ running; kiro shows fleet events only; other backends say they have no readable 
 Tabs (`/settings/<tab>`): **Preferences**, **Web appearance**, **Agents**, **Connections**, **ClassicBot**,
 **General**, **Web**, **Developer**. Header: version, **Setup wizard**, **Help**.
 
-**How changes apply.** Agents, Connections, ClassicBot, General, Web and Developer edits are *staged*: a dialog's
-**Stage change** (General/Web: **Review changes**) adds it to the bar **Changes not applied yet**, which shows the
-cost — **Immediately**, **Restart this Agent** or **Restart AgEnD** — then **Apply changes** or **Discard**.
+**How changes apply (#2347).** Agents, Connections, ClassicBot, General, Web and Developer edits are unsaved until
+**Save**: a field edit in General/Web/Web authority is unsaved at once (a straight bar on its left); a dialog's **Done**
+adds its changes. The bar **N unsaved change(s)** shows the cost — **Immediately**, **Restart this Agent** or **Restart
+AgEnD** — then **Save** or **Discard**; an invalid field keeps Save waiting (**Fix 1 field(s) to save**). Over a public
+link the fleet's settings are read-only.
 Confirmations (e.g. opening access) are asked at Apply. A change that loosens access waits for a fleet admin to confirm
 in the General chat ("Waiting for confirmation", **Withdraw**) — unless the browser is web-verified (#2170): an
 account that is a fleet admin of every connection the change affects, on their platform, confirms it by its own Apply

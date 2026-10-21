@@ -63,8 +63,8 @@ async function open(configured: Record<string, any> = {}, extra: Record<string, 
   const check = async (el: any, on: boolean) => { el.checked = on; fire(el, "change"); await settle(); };
   const type = async (el: any, v: string) => { el.value = v; fire(el, "input"); await settle(); };
   const button = (label: string, root: any = p.root) => root.querySelectorAll("button").find((b: any) => b.textContent.trim() === label);
-  const review = async () => { await click($("#vaReview")); };
-  const apply = async () => { const region = p.root.querySelector("[role=region]"); if (region) await click(button("Apply changes", region)); };
+  const review = async () => { await settle(2); };          // #2347: an edit is staged as it is made
+  const apply = async () => { const region = p.root.querySelector("[role=region]"); if (region) await click(button("Save", region)); };
   const writes = () => sent.filter((s) => s.method !== "GET" && s.path === "/api/settings/fleet/web");
   return { $, click, check, type, button, review, apply, writes };
 }
@@ -85,7 +85,7 @@ describe("Settings → Web → Web authority, as rendered", () => {
     expect(row.textContent).toContain("owner:admin");
     expect(row.textContent).toMatch(/Authorized .+ · until .+/);
   });
-  it("one PUT with only what changed: off, only-this-computer, 12 h — through Review and Apply", async () => {
+  it("one PUT with only what changed: off, only-this-computer, 12 h — staged as edited, then Save", async () => {
     const w = await open();
     await w.check(w.$("#vaEnabled"), false);
     await w.check(w.$("#vaLoopbackOnly"), true);
@@ -104,7 +104,8 @@ describe("Settings → Web → Web authority, as rendered", () => {
   it("hours out of 1–48 are refused on the page", async () => {
     const w = await open();
     await w.type(w.$("#vaHours"), "72");
-    expect(w.$("#vaReview").disabled).toBe(true);
+    const save = (p.root.querySelector("[role=region]")?.querySelectorAll("button") ?? []).find((b: any) => b.textContent.trim() === "Save");
+    expect([save?.disabled, !!p.root.querySelector(".s-pending .s-fix")]).toEqual([true, true]);     // #2347: Save waits
     expect(w.$(".s-web-authority .feedback.error").textContent).toBe("Must be a number from 1 to 48");
   });
   it("warns about hosts that reach the dashboard from elsewhere while only-this-computer is off; not once it is on", async () => {

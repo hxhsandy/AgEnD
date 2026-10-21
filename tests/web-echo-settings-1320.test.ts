@@ -143,10 +143,10 @@ async function webSection(web?: Record<string, unknown>) {
   const button = (label: string, root: any = p.root) => root.querySelectorAll("button").find((b: any) => b.textContent.trim() === label);
   const writes = () => sent.filter(s => s.method !== "GET");
   /** Review, then Apply: the writes it sent (none when nothing differs). */
-  const save = async () => { await click(button("Review changes")); };
+  const save = async () => { await settle(4); };
   const apply = async () => {
     const region = p.root.querySelector("[role=region]");
-    if (region) await click(button("Apply changes", region));
+    if (region) await click(button("Save", region));
   };
   return { $, check, type, choose, save, apply, writes, pending: () => p.root.querySelector("[role=region]"), click, button };
 }
@@ -176,15 +176,16 @@ describe("web echo config and Settings, as rendered (#1320 A)", () => {
     } finally { schema.impacts["web.public_link.ttl_minutes"] = before; }
   });
 
-  it("public-link Settings rejects invalid TTL before staging any unrelated edits (#1367)", async () => {
+  it("public-link Settings: an invalid TTL keeps Save waiting, so no unrelated edit is written either (#1367, #2347)", async () => {
     const h = await webSection();
     await h.type(h.$("publicWebTtl"), "481");
     await h.type(h.$("webSessionAbsolute"), "6");
     await h.check(h.$("webEchoToChannel"), false);
-    expect(h.button("Review changes")!.disabled).toBe(true);
     expect(h.$("publicWebTtl").getAttribute("class")).toBe("invalid");
+    // #2347: the edits are unsaved, and Save waits for the invalid one: nothing is written.
+    const save = (h.pending()?.querySelectorAll("button") ?? []).find((x: any) => x.textContent.trim() === "Save");
+    expect([save?.disabled, !!h.pending()?.querySelector(".s-fix")]).toEqual([true, true]);
     await h.save(); await h.apply();
-    expect(h.pending()).toBeNull();
     expect(h.writes()).toEqual([]);
   });
 

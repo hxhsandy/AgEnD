@@ -63,7 +63,7 @@ async function open(guests: Record<string, unknown> = { enabled: true, open_inst
   const check = async (el: any, on: boolean) => { el.checked = on; fire(el, "change"); await settle(); };
   const button = (label: string, root: any = p.root) => root.querySelectorAll("button").find((b: any) => b.textContent.trim() === label);
   const review = async () => { await click($("#guestsReview")); };
-  const apply = async () => { const region = p.root.querySelector("[role=region]"); if (region) await click(button("Apply changes", region)); };
+  const apply = async () => { const region = p.root.querySelector("[role=region]"); if (region) await click(button("Save", region)); };
   const writes = () => sent.filter((s) => s.method !== "GET" && s.path === "/api/settings/fleet/web");
   const row = (account: string) => $(`.guest-row[data-account="${account}"]`);
   const name = (container: any, n: string) => [...container.querySelectorAll("label")].find((l: any) => l.textContent.trim() === n)?.querySelector("input");

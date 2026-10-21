@@ -62,9 +62,8 @@ On the direct, signed-in dashboard (not through the public link), open
    such as `https://agend.example.com/` also works. No wildcard, IP address,
    port, path, query, user information or fragment is accepted.
 2. Set **Named tunnel origin port** to 19282, or the port used above. Valid
-   edits immediately appear in the sticky **changes not applied** bar. Select
-   **Apply changes**, then confirm the requested change when prompted. You
-   do not need to select **Review changes** first.
+   edits immediately appear in the sticky **unsaved changes** bar. Select
+   **Save**, then confirm the requested change when prompted.
 3. Paste the token into the masked **Cloudflare connector token** field and
    select **Set token**. Confirm the change when prompted. It is checked for
    format locally; validity and routing are checked when opening the link.
