@@ -15,10 +15,16 @@ import { buildSettingsImpactSchema } from "../src/instance-config-impact.js";
 const schema = buildSettingsImpactSchema();
 let p: AppPage, fleet: any, overview: any, sendCodeAnswer: any = { ok: true, outcome: "sent", expiresAt: Date.now() + 600_000 };
 let sent: Array<{ method: string; path: string; body: any }> = [];
+/** #2367 review: what PUT /api/settings/fleet/web answers (default: ok). */
+let webAnswer: { status: number; body: unknown } | null = null;
 const realFetch = (globalThis as any).fetch;
 const fakeFetch = async (path: string, init: { method?: string; body?: string } = {}) => {
   const method = init.method ?? "GET";
   sent.push({ method, path, body: init.body ? JSON.parse(init.body) : undefined });
+  if (method === "PUT" && path === "/api/settings/fleet/web" && webAnswer) {
+    const a = webAnswer;
+    return { ok: a.status >= 200 && a.status < 300, status: a.status, json: async () => a.body };
+  }
   const body = (() => {
     if (method === "POST" && path === "/api/settings/apply") return { id: "job-1", status: "done", targets: [] };
     if (method === "POST" && path === "/api/settings/guests/revoke") return { ok: true, count: 1, durable: true };
@@ -37,7 +43,7 @@ const fakeFetch = async (path: string, init: { method?: string; body?: string } 
 };
 beforeAll(() => { p = page({ url: "http://127.0.0.1:19280/settings/web" }); (globalThis as any).fetch = fakeFetch; });
 afterAll(() => { p.restore(); (globalThis as any).fetch = realFetch; });
-beforeEach(() => { sent = []; p.window.confirm = () => true; (globalThis as any).confirm = () => true; });
+beforeEach(() => { sent = []; webAnswer = null; p.window.confirm = () => true; (globalThis as any).confirm = () => true; });
 afterEach(async () => {
   await p.unmount();
   p.document.body.removeAttribute("data-public-link");
@@ -153,6 +159,25 @@ describe("Settings → Guests, as rendered (#2348)", () => {
     expect(w.row("dc:111").classList.contains("s-dirty")).toBe(true);
     await w.apply();
     expect(w.writes().map((s) => s.body)).toEqual([{ guests: { chat: false, grants: { "dc:111": { name: "Alice", instances: ["alpha", "beta"] } } } }]);
+  });
+  it("#2367 review: the real Save tells the section how it went — failed (the section says why) and waiting", async () => {
+    const { appStore } = await import("/assets/app-store.js");
+    webAnswer = { status: 400, body: { error: "grant names someone not seen in chat" } };
+    let w = await open();
+    await w.check(w.$("#guestsChat"), false);
+    await w.apply(); await settle(12);
+    // …and the edit it failed to save is still there, unsaved (the section was shown again by the reload).
+    const failed = [(appStore.get() as any).settingsOp?.steps?.[0]?.stageKey, p.root.querySelector(".g-error")?.textContent ?? "",
+      w.$("#guestsChat").checked, !!p.root.querySelector(".s-pending")];
+    const { resetOperation } = await import("/ui/js/settings-apply.js");
+    resetOperation();
+    webAnswer = { status: 202, body: { ok: true, result: "pending_confirmation", pending_change: { id: "e".repeat(32), state: "pending", section: "access",
+      requested_at: 1, requested_by: "Chrome", expires_at: 2, remaining_ms: 290_000, source: "web_session", summary: ["guests"], confirmation: { kind: "chat" }, can_withdraw: true, outcome: null } } };
+    w = await open();
+    await w.check(w.$("#guestsChat"), false);
+    await w.apply(); await settle(12);
+    expect([failed, p.root.textContent.includes("Waiting for a fleet admin")])
+      .toEqual([["guests", expect.stringContaining("grant names someone not seen in chat"), false, true], true]);
   });
   it("#2365 review: starting grants from an empty guest list stages grants: {} — explicit access with no one in it", async () => {
     const w = await open({ enabled: true }, { explicit: false, guests: [] });

@@ -95,7 +95,10 @@ export function GuestsSection({ ctx, staged }) {
   useEffect(() => {
     if (!first.seen) { first.seen = true; return; }
     const o = savedGuests(ctx.fleet);
-    setOriginal(o); setF({ ...o, grants: o.grants ? copyGrants(o.grants) : null }); setEditing(null); setStatus(null);
+    // #2367 review: an edit made while a Save ran is staged again and outlives that Save; Discard leaves none.
+    const since = ctx.staged && typeof ctx.staged.get === "function" ? ctx.staged.get("guests") : null;
+    setOriginal(o); setF(since && since.draft ? cloneDraft(since.draft) : { ...o, grants: o.grants ? copyGrants(o.grants) : null });
+    setEditing(null); setStatus(null);
     load();
   }, [epoch]);
   // A cooldown on screen counts down.
