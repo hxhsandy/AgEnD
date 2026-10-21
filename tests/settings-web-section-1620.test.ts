@@ -53,12 +53,15 @@ async function open(extra: Record<string, unknown> = {}, section = "web") {
   const check = async (el: any, on: boolean) => { el.checked = on; fire(el, "change"); await settle(); };
   const type = async (el: any, value: string) => { el.value = value; fire(el, "input"); await settle(); };
   const button = (label: string, root: any = p.root) => root.querySelectorAll("button").find((b: any) => b.textContent.trim() === label);
-  const review = async () => { await click(button("Review changes")); };
-  const apply = async () => { const region = p.root.querySelector("[role=region]"); if (region) await click(button("Apply changes", region)); };
+  const review = async () => { await settle(4); };
+  const apply = async () => { const region = p.root.querySelector("[role=region]"); if (region) await click(button("Save", region)); };
   const webWrites = () => sent.filter(s => s.method !== "GET" && s.path === "/api/settings/fleet/web");
   const text = () => p.root.querySelector(".s-web")?.textContent ?? "";
   return { $, check, type, review, apply, button, webWrites, text };
 }
+
+/** #2347: the Settings bar's Save (null while nothing is unsaved). */
+const saveButton = () => (p.root.querySelector("[role=region]")?.querySelectorAll("button") ?? []).find((b: any) => b.textContent.trim() === "Save") ?? null;
 
 describe("Settings → Web, as rendered", () => {
   it("is a section of its own; the web chat card moved here from General", async () => {
@@ -123,18 +126,18 @@ describe("Settings → Web, as rendered", () => {
     ["webSessionIdle", "60", "Must not exceed the session length"],       // absolute left at its default, 48 (#1670)
     ["webTerminalTtl", "21", "Must be a whole number from 1 to 20"],
     ["webTerminalTtl", "2.5", "Must be a whole number from 1 to 20"],
-  ])("%s = %s is refused in the form: marked, explained, nothing staged", async (id, value, message) => {
+  ])("%s = %s is refused in the form: marked, explained; unsaved, but Save waits — nothing is written (#2347)", async (id, value, message) => {
     const w = await open();
     await w.type(w.$(id), value);
-    expect([w.$(id).getAttribute("class"), w.text().includes(message), w.button("Review changes").disabled]).toEqual(["invalid", true, true]);
+    expect([w.$(id).getAttribute("class"), w.text().includes(message), saveButton()?.disabled, !!p.root.querySelector(".s-pending .s-fix")]).toEqual(["invalid", true, true, true]);
     await w.review(); await w.apply();
-    expect([p.root.querySelector("[role=region]"), w.webWrites()]).toEqual([null, []]);
+    expect(w.webWrites()).toEqual([]);
   });
 
   it("a shorter session typed with the idle time left blank is fine: the idle time follows it (#1670)", async () => {
     const w = await open();
     await w.type(w.$("webSessionAbsolute"), "24");
-    expect([w.$("webSessionIdle").getAttribute("class"), w.button("Review changes").disabled]).toEqual(["", false]);
+    expect([w.$("webSessionIdle").getAttribute("class"), saveButton()?.disabled]).toEqual(["", false]);
     await w.review(); await w.apply();
     expect(w.webWrites().map(s => s.body)).toEqual([{ session: { local: { absolute_hours: 24 } } }]);
   });
@@ -142,9 +145,9 @@ describe("Settings → Web, as rendered", () => {
   it("idle is checked against the absolute limit being typed, not only the stored one", async () => {
     const w = await open({ web: { session: { local: { absolute_hours: 4 } } } });
     await w.type(w.$("webSessionIdle"), "6");
-    expect(w.button("Review changes").disabled).toBe(true);
+    expect(saveButton()?.disabled).toBe(true);
     await w.type(w.$("webSessionAbsolute"), "8");
-    expect(w.button("Review changes").disabled).toBe(false);
+    expect(saveButton()?.disabled).toBe(false);
   });
 
   it("lists every other web setting read-only, with its value from fleet.yaml or 'not set (default)'", async () => {
@@ -162,10 +165,10 @@ describe("Settings → Web, as rendered", () => {
   it("over the temporary public link: the form is disabled and says why; nothing can be staged", async () => {
     p.document.body.setAttribute("data-public-link", "1");
     const w = await open();
-    expect([p.root.querySelector(".s-web-fields").hasAttribute("disabled"), !!w.$("webPublicRefused"), w.button("Review changes").disabled]).toEqual([true, true, true]);
+    expect([p.root.querySelector(".s-web-fields").hasAttribute("disabled"), !!w.$("webPublicRefused"), !!p.root.querySelector(".s-readonly")]).toEqual([true, true, true]);
     await w.type(w.$("webSessionAbsolute"), "6");
     await w.review(); await w.apply();
-    expect(w.webWrites()).toEqual([]);
+    expect([p.root.querySelector("[role=region]"), w.webWrites()]).toEqual([null, []]);   // #2347: no Save bar over the link
   });
 
   it("from the dashboard's own address the same form is enabled (control)", async () => {
@@ -223,7 +226,7 @@ describe("#2344 Web edits join the existing Apply draft automatically", () => {
     const w = await open({ web: { public_link: { hostname: "chat.example.com", tunnel_token_env: "MY_CUSTOM_CONNECTOR" } } });
     expect(pending()).toBeNull(); expect(w.webWrites()).toEqual([]);
     await w.type(w.$("publicWebTtl"), "90");
-    expect(pending()?.textContent).toContain("Apply changes"); expect(w.webWrites()).toEqual([]);
+    expect(pending()?.textContent).toContain("Save"); expect(w.webWrites()).toEqual([]);
     await w.apply();
     expect(w.webWrites().map(s => s.body)).toEqual([{ public_link: { ttl_minutes: 90 } }]);
   });
@@ -231,21 +234,21 @@ describe("#2344 Web edits join the existing Apply draft automatically", () => {
     const w = await open();
     await w.type(w.$("publicWebHostname"), "chat.example.com");
     await w.type(w.$("publicWebTtl"), "9"); await w.type(w.$("publicWebTtl"), "90");
-    expect(pending()?.textContent).toContain("Apply changes"); expect(w.webWrites()).toEqual([]);
+    expect(pending()?.textContent).toContain("Save"); expect(w.webWrites()).toEqual([]);
     await w.apply();
     expect(w.webWrites().map(s => s.body)).toEqual([{ public_link: { hostname: "chat.example.com", tunnel_token_env: "AGEND_CLOUDFLARE_TUNNEL_TOKEN", ttl_minutes: 90 } }]);
   });
   it("putting every edited value back removes the draft and Apply bar", async () => {
     const w = await open(); await w.check(w.$("webLogTab"), true);
-    expect(pending()?.textContent).toContain("Apply changes");
+    expect(pending()?.textContent).toContain("Save");
     await w.check(w.$("webLogTab"), false); expect(pending()).toBeNull();
     await w.apply(); expect(w.webWrites()).toEqual([]);
   });
-  it("an invalid edit removes the older valid draft, remains inline, and recovers when corrected", async () => {
+  it("an invalid edit replaces the older valid draft: unsaved, Save waits (#2347), remains inline, and recovers when corrected", async () => {
     const w = await open(); await w.type(w.$("publicWebTtl"), "90"); expect(pending()).not.toBeNull();
     await w.type(w.$("publicWebTtl"), "999"); expect(w.$("publicWebTtl").getAttribute("class")).toBe("invalid");
-    expect(pending()).toBeNull(); await w.apply(); expect(w.webWrites()).toEqual([]);
-    await w.type(w.$("publicWebTtl"), "60"); expect(pending()?.textContent).toContain("Apply changes"); await w.apply();
+    expect([!!pending()?.querySelector(".s-fix"), saveButton()?.disabled]).toEqual([true, true]); await w.apply(); expect(w.webWrites()).toEqual([]);
+    await w.type(w.$("publicWebTtl"), "60"); expect(pending()?.textContent).toContain("Save"); await w.apply();
     expect(w.webWrites().map(s => s.body)).toEqual([{ public_link: { ttl_minutes: 60 } }]);
   });
   it("returning from another Settings section shows the pending hostname and later edits preserve it", async () => {
@@ -254,7 +257,7 @@ describe("#2344 Web edits join the existing Apply draft automatically", () => {
     await p.mount(h(SettingsPanel, { route: { panel: "settings", section: "general" }, navKey: "settings:general" })); await settle();
     expect(pending()).not.toBeNull();
     await p.mount(h(SettingsPanel, { route: { panel: "settings", section: "web" }, navKey: "settings:web" })); await settle();
-    expect(pending()?.textContent).toContain("Apply changes"); expect(w.$("publicWebHostname").value).toBe("chat.example.com"); expect(w.webWrites()).toEqual([]);
+    expect(pending()?.textContent).toContain("Save"); expect(w.$("publicWebHostname").value).toBe("chat.example.com"); expect(w.webWrites()).toEqual([]);
     await w.type(w.$("publicWebOriginPort"), "19300"); await w.apply();
     expect(w.webWrites().map(s => s.body)).toEqual([{ public_link: { hostname: "chat.example.com", tunnel_token_env: "AGEND_CLOUDFLARE_TUNNEL_TOKEN", origin_port: 19300 } }]);
   });
@@ -278,7 +281,7 @@ describe("#2344 Web edits join the existing Apply draft automatically", () => {
     const w = await open({ web: { public_link: { hostname: "chat.example.com", tunnel_token_env: "MY_CUSTOM_CONNECTOR" } } });
     const token = "private-test-connector-2344"; await w.type(w.$("publicTunnelToken"), token);
     expect(pending()).toBeNull(); expect(sent.filter(s => s.method !== "GET")).toEqual([]);
-    await w.type(w.$("publicWebTtl"), "90"); expect(pending()?.textContent).toContain("Apply changes"); await w.apply();
+    await w.type(w.$("publicWebTtl"), "90"); expect(pending()?.textContent).toContain("Save"); await w.apply();
     expect(w.webWrites().map(s => s.body)).toEqual([{ public_link: { ttl_minutes: 90 } }]);
     expect(JSON.stringify(w.webWrites())).not.toContain(token); expect(sent.filter(s => s.method !== "GET" && s.path.includes("public-tunnel-token"))).toEqual([]);
   });

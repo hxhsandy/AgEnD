@@ -116,7 +116,7 @@ const untilIdle = async () => {
   expect(busy(), "the Apply finished").toBe(false);
 };
 /** The staged-change bar's Apply; the test waits for the operation it starts to finish. */
-const applyStaged = async () => { await click(button("Apply changes", pending())); await untilIdle(); };
+const applyStaged = async () => { await click(button("Save", pending())); await untilIdle(); };
 const writes = () => sent.filter(s => s.method !== "GET");
 
 describe("Settings P0 redesign shell", () => {
@@ -149,13 +149,13 @@ describe("Settings P0 redesign shell", () => {
     expect(pending()).toBeNull();
     // An instance-level default (model): the bar names the costliest kind staged.
     await typeModel("#g-model", "claude-opus-4-8");
-    await click(button("Review changes"));
+    await settle(4);
     const bar = pending()!;
     expect(bar).not.toBeNull();
-    expect(bar.textContent).toContain("1 change(s) not applied");
+    expect(bar.textContent).toContain("1 unsaved change(s)");      // #2347: the section's Save
     expect(bar.textContent).toContain("Restart this Agent");
     expect(bar.textContent).not.toContain("Restart AgEnD");
-    expect(button("Apply changes", bar)).toBeTruthy();
+    expect(button("Save", bar)).toBeTruthy();
     expect(button("Discard", bar)).toBeTruthy();
   });
 
@@ -171,7 +171,7 @@ describe("Settings P0 redesign shell", () => {
     expect(select.value).toBe("standard");
     expect(select.disabled).toBe(false);
     await choose(select, "verbose");
-    await click(button("Stage change"));
+    await click(button("Done"));
     await applyStaged();
     expect(writes().filter(s => s.path === "/api/settings/fleet/instances/alpha-t1")).toEqual([
       expect.objectContaining({ method: "PATCH", body: { tool_progress: "verbose" } }),
@@ -182,7 +182,7 @@ describe("Settings P0 redesign shell", () => {
     const defaults = p.root.querySelector("#g-tp")!;
     expect(defaults.value).toBe("off");
     await choose(defaults, "standard");
-    await click(button("Review changes"));
+    await settle(4);
     expect(pending()!.textContent).toContain("Immediately");       // tool progress is a hot setting
     await applyStaged();
     const put = writes().find(s => s.path === "/api/settings/fleet/defaults")!;
@@ -206,7 +206,7 @@ describe("Settings P0 redesign shell", () => {
     const inherit = field.querySelector("input[type=checkbox]")!;
     await check(inherit);
     expect(p.root.querySelector("#ag-tool_progress")!.disabled).toBe(true);
-    await click(button("Stage change"));
+    await click(button("Done"));
     await applyStaged();
     expect(writes().filter(s => s.path.startsWith("/api/settings/fleet/instances/"))).toEqual([
       expect.objectContaining({ method: "PATCH", path: "/api/settings/fleet/instances/alpha-t1", body: { tool_progress: null } }),
@@ -254,7 +254,7 @@ describe("Settings P0 redesign shell", () => {
     await mountSettings("classic");
     await click(button("Settings"));
     await typeModel("#cl-model", "claude-haiku-5-5");
-    await click(button("Stage change"));
+    await click(button("Done"));
     await applyStaged();
     expect(writes().find(s => s.method === "PATCH")).toMatchObject({ path: "/api/settings/classic/channels/c1", body: { model: "claude-haiku-5-5" } });
   });
@@ -267,7 +267,7 @@ describe("Settings P0 redesign shell", () => {
     await click(button("Settings"));
     // Opening a locked connection: staged at once; the question is asked only when Apply runs.
     await choose(p.root.querySelector("#bot-mode")!, "open");
-    await click(button("Stage change"));
+    await click(button("Done"));
     expect(confirmed).toEqual([]);
     expect(writes()).toEqual([]);
     await applyStaged();
@@ -283,7 +283,7 @@ describe("Settings P0 redesign shell", () => {
     await choose(p.root.querySelector("#bot-mode")!, "locked");
     await click(p.root.querySelector(".chips-box")!.querySelector("button.chip-x"));
     expect(p.root.querySelector("dialog")!.textContent).toContain("Locked mode has no allowed users; add at least one administrator to avoid lockout.");
-    await click(button("Stage change"));
+    await click(button("Done"));
     await applyStaged();
     expect(confirmed).toEqual(["Locked access has no allowed users. This may leave nobody able to administer the bot. Continue?"]);
     expect(writes()).toEqual([]);             // refused: nothing written, the change is not applied

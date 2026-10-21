@@ -94,7 +94,7 @@ async function stageDescription(name: string, text: string) {
   btn(row, "Settings").click(); await settle(4);
   const input = p.root.querySelector("#ag-desc");
   input.value = text; fire(input, "input"); await settle(2);
-  btn(p.root.querySelector("dialog"), "Stage change").click(); await settle(4);
+  btn(p.root.querySelector("dialog"), "Done").click(); await settle(4);
 }
 const op = () => app.appStore.get().settingsOp;
 /** An event on the window itself (beforeunload, popstate): mini-dom's window is a bare event target. */
@@ -116,7 +116,7 @@ describe("Apply belongs to the app before the first write (§5)", () => {
       await stageDescription("beta", "B2");
       expect(p.root.querySelector(".s-pending")?.textContent).toContain("2");
       if (hold === "the first write accepted") routes.push(r => (r.method === "PATCH" && r.url.endsWith("/alpha") ? (async () => { await p.unmount(); return { body: { ok: true } }; })() : undefined));
-      btn(p.root.querySelector(".s-pending"), "Apply changes").click();
+      btn(p.root.querySelector(".s-pending"), "Save").click();
       await settle(2);
       expect(op()).not.toBeNull();                              // handed over: the operation exists before any answer
       if (hold !== "the first write accepted") {
@@ -146,13 +146,13 @@ describe("Apply belongs to the app before the first write (§5)", () => {
     routes.push(r => (r.url === "/api/settings/apply/job1" ? g.p : undefined));
     await mount(); await settle(6);
     await stageDescription("alpha", "A2");
-    btn(p.root.querySelector(".s-pending"), "Apply changes").click();
+    btn(p.root.querySelector(".s-pending"), "Save").click();
     await vi.waitFor(() => expect(op().phase).toBe("watching"));
     await p.unmount();
     await mount(); await settle(6);
     expect(p.root.querySelector(".s-op")?.textContent).toContain("Applying");
     await stageDescription("beta", "B2");
-    const applyBtn = btn(p.root.querySelector(".s-pending"), "Apply changes");
+    const applyBtn = btn(p.root.querySelector(".s-pending"), "Save");
     expect(applyBtn.disabled).toBe(true);
     applyBtn.click(); await settle(4);
     expect(apply.startOperation([{ label: "x", impact: "now", request: { method: "PATCH", url: "/x", body: {} } }])).toBe(false);
@@ -206,6 +206,159 @@ describe("#2346: a dialog's footer says what its changes cost — only the field
   });
 });
 
+describe("#2347: one save model — an edit is unsaved at once, the bar's Save writes it", () => {
+  const bar = () => p.root.querySelector(".s-pending");
+  const save = () => (bar() ? btn(bar(), "Save") : null);
+  const pick = async (sel: string, value: string) => { const el = p.root.querySelector(sel); el.value = value; fire(el, "change"); await settle(4); };
+  const type = async (sel: string, value: string) => { const el = p.root.querySelector(sel); el.value = value; fire(el, "input"); await settle(4); };
+  /** The class of the nearest row (`.field` or `label.check`) holding `sel`. */
+  const rowClass = (sel: string) => { let n = p.root.querySelector(sel); while (n && !/\b(field|check)\b/.test(n.getAttribute?.("class") || "")) n = n.parentElement; return n ? n.getAttribute("class") : null; };
+  const general = async () => { await mount("general", "settings:general|1|en"); await settle(6); };
+  it("General: no Review step — a change is staged as it is made, its row carries the straight bar, the bar's Save sends it", async () => {
+    await general();
+    const before = [!!bar(), btn(p.root, "Review changes"), rowClass("#g-ll")];
+    await pick("#g-ll", "warn");
+    expect([before, bar()?.textContent.includes("1 unsaved change(s)"), rowClass("#g-ll"), rowClass("#g-am"), writes()])
+      .toEqual([[false, undefined, "field"], true, "field s-dirty", "field", []]);
+    save().click(); await settle(10);
+    expect(writes().filter((r) => r.url === "/api/settings/fleet/defaults").map((r) => r.body)).toEqual([{ log_level: "warn" }]);
+  });
+  it("an invalid value keeps the change unsaved with Save waiting (\"Fix 1 field(s) to save\"); fixing it lets Save go", async () => {
+    await general();
+    await type("#g-auto", "-3");
+    const bad = [!!bar(), save()?.disabled, bar()?.querySelector(".s-fix")?.textContent];
+    save()?.click(); await settle(6);
+    const none = writes().length;
+    await type("#g-auto", "15");
+    expect([bad, none, save()?.disabled, !!bar()?.querySelector(".s-fix")]).toEqual([[true, true, "Fix 1 field(s) to save"], 0, false, false]);
+  });
+  it("a draft survives going to another section and back (still staged, still shown); Discard drops it and the bar", async () => {
+    await general();
+    await pick("#g-ll", "warn");
+    await mount("web", "settings:web|1|en"); await settle(6);
+    const away = !!bar();
+    await mount("general", "settings:general|2|en"); await settle(6);
+    const back = [p.root.querySelector("#g-ll").value, rowClass("#g-ll"), !!bar()];
+    btn(bar(), "Discard").click(); await settle(8);
+    expect([away, back, p.root.querySelector("#g-ll").value, rowClass("#g-ll"), !!bar(), writes()])
+      .toEqual([true, ["warn", "field s-dirty", true], "info", "field", false, []]);
+  });
+  it("after a Save that went through, the drafts go: the form shows what is saved, unmarked", async () => {
+    let saved = false;
+    routes.push((r) => (r.method === "PUT" && r.url === "/api/settings/fleet/defaults" ? (saved = true, { body: { ok: true } }) : undefined));
+    routes.push((r) => (saved && r.method === "GET" && r.url === "/api/settings/fleet/raw" ? { body: { ...structuredClone(FLEET), defaults: { backend: "claude-code", log_level: "warn" } } } : undefined));
+    await general();
+    await pick("#g-ll", "warn");
+    save().click(); await settle(2);
+    await vi.waitFor(() => expect(op().phase).toBe("done"), { timeout: 6000 });
+    await settle(10);
+    expect([saved, p.root.querySelector("#g-ll").value, rowClass("#g-ll"), !!bar()]).toEqual([true, "warn", "field", false]);
+  });
+  it("#2367 review: edits made while a Save runs (this section's and another's) outlive it — it writes what it had", async () => {
+    const g = gate<{ body: unknown }>();
+    let sent: any = null;
+    routes.push((r) => (r.method === "PUT" && r.url === "/api/settings/fleet/defaults" && !sent ? (sent = r.body, g.p) : undefined));
+    routes.push((r) => (sent && r.method === "GET" && r.url === "/api/settings/fleet/raw" ? { body: { ...structuredClone(FLEET), defaults: { backend: "claude-code", auto_pause_after: 1, model: "other-admins-model" } } } : undefined));
+    await general();
+    await type("#g-auto", "1");
+    save().click(); await settle(4);
+    await type("#g-auto", "2");                                   // the form stays editable while the write is held
+    await mount("web", "settings:web|1|en"); await settle(6);
+    const log = p.root.querySelector("#webLogTab"); const logWas = log.checked; log.checked = !logWas; fire(log, "change"); await settle(4);
+    await mount("general", "settings:general|2|en"); await settle(6);
+    g.open({ body: { ok: true } });
+    await vi.waitFor(() => expect(op().phase).toBe("done"), { timeout: 6000 });
+    await settle(12);
+    const after = [sent, p.root.querySelector("#g-auto").value, rowClass("#g-auto"), bar()?.textContent.includes("2 unsaved change(s)")];
+    await mount("web", "settings:web|2|en"); await settle(6);
+    expect([...after, p.root.querySelector("#webLogTab").checked === !logWas]).toEqual([{ auto_pause_after: 1 }, "2", "field s-dirty", true, true]);
+    // A kept draft is only its edits: a field never touched shows what is saved now (here another admin's model), and
+    // the next Save sends only the edit.
+    await mount("general", "settings:general|3|en"); await settle(6);
+    const model = p.root.querySelector("#g-model").value;
+    save().click(); await settle(4);
+    await vi.waitFor(() => expect(writes().filter((r) => r.url === "/api/settings/fleet/defaults")).toHaveLength(2), { timeout: 6000 });
+    expect([model, writes().filter((r) => r.url === "/api/settings/fleet/defaults")[1].body]).toEqual(["other-admins-model", { auto_pause_after: 2 }]);
+  });
+  it("#2367 r2: an edit made while a Save runs that puts a field back to its old value is an edit too", async () => {
+    const g = gate<{ body: unknown }>(), slow = gate<void>();
+    let sent: any = null;
+    const after_ = { body: { ...structuredClone(FLEET), defaults: { backend: "claude-code", auto_pause_after: 1 } } };
+    routes.push((r) => (r.method === "PUT" && r.url === "/api/settings/fleet/defaults" && !sent ? (sent = r.body, g.p) : undefined));
+    // The configuration is read back slowly (a slow link): nothing may be decided on the old one meanwhile.
+    routes.push((r) => (sent && r.method === "GET" && r.url === "/api/settings/fleet/raw" ? slow.p.then(() => after_) as any : undefined));
+    await general();
+    const was = p.root.querySelector("#g-auto").value;
+    await type("#g-auto", "1");
+    save().click(); await settle(4);
+    await type("#g-auto", was);                                   // back to what was saved before
+    g.open({ body: { ok: true } });
+    await vi.waitFor(() => expect(op().phase).toBe("done"), { timeout: 6000 });
+    await settle(12);
+    slow.open();
+    await settle(12);
+    const after = [was, sent, p.root.querySelector("#g-auto").value, rowClass("#g-auto"), bar()?.textContent.includes("1 unsaved change(s)")];
+    save().click(); await settle(4);
+    await vi.waitFor(() => expect(writes().filter((r) => r.url === "/api/settings/fleet/defaults")).toHaveLength(2), { timeout: 6000 });
+    expect([...after, writes().filter((r) => r.url === "/api/settings/fleet/defaults")[1].body])
+      .toEqual(["0", { auto_pause_after: 1 }, "0", "field s-dirty", true, { auto_pause_after: 0 }]);
+  });
+  it("#2367 r2: over the public link the older /ui routes that change fleet.yaml are refused too; operations stay", async () => {
+    p.document.body.setAttribute("data-public-link", "1");
+    try {
+      const refused = [];
+      for (const [url, method] of [["/ui/instances", "POST"], ["/ui/config", "POST"], ["/ui/instances/alpha/delete", "POST"]] as const) {
+        refused.push((await confirmMod.api(url, { method, body: "{}" })).status);
+      }
+      await confirmMod.api("/api/settings/instances/alpha/pause", { method: "POST" });
+      await confirmMod.api("/ui/stop/alpha", { method: "POST" });
+      await confirmMod.api("/api/settings/status-emojis/preview", { method: "POST", body: "{}" });
+      expect([refused, writes().map((r) => r.url)])
+        .toEqual([[403, 403, 403], ["/api/settings/instances/alpha/pause", "/ui/stop/alpha", "/api/settings/status-emojis/preview"]]);
+    } finally { p.document.body.removeAttribute("data-public-link"); }
+  });
+  it("#2367 review: over the public link Advanced offers no JSON edit, and no other control writes (startOperation, api)", async () => {
+    p.document.body.setAttribute("data-public-link", "1");
+    try {
+      await mount("advanced", "settings:advanced|1|en"); await settle(6);
+      const edit = btn(p.root, "Edit");
+      const handed = apply.startOperation([{ label: "x", impact: "fleet", request: { method: "PUT", url: "/api/settings/fleet/defaults", body: { model: "m" } } }]);
+      const direct = await confirmMod.api("/api/settings/fleet/channels", { method: "PUT", body: "[]" });
+      const reads = await confirmMod.api("/api/settings/schema");
+      expect([edit, handed, direct.status, direct.body.error, reads.ok, writes()])
+        .toEqual([undefined, false, 403, "Fleet settings can't be changed over a temporary public link.", true, []]);
+    } finally { p.document.body.removeAttribute("data-public-link"); }
+  });
+  it("#2367 review control: on the dashboard itself Advanced's JSON edit is there and saves", async () => {
+    await mount("advanced", "settings:advanced|1|en"); await settle(6);
+    expect(!!btn(p.root, "Edit")).toBe(true);
+  });
+  it("over the temporary public link: no Save bar, a note says why, and nothing is written (one switch: FLEET_READ_ONLY_OVER_PUBLIC_LINK)", async () => {
+    p.document.body.setAttribute("data-public-link", "1");
+    try {
+      await general();
+      await pick("#g-ll", "warn");
+      expect([!!bar(), !!p.root.querySelector(".s-readonly"), writes()]).toEqual([false, true, []]);
+    } finally { p.document.body.removeAttribute("data-public-link"); }
+  });
+  it("over the public link a dialog's Done stages nothing that could be saved: no bar", async () => {
+    p.document.body.setAttribute("data-public-link", "1");
+    try {
+      await mount(); await settle(6);
+      await stageDescription("alpha", "A2");
+      expect([!!bar(), !!p.root.querySelector(".s-readonly"), writes()]).toEqual([false, true, []]);
+    } finally { p.document.body.removeAttribute("data-public-link"); }
+  });
+  it("the edited-field marker is the shared straight bar (.lbar's rule), never a border", async () => {
+    const { readFileSync } = await import("node:fs");
+    const css = readFileSync("src/ui/shared/app.css", "utf8");
+    const rule = css.match(/\n([^{}]*\.s-dirty::before[^{}]*)\{([^}]*)\}/);
+    expect([!!rule, /width: 3px/.test(rule?.[2] ?? ""), /\.lbar::before/.test(rule?.[1] ?? ""), /\.s-dirty\s*\{[^}]*border-left/.test(css),
+      // its tint is square too: no rounded coloured left edge behind the bar
+      /\.s-dirty\s*\{[^}]*border-radius: 0;/.test(css)]).toEqual([true, true, true, false, true]);
+  });
+});
+
 describe("staged changes and leaving", () => {
   it("a section change is the same panel: no reload, nothing asked, the staged change stays", async () => {
     await mount("agents", "settings:agents|1|en"); await settle(6);
@@ -230,7 +383,7 @@ describe("staged changes and leaving", () => {
     // Asked in the app's dialog (#1408 step 5): the navigation waits for the answer.
     expect(nav.navStore.get().route).toEqual({ panel: "settings", section: "agents" });
     await settle(4);
-    expect(messages).toEqual(["Discard 1 pending changes?"]);
+    expect(messages).toEqual(["Discard 1 unsaved change(s)?"]);
     expect(nav.navStore.get().route).toEqual({ panel: "settings", section: "agents" });
     expect(p.window.location.pathname).toBe("/settings");
     // Back/Forward too: the address is put back.
@@ -360,7 +513,7 @@ describe("#1423: a change an admin must confirm", () => {
     btn(p.root.querySelector(".s-row"), "Settings").click(); await settle(4);
     const input = p.root.querySelector("dialog .chips-box input");
     input.value = "9"; fire(input, "input"); await settle(2); fire(input, "keydown", { key: "Enter" }); await settle(2);
-    btn(p.root.querySelector("dialog"), "Stage change").click(); await settle(4);
+    btn(p.root.querySelector("dialog"), "Done").click(); await settle(4);
     if (!p.root.querySelector(".s-pending")) throw new Error("not staged: " + (p.root.querySelector("dialog")?.textContent ?? p.root.textContent).slice(0, 400));
   }
 
@@ -370,7 +523,7 @@ describe("#1423: a change an admin must confirm", () => {
     routes.push(r => (r.url === `/api/settings/pending/${"d".repeat(32)}` ? { body: decided ? VIEW("applied", { outcome: { state: "applied", result: { ok: true } } }) : VIEW("pending") } : undefined));
     await stageAccess();
     vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "clearTimeout", "clearInterval", "performance"] });
-    btn(p.root.querySelector(".s-pending"), "Apply changes").click();
+    btn(p.root.querySelector(".s-pending"), "Save").click();
     await vi.advanceTimersByTimeAsync(50);
     expect(op().steps[0].status).toBe("waiting");
     expect(app.appStore.get().pendingChanges.map((x: any) => x.state)).toEqual(["pending"]);
@@ -396,7 +549,7 @@ describe("#1423: a change an admin must confirm", () => {
     routes.push(r => (r.url === `/api/settings/pending/${"d".repeat(32)}` ? { body: decided ? VIEW("applied", { confirmation: { kind: "web" }, outcome: { state: "applied", result: { ok: true } } }) : self } : undefined));
     await stageAccess();
     vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "clearTimeout", "clearInterval", "performance"] });
-    btn(p.root.querySelector(".s-pending"), "Apply changes").click();
+    btn(p.root.querySelector(".s-pending"), "Save").click();
     await vi.advanceTimersByTimeAsync(50);
     expect(op().steps[0].status).toBe("running");
     await vi.advanceTimersByTimeAsync(50);
@@ -412,7 +565,7 @@ describe("#1423: a change an admin must confirm", () => {
     routes.push(r => (r.method === "PUT" && r.url === "/api/settings/fleet/channels" ? pendingAnswer : undefined));
     routes.push(r => (r.url.startsWith("/api/settings/pending/") ? { body: VIEW("rejected", { outcome: { state: "rejected", reason_code: "rejected", message: "Rejected in chat." } }) } : undefined));
     await stageAccess();
-    btn(p.root.querySelector(".s-pending"), "Apply changes").click();
+    btn(p.root.querySelector(".s-pending"), "Save").click();
     await vi.waitFor(() => expect(op().phase).toBe("failed"), { timeout: 6000 });
     expect(writes().filter(r => r.url === "/api/settings/apply")).toEqual([]);
     await settle(6);
@@ -424,7 +577,7 @@ describe("#1423: a change an admin must confirm", () => {
     routes.push(r => (r.method === "PUT" && r.url === "/api/settings/fleet/channels" ? pendingAnswer : undefined));
     routes.push(r => (r.method === "DELETE" ? { body: VIEW("rejected", { outcome: { state: "rejected", reason_code: "withdrawn", message: "Change withdrawn." } }) } : undefined));
     await stageAccess();
-    btn(p.root.querySelector(".s-pending"), "Apply changes").click();
+    btn(p.root.querySelector(".s-pending"), "Save").click();
     await vi.waitFor(() => expect(app.appStore.get().pendingChanges).toHaveLength(1));
     const card = app.appStore.get().pendingChanges[0];
     expect(typeof card.withdraw).toBe("function");
@@ -610,7 +763,7 @@ describe("#1453 review", () => {
     expect(p.root.querySelector("dialog")?.textContent).toContain("main");
     btn(p.root.querySelector("dialog"), "Stage the new token").click(); await settle(2);
     p.root.querySelector("dialog .dlg-x").click(); await settle(4);
-    btn(p.root.querySelector(".s-pending"), "Apply changes").click();
+    btn(p.root.querySelector(".s-pending"), "Save").click();
     await vi.waitFor(() => expect(reqs.some(r => r.url.endsWith("/secret/verify"))).toBe(true));
     expect(reqs.filter(r => r.url.endsWith("/secret/verify")).map(r => r.url)).toEqual(["/api/settings/connections/main/secret/verify"]);
     // And when the connection is gone, its dialog (and the draft in it) goes too.
@@ -677,7 +830,7 @@ describe("#1453 review", () => {
     expect(apply.operationActive()).toBe(true);
     expect(apply.startOperation([])).toBe(false);
     await stageDescription("alpha", "A9");
-    expect(btn(p.root.querySelector(".s-pending"), "Apply changes").disabled).toBe(true);
+    expect(btn(p.root.querySelector(".s-pending"), "Save").disabled).toBe(true);
     routes.unshift(r => (r.url === "/api/settings/apply/job1" ? { body: JOB_DONE } : undefined));
     restart.open({ status: 202, body: { job_id: "job1", restarting: true } });
     await vi.waitFor(() => expect(apply.operationActive()).toBe(false), { timeout: 6000 });
@@ -719,10 +872,10 @@ describe("#1453 review", () => {
     routes.push(r => (r.method === "PATCH" && r.url.endsWith("/alpha") && n++ === 0 ? Promise.reject(new TypeError("Failed to fetch")) as never : undefined));
     await mount(); await settle(6);
     await stageDescription("alpha", "A2");
-    btn(p.root.querySelector(".s-pending"), "Apply changes").click();
+    btn(p.root.querySelector(".s-pending"), "Save").click();
     await vi.waitFor(() => expect(op().phase).toBe("failed"), { timeout: 5000 });
     await settle(6);
-    btn(p.root.querySelector(".s-pending"), "Apply changes").click();
+    btn(p.root.querySelector(".s-pending"), "Save").click();
     await vi.waitFor(() => expect(op().phase).toBe("done"), { timeout: 5000 });
     const patches = writes().filter(r => r.method === "PATCH");
     expect(patches).toHaveLength(2);
@@ -733,10 +886,10 @@ describe("#1453 review", () => {
     let m = 0;
     routes.unshift(r => (r.method === "PATCH" && r.url.endsWith("/beta") && m++ === 0 ? { status: 400, body: { error: "invalid" } } : undefined));
     await stageDescription("beta", "B2");
-    btn(p.root.querySelector(".s-pending"), "Apply changes").click();
+    btn(p.root.querySelector(".s-pending"), "Save").click();
     await vi.waitFor(() => expect(op().phase).toBe("failed"), { timeout: 5000 });
     await settle(6);
-    btn(p.root.querySelector(".s-pending"), "Apply changes").click();
+    btn(p.root.querySelector(".s-pending"), "Save").click();
     await vi.waitFor(() => expect(op().phase).toBe("done"), { timeout: 5000 });
     const b = writes().filter(r => r.method === "PATCH");
     expect(b).toHaveLength(2);
@@ -748,7 +901,7 @@ describe("#1453 review", () => {
     await mount(); await settle(6);
     await stageDescription("alpha", "A2");
     await stageDescription("beta", "B2");
-    btn(p.root.querySelector(".s-pending"), "Apply changes").click();
+    btn(p.root.querySelector(".s-pending"), "Save").click();
     await vi.waitFor(() => expect(op().phase).toBe("failed"), { timeout: 5000 });
     expect(writes().map(r => `${r.method} ${r.url}`)).toEqual(["PATCH /api/settings/fleet/instances/alpha"]);
     expect(op().steps.map((s: any) => s.status)).toEqual(["failed", "skipped"]);
@@ -756,7 +909,7 @@ describe("#1453 review", () => {
     const first = writes()[0]!.key;
     await settle(6);
     routes.length = 0;
-    btn(p.root.querySelector(".s-pending"), "Apply changes").click();
+    btn(p.root.querySelector(".s-pending"), "Save").click();
     await vi.waitFor(() => expect(op().phase).toBe("done"), { timeout: 5000 });
     expect(writes().filter(r => r.method === "PATCH" && r.url.endsWith("/alpha")).map(r => r.key)).toEqual([first, first]);
   }, 15_000);
@@ -814,13 +967,13 @@ describe("#1453 review r2", () => {
     await mount(); await settle(6);
     await stageDescription("alpha", "A2");
     await stageDescription("beta", "B2");
-    btn(p.root.querySelector(".s-pending"), "Apply changes").click();
+    btn(p.root.querySelector(".s-pending"), "Save").click();
     await vi.waitFor(() => expect(op().phase).toBe("failed"), { timeout: 5000 });
     expect(writes().map(r => `${r.method} ${r.url}`)).toEqual(["PATCH /api/settings/fleet/instances/alpha"]);
     expect(app.appStore.get().pendingChanges ?? []).toEqual([]);
     const first = writes()[0]!.key;
     await settle(6); routes.length = 0;
-    btn(p.root.querySelector(".s-pending"), "Apply changes").click();
+    btn(p.root.querySelector(".s-pending"), "Save").click();
     await vi.waitFor(() => expect(op().phase).toBe("done"), { timeout: 5000 });
     expect(writes().filter(r => r.method === "PATCH" && r.url.endsWith("/alpha")).map(r => r.key)).toEqual([first, first]);
   }, 15_000);
@@ -985,11 +1138,11 @@ describe("#1465 review: confirmations that outlive their view", () => {
     for (const id of ["main", "persona"]) {
       btn(p.root.querySelectorAll(".s-row").find((r: any) => r.textContent.includes(id)), "Settings").click(); await settle(4);
       for (const x of [...p.root.querySelectorAll("dialog .chip-x")]) { x.click(); await settle(1); }
-      btn(p.root.querySelector("dialog"), "Stage change").click(); await settle(4);
+      btn(p.root.querySelector("dialog"), "Done").click(); await settle(4);
     }
     expect(p.root.querySelector(".s-pending")?.textContent).toContain("2");
     const C = await confirmMod();
-    btn(p.root.querySelector(".s-pending"), "Apply changes").click(); await settle(2);
+    btn(p.root.querySelector(".s-pending"), "Save").click(); await settle(2);
     expect(C.confirmStore.get().queue).toHaveLength(1);
     await p.unmount();
     await yes(); await settle(6);
@@ -1404,7 +1557,7 @@ describe("#1519 P1: a bot token entered in the browser", () => {
     btn(p.root.querySelector("dialog .token-field"), "Verify").click(); await settle(4);
     btn(p.root.querySelector("dialog"), "Stage the new token").click(); await settle(2);
     p.root.querySelector("dialog .dlg-x").click(); await settle(4);
-    btn(p.root.querySelector(".s-pending"), "Apply changes").click();
+    btn(p.root.querySelector(".s-pending"), "Save").click();
     await vi.waitFor(() => expect(op()?.phase).not.toBe("writing"), { timeout: 5000 }); await settle(4);
     await vi.waitFor(() => expect(p.root.textContent).toContain("starts with the new token when AgEnD restarts"), { timeout: 5000 });
     expect(op().phase, "stored, not failed").not.toBe("failed");

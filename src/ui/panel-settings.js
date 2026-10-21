@@ -27,7 +27,7 @@ import { dismissOperation, operationActive, restartFleet, startOperation, takeLe
 import {
   ACCESS_MODES, AGENT_MODES, DEFAULT_SCHEMA, HANG_TIMEOUT_DEFAULT_MINUTES, LOG_LEVELS, TOOL_PROGRESS, TOOL_SETS, VISIBILITY_MODES, batchImpact,
   changedFields, channelId, channelsOf, chLabel, connectionState, effectiveSummary, fleetModel, fromYaml, fullModelRequests, groupAgents,
-  hasOwn, impactOf, localeOptions, defaultsImpact, requestImpact, nonNegative, positive, replyGuardSupported, shortName, STATUS_ORDER, toYaml,
+  hasOwn, impactOf, localeOptions, defaultsImpact, requestImpact, nonNegative, positive, replyGuardSupported, sameValue, shortName, STATUS_ORDER, toYaml,
   visibilityDefault, worstImpact,
 } from "./settings-model.js";
 import {
@@ -44,6 +44,7 @@ import { startTour } from "./chat-tour.js";
 import "./chat-strings.js";
 import { AppearanceSection } from "./settings-appearance.js";
 import { GuestsCard } from "./settings-guests.js";
+import { fleetReadOnly, syncStage, useDraft } from "./settings-draft.js";
 import { WebAuthorityCard } from "./settings-web-authority.js";
 import { SignInList } from "./backend-signin.js";
 
@@ -115,6 +116,34 @@ export function SettingsPanel({ route, navKey }) {
   stagedRef.current = staged;
   const [dialog, setDialog] = useState(null);         // { kind, ...props, key: navKey }
   const [search, setSearch] = useState("");
+  // #2347: each section's draft while it is edited (settings-draft.js), and the epoch that remounts the sections when
+  // the drafts go: a Save that went through whole, or Discard. A Save that failed keeps them (what did not land is staged
+  // again, and the form still shows it).
+  const drafts = useRef(new Map());
+  const [draftEpoch, setDraftEpoch] = useState(0);
+  // A staged change's onResult hears how its Save settled: "applied", "waiting" (for a fleet admin's OK) or "failed".
+  const results = useRef(new Map());
+  const readOnly = fleetReadOnly();
+  // The drafts as they were when a Save began. #2367 review: the form stays editable while it runs, so a Save that went
+  // through drops only the drafts it saved — one edited since (in any section) stays, and stays staged.
+  const submitted = useRef(null);
+  // The staged changes as they were when that Save began (what comes back after a failure is them, whole: a section's
+  // draft and onResult included), and how a Save went for a change whose section was shown again since (#2367 review:
+  // a failed Save reloads, so the section that staged it is a new one by the time it could be told).
+  const submittedStaged = useRef(new Map());
+  const outcomes = useRef(new Map());
+  // #2367 r3: how the last Save went for each change it carried ("applied" / "failed"), until its configuration is read
+  // back: a change staged against both ends of a Save (`afterSave: { applied, failed }`) becomes the one that came true.
+  const settledAs = useRef(new Map());
+  const resolveAfterSave = (key, change) => {
+    if (!change || !change.afterSave) return change;
+    const v = change.afterSave[settledAs.current.get(key) === "applied" ? "applied" : "failed"];
+    return v ? { ...v, stageKey: key } : null;
+  };
+  const dropDrafts = (saved = null) => {
+    drafts.current = saved ? new Map([...drafts.current].filter(([k, v]) => !saved.has(k) || !sameValue(v, saved.get(k)))) : new Map();
+    setDraftEpoch((n) => n + 1);
+  };
   const { settingsOp: op, pendingChanges } = useStore(appStore);
   const gen = useRef(0);
 
@@ -162,20 +191,57 @@ export function SettingsPanel({ route, navKey }) {
     if (!op || !op.leftover || !op.leftover.length) return;
     const back = takeLeftover();
     if (!back.length) return;
-    setStaged((s) => { const m = new Map(s); for (const c of back) m.set(c.stageKey || newKey("left"), c); return m; });
+    setStaged((s) => {
+      const m = new Map(s);
+      // #2367 review: a change staged for the same thing since that Save began is the newer word (its draft and
+      // request carry everything still unsaved): it stays, and the failed one is not put back over it.
+      for (const c of back) {
+        const k = c.stageKey || newKey("left");
+        if (!m.has(k)) m.set(k, { ...(submittedStaged.current.get(k) || {}), ...c, stageKey: k });
+      }
+      return m;
+    });
   }, [op && op.leftover]);
 
   // An Apply that finished, or a confirmed request that applied, changed the configuration: read it again.
   const lastPhase = useRef(op ? op.phase : null);
   useEffect(() => {
     const phase = op ? op.phase : null;
-    if (lastPhase.current !== phase && (phase === "done" || phase === "failed")) reload();
+    if (lastPhase.current !== phase && (phase === "done" || phase === "failed")) {
+      settle(op);
+      settledAs.current = new Map(op.steps.filter((s) => s.stageKey).map((s) => [s.stageKey, s.status === "done" ? "applied" : "failed"]));
+      setStaged((s) => {
+        if (![...s.values()].some((c) => c.afterSave)) return s;
+        const m = new Map();
+        for (const [k, c] of s) { const r = resolveAfterSave(k, c); if (r) m.set(k, r); }
+        return m;
+      });
+      if (phase !== "done") settledAs.current = new Map();
+      // After a Save that went through, its drafts go once the configuration it wrote is read back — not before: a
+      // section shown on the old configuration would take an edit back to the old value for no edit at all.
+      const saved = phase === "done" ? submitted.current : null;
+      if (!saved) submitted.current = null;
+      reload().finally(() => { if (saved && submitted.current === saved) { dropDrafts(saved); submitted.current = null; settledAs.current = new Map(); } });
+    }
     lastPhase.current = phase;
   }, [op && op.phase]);
+  // A saved change that waits for a fleet admin's OK is told so while it waits (its section says it is not saved yet).
+  const waitingNow = op ? op.steps.filter((s) => s.status === "waiting" && s.stageKey).map((s) => s.stageKey).join(",") : "";
+  useEffect(() => {
+    for (const k of waitingNow ? waitingNow.split(",") : []) {
+      const fn = results.current.get(k);
+      try { if (fn) fn({ status: "waiting", error: null }); } catch { /* a section's own handler: never the Save's */ }
+    }
+  }, [waitingNow]);
   const applied = (pendingChanges || []).filter((p) => p.state === "applied").map((p) => p.id).join(",");
   useEffect(() => { if (applied) reload(); }, [applied]);
 
   const stage = (key, change, quiet = false) => {
+    // A change staged against both ends of a Save that has settled since is the end that came true (none: nothing left).
+    if (change && change.afterSave && settledAs.current.size) {
+      change = resolveAfterSave(key, change);
+      if (!change) { unstage(key); return; }
+    }
     setStaged((s) => {
       const m = new Map(s);
       const prev = m.get(key);
@@ -187,12 +253,31 @@ export function SettingsPanel({ route, navKey }) {
       return m;
     });
     if (!quiet) toast(tn("queued", change.label));
+    // A section shown again after its Save failed (or still waits) hears how it went as it stages its change again.
+    if (typeof change.onResult === "function" && outcomes.current.has(key)) {
+      const outcome = outcomes.current.get(key);
+      outcomes.current.delete(key);
+      try { change.onResult(outcome); } catch { /* a section's own handler: never the Save's */ }
+    }
   };
   const unstage = (key) => setStaged((s) => { if (!s.has(key)) return s; const m = new Map(s); m.delete(key); return m; });
-  const discard = () => { dropSecrets(staged); setStaged(new Map()); reload(); };
+  const discard = () => { dropSecrets(staged); setStaged(new Map()); outcomes.current = new Map(); dropDrafts(); reload(); };
+  /** Tell each saved change's section how its Save settled (#2347: the onResult in the change it staged). */
+  const settle = (o) => {
+    for (const step of (o && o.steps) || []) {
+      const fn = step.stageKey && results.current.get(step.stageKey);
+      if (!fn) continue;
+      const status = step.status === "done" ? "applied" : step.status === "waiting" ? "waiting" : "failed";
+      if (status !== "applied") outcomes.current.set(step.stageKey, { status, error: step.error || null });
+      try { fn({ status, error: step.error || null }); } catch { /* a section's own handler: never the Save's */ }
+    }
+    results.current = new Map();
+  };
+
   const applying = useRef(false);
   const apply = async () => {
-    if (applying.current || operationActive() || !staged.size) return;
+    if (applying.current || operationActive() || !staged.size || readOnly) return;
+    if ([...stagedRef.current.values()].some((c) => c.invalid)) return;    // #2347: Save waits for every field to be valid
     // Every confirmation before the first write: a cancelled one must not leave earlier changes applied and later
     // ones pending (a surprising partial apply).
     applying.current = true;
@@ -208,10 +293,18 @@ export function SettingsPanel({ route, navKey }) {
     } finally { applying.current = false; }
     if (!mount.current() || operationActive()) return;
     const list = [...stagedRef.current.values()].map(({ label, impact, request, connectionSecret, stageKey, key }) => ({ label, impact, request, connectionSecret, stageKey, key }));
-    if (startOperation(list)) setStaged(new Map());
+    const handlers = new Map([...stagedRef.current.values()].filter((c) => typeof c.onResult === "function").map((c) => [c.stageKey, c.onResult]));
+    if (startOperation(list)) {
+      results.current = handlers; submitted.current = new Map(drafts.current); submittedStaged.current = new Map(stagedRef.current);
+      outcomes.current = new Map(); setStaged(new Map());
+    }
   };
 
-  const ctx = data && !data.error ? makeCtx(data, setData, stage, unstage, reload, reloadLive, () => mount.current()) : null;
+  // #2347: sections read `staged` (each change as staged, its extra fields kept: Guests carries its whole draft) and
+  // `drafts` to come back to their edits; `draftEpoch` moves on Discard and after a Save to start them from what is saved.
+  const ctx = data && !data.error ? makeCtx(data, setData, stage, unstage, reload, reloadLive, () => mount.current(),
+    { drafts: drafts.current, draftEpoch, readOnly, staged, savingDrafts: () => submitted.current,
+      savingStaged: () => (submitted.current || operationActive() ? submittedStaged.current : null) }) : null;
   // #1519 P7: "Connect a chat app" on the first-run card elsewhere came here for the wizard: it opens once the data is in.
   useEffect(() => { if (ctx && takeWizardRequest()) setDialog({ kind: "wizard", key: navKey }); }, [!!ctx, navKey]);
   // #1523 N2: "Edit in Settings" on an instance's Details: that agent's dialog, once the data is in — only an agent this
@@ -240,8 +333,8 @@ export function SettingsPanel({ route, navKey }) {
     : section === "agents" ? html`<${Agents} ctx=${ctx} search=${search} openDialog=${(d) => setDialog({ ...d, key: navKey })} />`
     : section === "bots" ? html`<${Bots} ctx=${ctx} search=${search} openDialog=${(d) => setDialog({ ...d, key: navKey })} />`
     : section === "classic" ? html`<${Classic} ctx=${ctx} search=${search} openDialog=${(d) => setDialog({ ...d, key: navKey })} />`
-    : section === "general" ? html`<${General} key=${data.loadedAt} ctx=${ctx} />`
-    : section === "web" ? html`<${WebSection} key=${data.loadedAt} ctx=${ctx} staged=${staged} />`
+    : section === "general" ? html`<${General} key=${`${data.loadedAt}:${draftEpoch}`} ctx=${ctx} />`
+    : section === "web" ? html`<${WebSection} key=${`${data.loadedAt}:${draftEpoch}`} ctx=${ctx} staged=${staged} />`
     : html`<${Developer} ctx=${ctx} />`;
   // A dialog belongs to the navigation that opened it (its draft names one object, never another).
   const open = dialog && dialog.key === navKey ? dialog : null;
@@ -257,12 +350,13 @@ export function SettingsPanel({ route, navKey }) {
     <div data-trust="panel-content" class="panel-body"><div class="col">
       ${searchable ? html`<div class="s-toolbar"><label class="s-search"><${Icon} name="search" size=${14} /><span class="sr-only">${tn("searchAll")}</span>
         <input type="search" value=${search} placeholder=${tn("searchAll")} onInput=${(e) => setSearch(e.target.value)} /></label></div>` : null}
+      ${readOnly && section !== "device" && section !== "appearance" ? html`<p class="note s-readonly" role="status">${tn("fleetReadOnlyPublic")}</p>` : null}
       ${op ? html`<${OperationCard} op=${op} schema=${data && data.schema} />` : null}
       <${PendingChanges} inline=${true} />
       ${ctx && (section === "agents" || section === "bots") ? html`<${FirstRunCard} onConnect=${() => setDialog({ kind: "wizard", key: navKey })} />` : null}
       ${sectionBody}
     </div></div>
-    ${staged.size ? html`<${PendingBar} staged=${staged} busy=${opBusy(op)} onApply=${apply} onDiscard=${discard} />` : null}
+    ${staged.size && !readOnly ? html`<${PendingBar} staged=${staged} busy=${opBusy(op)} onApply=${apply} onDiscard=${discard} />` : null}
     ${open && ctx ? renderDialog(open, ctx, close) : null}
     ${open && open.kind === "help" ? html`<${HelpDialog} onClose=${close} />` : null}
   </div>`;
@@ -382,12 +476,12 @@ function renderDialog(d, ctx, close) {
 }
 
 /** What the sections and dialogs work with: the data, and the ways to change it (staging, or a direct write). */
-function makeCtx(data, setData, stage, unstage, reload, reloadLive, alive) {
+function makeCtx(data, setData, stage, unstage, reload, reloadLive, alive, extra = {}) {
   const { fleet, classic, schema } = data;
   const chs = channelsOf(fleet);
   const edit = (fn) => setData((d) => { const next = structuredClone(d); fn(next); return next; });
   return {
-    ...data, reload, reloadLive, stage, unstage, shortName,
+    ...data, ...extra, reload, reloadLive, stage, unstage, shortName,
     channelType: (id) => { const ch = chs.find((c, i) => channelId(c, i) === id); return ch ? ch.type : undefined; },
     classicRuntime: (instanceName) => {
       const live = data.classicLive[instanceName] || {};
@@ -663,18 +757,10 @@ function Classic({ ctx, search, openDialog }) {
   })}</div>`;
 }
 
-/**
- * General: the fleet's defaults, ClassicBot's, web chat. "Review changes" stages up to three changes (defaults,
- * ClassicBot defaults, web) — each only with what differs from what this form showed, so changing one hot default
- * never also stages untouched settings as a fleet restart.
- */
-function General({ ctx }) {
-  const { schema } = ctx;
-  const d = ctx.fleet.defaults || {}, c = (ctx.classic && ctx.classic.defaults) || {};
+/** General's form, from the saved defaults (`d`) and ClassicBot's (`c`). */
+function generalForm(d, c) {
   const hang = d.hang_detector || {}, startup = d.startup || {};
-  const primary = channelsOf(ctx.fleet)[0];
-  const original = useMemo(() => ({ c: structuredClone(c) }), []);
-  const [f, setF] = useState(() => ({
+  return {
     backend: d.backend || "claude-code", model: d.model || "", locale: d.locale || "", auto: String(d.auto_pause_after ?? 0),
     agent_mode: d.agent_mode || "mcp", tool_set: d.tool_set || "full", tool_progress: d.tool_progress ?? "off",
     visibility: visibilityDefault(d), reply: d.reply_completion_guard ?? true, log_level: d.log_level || "info",
@@ -684,9 +770,25 @@ function General({ ctx }) {
     classicToolProgress: c.tool_progress ?? d.tool_progress ?? "off", classicToolProgressInherit: !hasOwn(c, "tool_progress"),
     classicReply: c.reply_completion_guard ?? d.reply_completion_guard ?? true, classicReplyInherit: !hasOwn(c, "reply_completion_guard"),
     admins: [...(c.admin_users || [])], guilds: [...(c.allowed_guilds || [])],
-  }));
-  const [msg, setMsg] = useState(null);
+  };
+}
+
+/**
+ * General: the fleet's defaults and ClassicBot's. #2347: an edit is unsaved at once — staged (up to two changes:
+ * defaults, ClassicBot defaults), each only with what differs from what is saved, so changing one hot default never also
+ * stages untouched settings as a fleet restart; the sticky bar saves them. A changed field carries the straight bar.
+ */
+function General({ ctx }) {
+  const { schema } = ctx;
+  const d = ctx.fleet.defaults || {}, c = (ctx.classic && ctx.classic.defaults) || {};
+  const hang = d.hang_detector || {}, startup = d.startup || {};
+  const primary = channelsOf(ctx.fleet)[0];
+  const original = useMemo(() => ({ c: structuredClone(c) }), []);
+  const base = useMemo(() => generalForm(d, c), []);
+  const [f, setF] = useDraft(ctx, "general", () => base);
   const set = (k) => (v) => setF((x) => ({ ...x, [k]: v }));
+  /** The class of a field's row: `field`, and `s-dirty` while one of its keys differs from what is saved. */
+  const fc = (cls, ...keys) => `${cls}${keys.some((k) => !sameValue(f[k], base[k])) ? " s-dirty" : ""}`;
   const num = (v) => Number(v);
   const errors = {
     auto: nonNegative(f.auto), hang: positive(f.hang),
@@ -695,8 +797,15 @@ function General({ ctx }) {
   };
   const warnings = { concurrency: num(f.concurrency) > 4 ? "concurrencyWarning" : "", stagger: num(f.stagger) < 100 ? "staggerWarning" : "" };
   const ready = !Object.values(errors).some(Boolean);
-  const review = () => {
-    if (!ready) return;
+  const firstError = Object.values(errors).find(Boolean);
+  // #2347: every edit, staged as it is made (the first render included: a draft kept from before is staged again).
+  useEffect(() => {
+    if (ctx.readOnly) return;
+    if (!ready) {
+      syncStage(ctx, "defaults:invalid", { label: tn("updateDefaults"), invalid: tn(firstError) });
+      return;
+    }
+    ctx.unstage("defaults:invalid");
     const defaultsPatch = changedFields({
       backend: f.backend, model: f.model || undefined, locale: f.locale || null, auto_pause_after: num(f.auto),
       agent_mode: f.agent_mode, tool_set: f.tool_set, tool_progress: f.tool_progress, cross_instance_visibility: f.visibility,
@@ -722,72 +831,67 @@ function General({ ctx }) {
       reply_completion_guard: hasOwn(oc, "reply_completion_guard") ? oc.reply_completion_guard : null,
       admin_users: oc.admin_users || [], allowed_guilds: oc.allowed_guilds || [],
     });
-    if (Object.keys(defaultsPatch).length) {
-      ctx.stage("defaults:fleet", { label: tn("updateDefaults"), impact: batchImpact(schema, Object.keys(defaultsPatch), (k) => defaultsImpact(schema, k)),
-        request: { method: "PUT", url: "/api/settings/fleet/defaults", body: defaultsPatch } });
-    }
-    if (Object.keys(classicPatch).length) {
-      const hotOnly = Object.keys(classicPatch).every((k) => impactOf(schema, `classic_defaults.${k}`) === "now");
-      ctx.stage("defaults:classic", { label: tn("updateClassicDefaults"), impact: hotOnly ? "now" : "fleet",
-        request: { method: "PUT", url: "/api/settings/classic/defaults", body: classicPatch } });
-    }
-    setMsg(tn("readyApply"));
-  };
+    const dKeys = Object.keys(defaultsPatch), cKeys = Object.keys(classicPatch);
+    syncStage(ctx, "defaults:fleet", dKeys.length ? { label: tn("updateDefaults"), count: dKeys.length,
+      impact: batchImpact(schema, dKeys, (k) => defaultsImpact(schema, k)),
+      request: { method: "PUT", url: "/api/settings/fleet/defaults", body: defaultsPatch } } : null);
+    syncStage(ctx, "defaults:classic", cKeys.length ? { label: tn("updateClassicDefaults"), count: cKeys.length,
+      impact: cKeys.every((k) => impactOf(schema, `classic_defaults.${k}`) === "now") ? "now" : "fleet",
+      request: { method: "PUT", url: "/api/settings/classic/defaults", body: classicPatch } } : null);
+  }, [f, ready]);
   const L = (text, field, id) => html`<${Label} text=${text} schema=${schema} field=${field} htmlFor=${id} />`;
   const fleetReply = replyGuardSupported(f.backend, f.agent_mode, d.kiro_ui) ? tn("replyGuardSupported") : tn("replyGuardUnsupported", f.backend, f.agent_mode);
   const classicReply = replyGuardSupported(f.classicBackend, f.agent_mode, d.kiro_ui) ? tn("replyGuardSupported") : tn("replyGuardUnsupported", f.classicBackend, f.agent_mode);
   return html`<div class="form s-general">
     <section class="card"><h3>${tn("defaultsTitle")}</h3>
       <div class="grid2">
-        <div class="field">${L(tn("language"), "defaults.locale", "g-locale")}<${Select} id="g-locale" value=${f.locale} onChange=${set("locale")}
+        <div class=${fc("field", "locale")}>${L(tn("language"), "defaults.locale", "g-locale")}<${Select} id="g-locale" value=${f.locale} onChange=${set("locale")}
           options=${localeOptions(f.locale).map((o) => (o.auto ? { value: "", label: tn("localeAuto") } : o))} /></div>
-        <div class="field">${L(tn("defaultBackend"), "defaults.backend", "g-be")}<${BackendSelect} id="g-be" value=${f.backend} onChange=${set("backend")} /></div>
-        <div class="field">${L(tn("defaultModel"), "defaults.model", "g-model")}<${ModelSelect} id="g-model" value=${f.model} onChange=${set("model")}
+        <div class=${fc("field", "backend")}>${L(tn("defaultBackend"), "defaults.backend", "g-be")}<${BackendSelect} id="g-be" value=${f.backend} onChange=${set("backend")} /></div>
+        <div class=${fc("field", "model")}>${L(tn("defaultModel"), "defaults.model", "g-model")}<${ModelSelect} id="g-model" value=${f.model} onChange=${set("model")}
           backend=${f.backend || "claude-code"} inherit=${tn("modelCliDefault")} /></div>
-        <div class="field">${L(`${tn("autoPause")} (${tn("minutes")})`, "defaults.auto_pause_after", "g-auto")}<input id="g-auto" type="number" min="0" step="1" class=${errors.auto ? "invalid" : ""} value=${f.auto} onInput=${(e) => set("auto")(e.target.value)} /><${Feedback} error=${errors.auto} /></div>
-        <div class="field">${L(tn("toolProgress"), "defaults.tool_progress", "g-tp")}<${Select} id="g-tp" value=${f.tool_progress} onChange=${set("tool_progress")} options=${TOOL_PROGRESS} /></div>
-        <div class="field">${L(tn("crossInstanceVisibility"), "defaults.cross_instance_visibility", "g-vis")}<${Select} id="g-vis" value=${f.visibility} onChange=${set("visibility")} options=${VISIBILITY_MODES} />
+        <div class=${fc("field", "auto")}>${L(`${tn("autoPause")} (${tn("minutes")})`, "defaults.auto_pause_after", "g-auto")}<input id="g-auto" type="number" min="0" step="1" class=${errors.auto ? "invalid" : ""} value=${f.auto} onInput=${(e) => set("auto")(e.target.value)} /><${Feedback} error=${errors.auto} /></div>
+        <div class=${fc("field", "tool_progress")}>${L(tn("toolProgress"), "defaults.tool_progress", "g-tp")}<${Select} id="g-tp" value=${f.tool_progress} onChange=${set("tool_progress")} options=${TOOL_PROGRESS} /></div>
+        <div class=${fc("field", "visibility")}>${L(tn("crossInstanceVisibility"), "defaults.cross_instance_visibility", "g-vis")}<${Select} id="g-vis" value=${f.visibility} onChange=${set("visibility")} options=${VISIBILITY_MODES} />
           <p class="note">${tn("crossInstanceVisibilityHint")}</p></div>
-        <div class="field"><label class="check"><input type="checkbox" checked=${f.reply} onChange=${(e) => set("reply")(e.target.checked)} /><span>${tn("replyCompletionGuard")}</span><${Impact} schema=${schema} field="defaults.reply_completion_guard" /></label>
+        <div class=${fc("field", "reply")}><label class="check"><input type="checkbox" checked=${f.reply} onChange=${(e) => set("reply")(e.target.checked)} /><span>${tn("replyCompletionGuard")}</span><${Impact} schema=${schema} field="defaults.reply_completion_guard" /></label>
           <p class="note">${fleetReply}</p></div>
       </div>
     </section>
     <section class="card"><h3>ClassicBot</h3>
       <div class="grid2">
-        <div class="field">${L(tn("classicBackend"), "classic_defaults.backend", "g-cbe")}<${BackendSelect} id="g-cbe" value=${f.classicBackend} onChange=${set("classicBackend")} /></div>
-        <div class="field">${L(tn("toolProgress"), "classic_defaults.tool_progress", "g-ctp")}
+        <div class=${fc("field", "classicBackend")}>${L(tn("classicBackend"), "classic_defaults.backend", "g-cbe")}<${BackendSelect} id="g-cbe" value=${f.classicBackend} onChange=${set("classicBackend")} /></div>
+        <div class=${fc("field", "classicToolProgress", "classicToolProgressInherit")}>${L(tn("toolProgress"), "classic_defaults.tool_progress", "g-ctp")}
           <${Override} inherit=${f.classicToolProgressInherit} onInherit=${set("classicToolProgressInherit")}>
             <${Select} id="g-ctp" disabled=${f.classicToolProgressInherit} value=${f.classicToolProgressInherit ? (d.tool_progress ?? "off") : f.classicToolProgress} onChange=${set("classicToolProgress")} options=${TOOL_PROGRESS} /></${Override}></div>
-        <div class="field">${L(tn("replyCompletionGuard"), "classic_defaults.reply_completion_guard")}
+        <div class=${fc("field", "classicReply", "classicReplyInherit")}>${L(tn("replyCompletionGuard"), "classic_defaults.reply_completion_guard")}
           <${Override} inherit=${f.classicReplyInherit} onInherit=${set("classicReplyInherit")}>
             <label class="check"><input type="checkbox" disabled=${f.classicReplyInherit} checked=${f.classicReplyInherit ? (d.reply_completion_guard ?? true) : f.classicReply} onChange=${(e) => set("classicReply")(e.target.checked)} /><span>${tn("replyCompletionGuard")}</span></label></${Override}>
           <p class="note">${classicReply}</p></div>
       </div>
       <h4>${tn("whoUsesClassic")}</h4>
       <div class="grid2">
-        <div class="field">${L(tn("classicAdmins"), "classic.admin_users")}<${ChipList} items=${f.admins} onChange=${set("admins")} placeholder=${tn("userIdPlaceholder")} label=${tn("classicAdmins")} /></div>
-        <div class="field">${L(tn("allowedGuilds"), "classic.allowed_guilds")}<${ChipList} items=${f.guilds} onChange=${set("guilds")} placeholder=${tn("guildIdPlaceholder")} label=${tn("allowedGuilds")} /></div>
+        <div class=${fc("field", "admins")}>${L(tn("classicAdmins"), "classic.admin_users")}<${ChipList} items=${f.admins} onChange=${set("admins")} placeholder=${tn("userIdPlaceholder")} label=${tn("classicAdmins")} /></div>
+        <div class=${fc("field", "guilds")}>${L(tn("allowedGuilds"), "classic.allowed_guilds")}<${ChipList} items=${f.guilds} onChange=${set("guilds")} placeholder=${tn("guildIdPlaceholder")} label=${tn("allowedGuilds")} /></div>
       </div>
     </section>
     <${Drawer} title=${tn("advancedSection")}>
       <section class="card"><h3>${tn("runtimeResources")}</h3><div class="grid2">
-        <div class="field">${L(tn("toolSet"), "defaults.tool_set", "g-ts")}<${Select} id="g-ts" value=${f.tool_set} onChange=${set("tool_set")} options=${TOOL_SETS} /></div>
-        <div class="field">${L(tn("logLevel"), "defaults.log_level", "g-ll")}<${Select} id="g-ll" value=${f.log_level} onChange=${set("log_level")} options=${LOG_LEVELS} /></div>
-        <div class="field">${L(tn("agentMode"), "defaults.agent_mode", "g-am")}<${Select} id="g-am" value=${f.agent_mode} onChange=${set("agent_mode")} options=${AGENT_MODES} /></div>
+        <div class=${fc("field", "tool_set")}>${L(tn("toolSet"), "defaults.tool_set", "g-ts")}<${Select} id="g-ts" value=${f.tool_set} onChange=${set("tool_set")} options=${TOOL_SETS} /></div>
+        <div class=${fc("field", "log_level")}>${L(tn("logLevel"), "defaults.log_level", "g-ll")}<${Select} id="g-ll" value=${f.log_level} onChange=${set("log_level")} options=${LOG_LEVELS} /></div>
+        <div class=${fc("field", "agent_mode")}>${L(tn("agentMode"), "defaults.agent_mode", "g-am")}<${Select} id="g-am" value=${f.agent_mode} onChange=${set("agent_mode")} options=${AGENT_MODES} /></div>
       </div></section>
       <section class="card"><h3>${tn("detection")}</h3><div class="grid2">
-        <label class="check"><input type="checkbox" checked=${f.hangOn} onChange=${(e) => set("hangOn")(e.target.checked)} /><span>${tn("hangEnabled")}</span><${Impact} schema=${schema} field="defaults.hang_detector" /></label>
-        <div class="field">${L(`${tn("hangTimeout")} (${tn("minutes")})`, "defaults.hang_detector", "g-hang")}<input id="g-hang" type="number" min="0.1" step="0.5" class=${errors.hang ? "invalid" : ""} value=${f.hang} onInput=${(e) => set("hang")(e.target.value)} /><${Feedback} error=${errors.hang} /></div>
+        <label class=${fc("check", "hangOn")}><input type="checkbox" checked=${f.hangOn} onChange=${(e) => set("hangOn")(e.target.checked)} /><span>${tn("hangEnabled")}</span><${Impact} schema=${schema} field="defaults.hang_detector" /></label>
+        <div class=${fc("field", "hang")}>${L(`${tn("hangTimeout")} (${tn("minutes")})`, "defaults.hang_detector", "g-hang")}<input id="g-hang" type="number" min="0.1" step="0.5" class=${errors.hang ? "invalid" : ""} value=${f.hang} onInput=${(e) => set("hang")(e.target.value)} /><${Feedback} error=${errors.hang} /></div>
       </div></section>
       <section class="card"><h3>${tn("startup")}</h3><div class="grid2">
-        <div class="field">${L(tn("concurrency"), "fleet.spawn_concurrency", "g-conc")}<input id="g-conc" type="number" min="1" max="20" step="1" class=${errors.concurrency ? "invalid" : ""} value=${f.concurrency} onInput=${(e) => set("concurrency")(e.target.value)} /><${Feedback} error=${errors.concurrency} warning=${warnings.concurrency} /></div>
-        <div class="field">${L(`${tn("staggerDelay")} (ms)`, "fleet.spawn_stagger_ms", "g-stag")}<input id="g-stag" type="number" min="0" max="30000" step="100" class=${errors.stagger ? "invalid" : ""} value=${f.stagger} onInput=${(e) => set("stagger")(e.target.value)} /><${Feedback} error=${errors.stagger} warning=${warnings.stagger} /></div>
+        <div class=${fc("field", "concurrency")}>${L(tn("concurrency"), "fleet.spawn_concurrency", "g-conc")}<input id="g-conc" type="number" min="1" max="20" step="1" class=${errors.concurrency ? "invalid" : ""} value=${f.concurrency} onInput=${(e) => set("concurrency")(e.target.value)} /><${Feedback} error=${errors.concurrency} warning=${warnings.concurrency} /></div>
+        <div class=${fc("field", "stagger")}>${L(`${tn("staggerDelay")} (ms)`, "fleet.spawn_stagger_ms", "g-stag")}<input id="g-stag" type="number" min="0" max="30000" step="100" class=${errors.stagger ? "invalid" : ""} value=${f.stagger} onInput=${(e) => set("stagger")(e.target.value)} /><${Feedback} error=${errors.stagger} warning=${warnings.stagger} /></div>
       </div></section>
       <section class="card"><h3>${tn("accessTitle")}</h3>
         <p class="note">${primary ? tn("accessMovedHint", primary.id || chLabel(0)) : tn("noBots")}</p></section>
     </${Drawer}>
-    <div class="save-row"><button type="button" class="btn btn-primary" disabled=${!ready} onClick=${review}>${tn("reviewChanges")}</button>
-      ${msg ? html`<span class="note" role="status">${msg}</span>` : null}</div>
   </div>`;
 }
 
@@ -818,7 +922,12 @@ function WebSection({ ctx, staged }) {
     terminal: { enabled: term.enabled ?? null, ttl_minutes: term.ttl_minutes ?? null },
   }), []);
   const text = (v) => (v === null || v === undefined ? "" : String(v));
-  const [f, setF] = useState(() => {
+  /** #2347: a field's row class: `s-dirty` while it differs from what is saved (the draft may come from before). */
+  const savedForm = useMemo(() => ({ echo: original.echo, log: original.log, usagePub: original.usagePub, pub: original.pub.allow_public,
+    ttl: String(original.pub.ttl_minutes), protocol: original.pub.protocol, hostname: original.pub.hostname, originPort: String(original.pub.origin_port),
+    abs: text(original.session.absolute_hours), idle: text(original.session.idle_hours), termOn: original.terminal.enabled !== false,
+    termTtl: text(original.terminal.ttl_minutes) }), []);
+  const [f, setF] = useDraft(ctx, "web", () => savedForm, () => {
     // Settings sections share one draft. Reopening Web must show it as well as preserve it in the Apply bar, so a
     // subsequent field edit keeps earlier edits. The original disk values remain the diff/confirmation baseline.
     const request = staged.get("web")?.request;
@@ -833,8 +942,8 @@ function WebSection({ ctx, staged }) {
       termOn: pick(terminal, "enabled", original.terminal.enabled) !== false, termTtl: text(pick(terminal, "ttl_minutes", original.terminal.ttl_minutes)),
     };
   });
-  const [msg, setMsg] = useState(null);
   const set = (k) => (v) => setF((x) => ({ ...x, [k]: v }));
+  const fc = (cls, ...keys) => `${cls}${keys.some((k) => !sameValue(f[k], savedForm[k])) ? " s-dirty" : ""}`;
   // Empty = the default (null in the write: the key is removed from fleet.yaml).
   const value = (v) => (v.trim() === "" ? null : Number(v));
   const hours = (v) => { const n = value(v); return n !== null && (!Number.isFinite(n) || n < 1 || n > 720) ? "sessionRange" : ""; };
@@ -851,8 +960,12 @@ function WebSection({ ctx, staged }) {
   };
   const ready = !overPublicLink && !Object.values(errors).some(Boolean);
   const review = (quiet = false) => {
-    // Invalid intermediate text must not leave an older valid draft available to Apply.
-    if (!ready) { if (staged.has("web")) ctx.unstage("web"); setMsg(null); return; }
+    // #2347: invalid text keeps the draft unsaved and Save waiting ("Fix 1 field to save"); no older valid draft is sent.
+    if (overPublicLink) return;
+    if (!ready) {
+      syncStage(ctx, "web", { label: tn("sec_web"), invalid: tn(Object.values(errors).find(Boolean)) });
+      return;
+    }
     // Keep an existing secret reference, including a custom one. Only a newly supplied hostname without any
     // reference adopts the standard env key; mounting or editing an unrelated field never rewrites credentials.
     const tokenEnv = f.hostname === original.pub.hostname ? original.pub.tunnel_token_env
@@ -879,10 +992,9 @@ function WebSection({ ctx, staged }) {
       ...Object.keys(terminalPatch).map((k) => `web_terminal.${k}`),
     ];
     if (fields.length) {
-      ctx.stage("web", { label: tn("sec_web"), impact: batchImpact(schema, fields, (k) => impactOf(schema, k)),
+      ctx.stage("web", { label: tn("sec_web"), count: fields.length, impact: batchImpact(schema, fields, (k) => impactOf(schema, k)),
         request: { method: "PUT", url: "/api/settings/fleet/web", body } }, quiet);
     } else if (staged.has("web")) ctx.unstage("web");
-    setMsg(fields.length ? tn("readyApply") : null);
   };
   // This form already has validation and a single shared Web draft. Valid edits join that draft immediately;
   // Apply, its confirmations and the leave guard still own all HTTP writes. Quiet staging avoids a toast per key.
@@ -902,37 +1014,37 @@ function WebSection({ ctx, staged }) {
     <section class="card"><h3>${tn("webSessionTitle")}</h3>
       <p class="note">${tn("webSessionHint")}</p>
       <div class="grid2">
-        <div class="field"><label for="webSessionAbsolute">${tn("sessionAbsolute")}</label><input id="webSessionAbsolute" type="number" min="1" max="720" step="any" placeholder=${tn("defaultHours", 48)}
+        <div class=${fc("field", "abs")}><label for="webSessionAbsolute">${tn("sessionAbsolute")}</label><input id="webSessionAbsolute" type="number" min="1" max="720" step="any" placeholder=${tn("defaultHours", 48)}
           class=${errors.abs ? "invalid" : ""} value=${f.abs} onInput=${(e) => set("abs")(e.target.value)} /><${Feedback} error=${errors.abs} /></div>
-        <div class="field"><label for="webSessionIdle">${tn("sessionIdle")}</label><input id="webSessionIdle" type="number" min="1" max="720" step="any" placeholder=${tn("defaultHours", 48)}
+        <div class=${fc("field", "idle")}><label for="webSessionIdle">${tn("sessionIdle")}</label><input id="webSessionIdle" type="number" min="1" max="720" step="any" placeholder=${tn("defaultHours", 48)}
           class=${errors.idle ? "invalid" : ""} value=${f.idle} onInput=${(e) => set("idle")(e.target.value)} /><${Feedback} error=${errors.idle} /></div>
       </div>
     </section>
     <section class="card"><h3>${tn("webTerminalTitle")}</h3>
       <p class="note">${tn("webTerminalHint")}</p>
-      <label class="check"><input id="webTerminalEnabled" type="checkbox" checked=${f.termOn} onChange=${(e) => set("termOn")(e.target.checked)} /><span>${tn("webTerminalEnabled")}</span><${Impact} schema=${schema} field="web_terminal.enabled" /></label>
+      <label class=${fc("check", "termOn")}><input id="webTerminalEnabled" type="checkbox" checked=${f.termOn} onChange=${(e) => set("termOn")(e.target.checked)} /><span>${tn("webTerminalEnabled")}</span><${Impact} schema=${schema} field="web_terminal.enabled" /></label>
       <div class="grid2">
-        <div class="field"><label for="webTerminalTtl">${tn("webTerminalTtl")}</label><input id="webTerminalTtl" type="number" min="1" max="20" step="1" placeholder=${tn("defaultHours", 10)}
+        <div class=${fc("field", "termTtl")}><label for="webTerminalTtl">${tn("webTerminalTtl")}</label><input id="webTerminalTtl" type="number" min="1" max="20" step="1" placeholder=${tn("defaultHours", 10)}
           class=${errors.termTtl ? "invalid" : ""} value=${f.termTtl} onInput=${(e) => set("termTtl")(e.target.value)} /><${Feedback} error=${errors.termTtl} /></div>
       </div>
     </section>
     <section class="card"><h3>${tn("webChat")}</h3>
-      <label class="check"><input id="webEchoToChannel" type="checkbox" checked=${f.echo} onChange=${(e) => set("echo")(e.target.checked)} /><span>${tn("webEcho")}</span><${Impact} schema=${schema} field="web.echo_to_channel" /></label>
+      <label class=${fc("check", "echo")}><input id="webEchoToChannel" type="checkbox" checked=${f.echo} onChange=${(e) => set("echo")(e.target.checked)} /><span>${tn("webEcho")}</span><${Impact} schema=${schema} field="web.echo_to_channel" /></label>
       <p class="note">${tn("webEchoHint")}</p>
-      <label class="check"><input id="webLogTab" type="checkbox" checked=${f.log} onChange=${(e) => set("log")(e.target.checked)} /><span>${tn("webLogTab")}</span><${Impact} schema=${schema} field="web.log_tab" /></label>
+      <label class=${fc("check", "log")}><input id="webLogTab" type="checkbox" checked=${f.log} onChange=${(e) => set("log")(e.target.checked)} /><span>${tn("webLogTab")}</span><${Impact} schema=${schema} field="web.log_tab" /></label>
       <p class="note">${tn("webLogTabHint")}</p>
-      <label class="check"><input id="webUsagePublic" type="checkbox" checked=${f.usagePub} onChange=${(e) => set("usagePub")(e.target.checked)} /><span>${tn("webUsagePublic")}</span><${Impact} schema=${schema} field="web.usage_report_on_public_link" /></label>
+      <label class=${fc("check", "usagePub")}><input id="webUsagePublic" type="checkbox" checked=${f.usagePub} onChange=${(e) => set("usagePub")(e.target.checked)} /><span>${tn("webUsagePublic")}</span><${Impact} schema=${schema} field="web.usage_report_on_public_link" /></label>
       <p class="note">${tn("webUsagePublicHint")}</p>
-      <label class="check"><input id="publicWebLink" type="checkbox" checked=${f.pub} onChange=${(e) => set("pub")(e.target.checked)} /><span>${tn("publicLink")}</span><${Impact} schema=${schema} field="web.public_link.allow_public" /></label>
+      <label class=${fc("check", "pub")}><input id="publicWebLink" type="checkbox" checked=${f.pub} onChange=${(e) => set("pub")(e.target.checked)} /><span>${tn("publicLink")}</span><${Impact} schema=${schema} field="web.public_link.allow_public" /></label>
       <p class="note">${tn("publicLinkHint")}</p>
       <div class="grid2">
-        <div class="field"><label for="publicWebHostname">${tn("namedHostname")}</label><input id="publicWebHostname" type="text" value=${f.hostname} placeholder="agend.example.com" class=${errors.hostname ? "invalid" : ""} onInput=${(e) => set("hostname")(e.target.value)} /><${Feedback} error=${errors.hostname} /></div>
-        <div class="field"><label for="publicWebOriginPort">${tn("namedOriginPort")}</label><input id="publicWebOriginPort" type="number" min="1024" max="65535" value=${f.originPort} class=${errors.originPort ? "invalid" : ""} onInput=${(e) => set("originPort")(e.target.value)} /><${Feedback} error=${errors.originPort} /></div>
+        <div class=${fc("field", "hostname")}><label for="publicWebHostname">${tn("namedHostname")}</label><input id="publicWebHostname" type="text" value=${f.hostname} placeholder="agend.example.com" class=${errors.hostname ? "invalid" : ""} onInput=${(e) => set("hostname")(e.target.value)} /><${Feedback} error=${errors.hostname} /></div>
+        <div class=${fc("field", "originPort")}><label for="publicWebOriginPort">${tn("namedOriginPort")}</label><input id="publicWebOriginPort" type="number" min="1024" max="65535" value=${f.originPort} class=${errors.originPort ? "invalid" : ""} onInput=${(e) => set("originPort")(e.target.value)} /><${Feedback} error=${errors.originPort} /></div>
       </div>
       <p class="note">${tn("namedTunnelHint")} <a href="https://github.com/songsid/AgEnD/blob/main/docs/named-tunnel.md" target="_blank" rel="noopener noreferrer">${tn("namedTunnelSetup")}</a></p>
       <div class="grid2">
-        <div class="field"><label for="publicWebTtl">${tn("publicTtl")}</label><input id="publicWebTtl" type="number" min="1" max="480" class=${errors.ttl ? "invalid" : ""} value=${f.ttl} onInput=${(e) => set("ttl")(e.target.value)} /><${Feedback} error=${errors.ttl} /></div>
-        <div class="field"><label for="publicWebProtocol">${tn("publicProtocol")}</label><${Select} id="publicWebProtocol" value=${f.protocol} onChange=${set("protocol")} options=${["http2", "quic", "auto"]} /></div>
+        <div class=${fc("field", "ttl")}><label for="publicWebTtl">${tn("publicTtl")}</label><input id="publicWebTtl" type="number" min="1" max="480" class=${errors.ttl ? "invalid" : ""} value=${f.ttl} onInput=${(e) => set("ttl")(e.target.value)} /><${Feedback} error=${errors.ttl} /></div>
+        <div class=${fc("field", "protocol")}><label for="publicWebProtocol">${tn("publicProtocol")}</label><${Select} id="publicWebProtocol" value=${f.protocol} onChange=${set("protocol")} options=${["http2", "quic", "auto"]} /></div>
       </div>
     </section>
     </fieldset>
@@ -941,8 +1053,6 @@ function WebSection({ ctx, staged }) {
       <p class="note">${tn("webReadOnlyLead")}</p>
       <dl class="s-web-ro">${WEB_READ_ONLY.map((k) => html`<div key=${k}><dt><code>${k}</code></dt><dd>${shown(k)}</dd></div>`)}</dl>
     </section>
-    <div class="save-row"><button type="button" class="btn btn-primary" disabled=${!ready} onClick=${() => review()}>${tn("reviewChanges")}</button>
-      ${msg ? html`<span class="note" role="status">${msg}</span>` : null}</div>
   </div>`;
 }
 
@@ -977,26 +1087,34 @@ function Developer({ ctx }) {
     <div class="s-dev-bar">
       <div class="seg-inline" role="group" aria-label=${tn("format")}>
         ${["yaml", "json"].map((k) => html`<button key=${k} type="button" class=${`btn btn-sm${fmt === k ? " on" : ""}`} aria-pressed=${fmt === k ? "true" : "false"} onClick=${() => setFmt(k)}>${k.toUpperCase()}</button>`)}</div>
-      <button type="button" class="btn btn-sm" onClick=${() => setEditing(!editing)}>${editing ? tn("viewMode") : tn("editMode")}</button>
+      ${ctx.readOnly ? null : html`<button type="button" class="btn btn-sm" onClick=${() => setEditing(!editing)}>${editing ? tn("viewMode") : tn("editMode")}</button>`}
       <button type="button" class="btn btn-sm" title=${tn("copy")} onClick=${copy}><${Icon} name="copy" size=${14} /><span class="lbl">${tn("copy")}</span></button>
       <button type="button" class="btn btn-sm" title=${tn("devDownload")} onClick=${download}><${Icon} name="download" size=${14} /><span class="lbl">${tn("devDownload")}</span></button>
     </div>
-    ${editing ? html`<textarea class="s-yaml" aria-label=${tn("devEditor")} spellcheck=${false} wrap="off" value=${draft} onInput=${(e) => setDraft(e.target.value)}></textarea>
+    ${editing && !ctx.readOnly ? html`<textarea class="s-yaml" aria-label=${tn("devEditor")} spellcheck=${false} wrap="off" value=${draft} onInput=${(e) => setDraft(e.target.value)}></textarea>
         <div class="save-row"><button type="button" class="btn btn-primary" onClick=${save}>${tn("devApply")}</button><span class="note">${tn("devApplyHint")}</span></div>`
       : html`<pre class="s-yaml">${text}</pre>`}
     ${msg ? html`<p class=${`feedback${msg.error ? " error" : ""}`} role="status">${msg.error || msg.text}</p>` : null}
   </section>`;
 }
 
-/** Staged, not applied: the count, what it will cost, Discard and Apply. */
+/**
+ * #2347: the section's Save. Shown while anything is unsaved: how many changes, what they will cost, Discard and Save —
+ * Save waits while a field is invalid ("Fix 1 field to save").
+ */
 function PendingBar({ staged, busy, onApply, onDiscard }) {
-  const kinds = [...new Set([...staged.values()].map((c) => c.impact))];
+  const changes = [...staged.values()];
+  const kinds = [...new Set(changes.filter((c) => !c.invalid).map((c) => c.impact))];
+  const invalid = changes.filter((c) => c.invalid).length;
+  const count = changes.reduce((n, c) => n + (Number.isInteger(c.count) && c.count > 0 ? c.count : 1), 0);
   return html`<div data-trust="panel-controls" class="s-pending" role="region" aria-label=${tn("pendingRegion")}>
-    <strong>${tn("changesPending", staged.size)}</strong>
+    <strong>${tn("changesPending", count)}</strong>
     <span class="note">${kinds.map(impactText).join(" · ")}</span>
-    <span class="grow"></span>
-    <button type="button" class="btn" onClick=${onDiscard} disabled=${busy}>${tn("discard")}</button>
-    <button type="button" class="btn btn-primary" onClick=${onApply} disabled=${busy} title=${busy ? tn("applyBusyLocal") : undefined}>${tn("applyChanges")}</button>
+    <span class="s-pending-actions">
+      ${invalid ? html`<span class="feedback error s-fix" role="status">${tn("fixToSave", invalid)}</span>` : null}
+      <button type="button" class="btn" onClick=${onDiscard} disabled=${busy}>${tn("discard")}</button>
+      <button type="button" class="btn btn-primary" onClick=${onApply} disabled=${busy || invalid > 0} title=${busy ? tn("applyBusyLocal") : undefined}>${tn("applyChanges")}</button>
+    </span>
   </div>`;
 }
 
