@@ -17,10 +17,13 @@ let p: AppPage, fleet: any, overview: any, sendCodeAnswer: any = { ok: true, out
 let sent: Array<{ method: string; path: string; body: any }> = [];
 /** #2367 review: what PUT /api/settings/fleet/web answers (default: ok). */
 let webAnswer: { status: number; body: unknown } | null = null;
+/** #2367 review: a PUT /api/settings/fleet/web held until this opens (null: answered at once). */
+let webHold: Promise<void> | null = null;
 const realFetch = (globalThis as any).fetch;
 const fakeFetch = async (path: string, init: { method?: string; body?: string } = {}) => {
   const method = init.method ?? "GET";
   sent.push({ method, path, body: init.body ? JSON.parse(init.body) : undefined });
+  if (method === "PUT" && path === "/api/settings/fleet/web" && webHold) { const held = webHold; webHold = null; await held; }
   if (method === "PUT" && path === "/api/settings/fleet/web" && webAnswer) {
     const a = webAnswer;
     return { ok: a.status >= 200 && a.status < 300, status: a.status, json: async () => a.body };
@@ -43,7 +46,7 @@ const fakeFetch = async (path: string, init: { method?: string; body?: string } 
 };
 beforeAll(() => { p = page({ url: "http://127.0.0.1:19280/settings/web" }); (globalThis as any).fetch = fakeFetch; });
 afterAll(() => { p.restore(); (globalThis as any).fetch = realFetch; });
-beforeEach(() => { sent = []; webAnswer = null; p.window.confirm = () => true; (globalThis as any).confirm = () => true; });
+beforeEach(() => { sent = []; webAnswer = null; webHold = null; p.window.confirm = () => true; (globalThis as any).confirm = () => true; });
 afterEach(async () => {
   await p.unmount();
   p.document.body.removeAttribute("data-public-link");
@@ -159,6 +162,24 @@ describe("Settings → Guests, as rendered (#2348)", () => {
     expect(w.row("dc:111").classList.contains("s-dirty")).toBe(true);
     await w.apply();
     expect(w.writes().map((s) => s.body)).toEqual([{ guests: { chat: false, grants: { "dc:111": { name: "Alice", instances: ["alpha", "beta"] } } } }]);
+  });
+  it("#2367 review: an edit made while a Save runs outlives it (still shown, still unsaved); the next Save sends only it", async () => {
+    let release!: () => void;
+    webHold = new Promise<void>((r) => { release = r; });
+    const w = await open();
+    await w.check(w.$("#guestsChat"), false);
+    await w.apply(); await settle(4);
+    await w.click(w.button("Edit agents", w.row("dc:111")));
+    await w.check(w.name(w.row("dc:111"), "beta"), true);
+    fleet = { ...fleet, web: { guests: { ...fleet.web.guests, chat: false } } };            // what that Save wrote
+    release();
+    const { appStore } = await import("/assets/app-store.js");
+    for (let i = 0; i < 50 && (appStore.get() as any).settingsOp?.phase !== "done"; i++) await settle(4);
+    await settle(12);
+    const after = [w.row("dc:111").classList.contains("s-dirty"), !!p.root.querySelector(".s-pending")];
+    await w.apply(); await settle(12);
+    expect([after, w.writes().map((x) => x.body)]).toEqual([[true, true],
+      [{ guests: { chat: false } }, { guests: { grants: { "dc:111": { name: "Alice", instances: ["alpha", "beta"] } } } }]]);
   });
   it("#2367 review: the real Save tells the section how it went — failed (the section says why) and waiting", async () => {
     const { appStore } = await import("/assets/app-store.js");
