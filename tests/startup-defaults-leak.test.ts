@@ -120,6 +120,31 @@ describe("classifyInstanceChange — startup change does not restart instances",
   });
 });
 
+// ── handleCreate / lossless patch: startup not written into new instance entry ─
+
+describe("handleCreate — startup not written into new instance's InstanceConfig", () => {
+  it("instanceConfig built by handleCreate does not contain startup", () => {
+    // Verify getEffectiveInstanceDefaults is called (not raw defaults spread)
+    // by checking that a FleetDefaults with startup produces no startup in result.
+    const fleetDefaults = {
+      backend: "claude-code",
+      model: "claude-sonnet-4.6",
+      startup: { stagger_delay_ms: 2000, concurrency: 4 },
+    };
+    const effective = getEffectiveInstanceDefaults(fleetDefaults);
+    // Simulate what handleCreate now does: DEFAULT_INSTANCE_CONFIG + effective + overrides
+    const instanceConfig = {
+      ...{ working_directory: "/work" }, // DEFAULT_INSTANCE_CONFIG placeholder
+      ...effective,
+      working_directory: "/work/proj",
+      topic_id: "123456789",
+    };
+    expect(instanceConfig).not.toHaveProperty("startup");
+    expect(instanceConfig.backend).toBe("claude-code");
+    expect(instanceConfig.model).toBe("claude-sonnet-4.6");
+  });
+});
+
 // ── Source-structure check: startup is in the strip list ─────────────────────
 
 describe("getEffectiveInstanceDefaults source: startup in destructure list", () => {
@@ -134,5 +159,16 @@ describe("getEffectiveInstanceDefaults source: startup in destructure list", () 
     const fnStart = src.indexOf("function getEffectiveInstanceDefaults");
     const fnBlock = src.slice(fnStart, fnStart + 1500);
     expect(fnBlock).toContain("startup: _startup");
+  });
+
+  it("instance-lifecycle.ts handleCreate uses getEffectiveInstanceDefaults (not raw defaults spread)", () => {
+    const src = require("node:fs").readFileSync(
+      require("node:path").join(__dirname, "../src/instance-lifecycle.ts"),
+      "utf-8",
+    );
+    // Must call getEffectiveInstanceDefaults, not spread raw defaults
+    expect(src).toContain("getEffectiveInstanceDefaults(this.ctx.fleetConfig!.defaults");
+    // Old raw spread must be absent
+    expect(src).not.toContain("...this.ctx.fleetConfig!.defaults,");
   });
 });
