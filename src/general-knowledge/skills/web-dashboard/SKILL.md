@@ -365,7 +365,7 @@ account that is a fleet admin of every connection the change affects, on their p
 link, an unverified browser or a change that needs the host CLI. After a failure, unapplied changes are staged again
 (secrets must be re-entered). **Restart AgEnD** restarts every agent
 (never automatic); until then every page shows **N saved change(s) take effect after AgEnD restarts** · **Restart now** ·
-**Later**. Preferences and Web appearance save directly.
+**Later**. Preferences and Web appearance save with the same bar (**Your preferences**; device-only switches count on their own; Restore defaults saves at once).
 
 **Preferences** — follows you across devices unless marked:
 | Control | What it does | Stored |

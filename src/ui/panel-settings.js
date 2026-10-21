@@ -14,6 +14,7 @@ import { appStore, useStore } from "/assets/app-store.js";
 import { useLease } from "/assets/app-ctx.js";
 import { DevicePrefs, PanelHeader, PendingChanges, setTitle } from "/assets/app-shell.js";
 import { navigate, navStore, setLeaveGuard } from "/assets/app-nav.js";
+import { discardHeldPrefs, heldPrefsCount, holdPrefs, onHeldPrefs, savePrefsHeld } from "/assets/app-prefs.js";
 import { chatPath, settingsPath, SETTINGS_SECTIONS } from "/assets/app-route.js";
 import { Dialog } from "/assets/ui-dialog.js";
 import { Empty, ErrorState, Skeleton } from "/assets/ui-states.js";
@@ -25,7 +26,7 @@ import "./settings-strings.js";
 import { api, attach, confirmedWrite, newKey } from "./settings-confirm.js";
 import { dismissOperation, operationActive, restartFleet, startOperation, takeLeftover } from "./settings-apply.js";
 import {
-  ACCESS_MODES, AGENT_MODES, DEFAULT_SCHEMA, HANG_TIMEOUT_DEFAULT_MINUTES, LOG_LEVELS, TOOL_PROGRESS, TOOL_SETS, VISIBILITY_MODES, batchImpact,
+  ACCESS_MODES, AGENT_MODES, DEFAULT_SCHEMA, ownChoiceImpact, HANG_TIMEOUT_DEFAULT_MINUTES, LOG_LEVELS, TOOL_PROGRESS, TOOL_SETS, VISIBILITY_MODES, batchImpact,
   changedFields, channelId, channelsOf, chLabel, connectionState, effectiveSummary, fleetModel, fromYaml, fullModelRequests, groupAgents,
   hasOwn, impactOf, localeOptions, defaultsImpact, requestImpact, nonNegative, positive, replyGuardSupported, sameValue, shortName, STATUS_ORDER, toYaml,
   visibilityDefault, worstImpact,
@@ -162,6 +163,12 @@ export function SettingsPanel({ route, navKey }) {
     setData((d) => (d && !d.error ? { ...d, ...live } : d));
   };
 
+  // #2347: the "You" group — a preference chosen here (Preferences, Web appearance) is shown at once and saved by the bar's
+  // Save with everything else: held in app-prefs while Settings is open, and staged here as one change.
+  const syncHeld = (n) => (n ? stage(YOU_PREFS, { label: tn("youPrefs"), impact: ownChoiceImpact(data && data.schema), count: n,
+    local: { commit: savePrefsHeld, revert: discardHeldPrefs } }, true) : unstage(YOU_PREFS));
+  useEffect(() => { const release = holdPrefs(); syncHeld(heldPrefsCount()); const off = onHeldPrefs(syncHeld); return () => { off(); release(); }; }, []);
+
   // Mount: the data; requests still waiting for an admin from before a reload; the leave guard; the browser's prompt.
   useEffect(() => {
     reload();
@@ -177,6 +184,7 @@ export function SettingsPanel({ route, navKey }) {
           asking = false;
           if (!yes || !mount.current()) return;
           dropSecrets(stagedRef.current);
+          revertLocal(stagedRef.current);
           stagedRef.current = new Map();
           navigate(path, { force: true });
         });
@@ -184,6 +192,14 @@ export function SettingsPanel({ route, navKey }) {
       return false;
     }));
     mount.on(window, "beforeunload", (e) => { if (stagedRef.current.size) { e.preventDefault(); e.returnValue = ""; } });
+    // #2380 review: a reload or a closed tab confirmed past that question keeps nothing unsaved — this person's and this
+    // device's own choices are put back before the page goes (a device switch is in this browser's storage at once).
+    mount.on(window, "pagehide", () => {
+      if (![...stagedRef.current.values()].some((c) => c.local)) return;
+      revertLocal(stagedRef.current);
+      stagedRef.current = new Map([...stagedRef.current].filter(([, c]) => !c.local));
+      setStaged((s) => new Map([...s].filter(([, c]) => !c.local)));
+    });
   }, [mount]);
 
   // Changes a failed Apply did not land come back to be staged again (secrets excepted: they are entered again).
@@ -261,7 +277,7 @@ export function SettingsPanel({ route, navKey }) {
     }
   };
   const unstage = (key) => setStaged((s) => { if (!s.has(key)) return s; const m = new Map(s); m.delete(key); return m; });
-  const discard = () => { dropSecrets(staged); setStaged(new Map()); outcomes.current = new Map(); dropDrafts(); reload(); };
+  const discard = () => { dropSecrets(staged); revertLocal(staged); setStaged(new Map()); outcomes.current = new Map(); dropDrafts(); reload(); };
   /** Tell each saved change's section how its Save settled (#2347: the onResult in the change it staged). */
   const settle = (o) => {
     for (const step of (o && o.steps) || []) {
@@ -276,7 +292,8 @@ export function SettingsPanel({ route, navKey }) {
 
   const applying = useRef(false);
   const apply = async () => {
-    if (applying.current || operationActive() || !staged.size || readOnly) return;
+    if (applying.current || operationActive() || !staged.size) return;
+    if (readOnly && [...stagedRef.current.values()].some((c) => !c.local)) return;
     if ([...stagedRef.current.values()].some((c) => c.invalid)) return;    // #2347: Save waits for every field to be valid
     // Every confirmation before the first write: a cancelled one must not leave earlier changes applied and later
     // ones pending (a surprising partial apply).
@@ -292,6 +309,18 @@ export function SettingsPanel({ route, navKey }) {
       }
     } finally { applying.current = false; }
     if (!mount.current() || operationActive()) return;
+    // #2347: this person's and this device's own choices are saved here, first (no apply job: nothing in fleet.yaml).
+    const locals = [...stagedRef.current.values()].filter((c) => c.local);
+    if (locals.length) {
+      let failed = false;
+      for (const c of locals) { try { await c.local.commit(); } catch { failed = true; } }
+      if (!mount.current()) return;
+      setStaged((s) => { const m = new Map(s); for (const c of locals) m.delete(c.stageKey); return m; });
+      stagedRef.current = new Map([...stagedRef.current].filter(([, c]) => !c.local));
+      // #2380 review: a refusal is said whatever else this Save carries (the host's values are back on the page).
+      if (failed) toast(tn("youSaveFailed"), false);
+      if (!stagedRef.current.size) { if (!failed) toast(tn("youSaved")); setDraftEpoch((n) => n + 1); return; }
+    }
     const list = [...stagedRef.current.values()].map(({ label, impact, request, connectionSecret, stageKey, key }) => ({ label, impact, request, connectionSecret, stageKey, key }));
     const handlers = new Map([...stagedRef.current.values()].filter((c) => typeof c.onResult === "function").map((c) => [c.stageKey, c.onResult]));
     if (startOperation(list)) {
@@ -325,9 +354,10 @@ export function SettingsPanel({ route, navKey }) {
     if (own(insts, want.name)) setDialog({ kind: "agent", name: want.name, inst: insts[want.name], key: navKey });
   }, [!!ctx, navKey]);
   // #1604: This device needs no configuration: shown at once, whatever the configuration read does.
-  const sectionBody = section === "device" ? html`<${DeviceSection} />`
+  // #2347: drawn again from what is in force after a Discard or a Save (draftEpoch), like every section.
+  const sectionBody = section === "device" ? html`<${DeviceSection} key=${`you:${draftEpoch}`} />`
     // #1629 r4 §3: Appearance is the person's own (no configuration read): shown at once, like Preferences.
-    : section === "appearance" ? html`<${AppearanceSection} />`
+    : section === "appearance" ? html`<${AppearanceSection} key=${`you:${draftEpoch}`} stage=${stage} unstage=${unstage} staged=${staged} schema=${data && data.schema} />`
     : !data ? html`<${Skeleton} lines=${6} />`
     : data.error ? html`<${ErrorState} message=${tn("configLoadFailed")} onRetry=${reload} />`
     : section === "agents" ? html`<${Agents} ctx=${ctx} search=${search} openDialog=${(d) => setDialog({ ...d, key: navKey })} />`
@@ -356,7 +386,7 @@ export function SettingsPanel({ route, navKey }) {
       ${ctx && (section === "agents" || section === "bots") ? html`<${FirstRunCard} onConnect=${() => setDialog({ kind: "wizard", key: navKey })} />` : null}
       ${sectionBody}
     </div></div>
-    ${staged.size && !readOnly ? html`<${PendingBar} staged=${staged} busy=${opBusy(op)} onApply=${apply} onDiscard=${discard} />` : null}
+    ${staged.size && (!readOnly || [...staged.values()].every((c) => c.local)) ? html`<${PendingBar} staged=${staged} busy=${opBusy(op)} onApply=${apply} onDiscard=${discard} />` : null}
     ${open && ctx ? renderDialog(open, ctx, close) : null}
     ${open && open.kind === "help" ? html`<${HelpDialog} onClose=${close} />` : null}
   </div>`;
@@ -368,6 +398,13 @@ export function SettingsPanel({ route, navKey }) {
  * read-only: a change there stays in that browser, and it says so. This device only: the chat tour (replayed on the
  * chat it points at), and the layout choices named there (their controls are where they always were).
  */
+/** #2347: the staged change that stands for every held "You" preference (app-prefs.js holdPrefs). */
+const YOU_PREFS = "you:prefs";
+/** Put back this person's and this device's own choices among `changes` (a Discard, or leaving Settings with them). */
+function revertLocal(changes) {
+  for (const c of [...changes.values()].reverse()) if (c.local) { try { c.local.revert(); } catch { /* the rest still go back */ } }
+}
+
 export function DeviceSection() {
   const P = () => globalThis.AgendPreview;
   const [on, setOn] = useState(P() ? P().optedIn() : false);
