@@ -234,8 +234,10 @@ export function SettingsPanel({ route, navKey }) {
     if (startOperation(list)) { results.current = handlers; setStaged(new Map()); }
   };
 
+  // #2347: sections read `staged` (each change as staged, its extra fields kept: Guests carries its whole draft) and
+  // `drafts` to come back to their edits; `draftEpoch` moves on Discard and after a Save to start them from what is saved.
   const ctx = data && !data.error ? makeCtx(data, setData, stage, unstage, reload, reloadLive, () => mount.current(),
-    { drafts: drafts.current, draftEpoch, readOnly }) : null;
+    { drafts: drafts.current, draftEpoch, readOnly, staged }) : null;
   // #1519 P7: "Connect a chat app" on the first-run card elsewhere came here for the wizard: it opens once the data is in.
   useEffect(() => { if (ctx && takeWizardRequest()) setDialog({ kind: "wizard", key: navKey }); }, [!!ctx, navKey]);
   // #1523 N2: "Edit in Settings" on an instance's Details: that agent's dialog, once the data is in — only an agent this
@@ -1041,10 +1043,11 @@ function PendingBar({ staged, busy, onApply, onDiscard }) {
   return html`<div data-trust="panel-controls" class="s-pending" role="region" aria-label=${tn("pendingRegion")}>
     <strong>${tn("changesPending", count)}</strong>
     <span class="note">${kinds.map(impactText).join(" · ")}</span>
-    <span class="grow"></span>
-    ${invalid ? html`<span class="feedback error s-fix" role="status">${tn("fixToSave", invalid)}</span>` : null}
-    <button type="button" class="btn" onClick=${onDiscard} disabled=${busy}>${tn("discard")}</button>
-    <button type="button" class="btn btn-primary" onClick=${onApply} disabled=${busy || invalid > 0} title=${busy ? tn("applyBusyLocal") : undefined}>${tn("applyChanges")}</button>
+    <span class="s-pending-actions">
+      ${invalid ? html`<span class="feedback error s-fix" role="status">${tn("fixToSave", invalid)}</span>` : null}
+      <button type="button" class="btn" onClick=${onDiscard} disabled=${busy}>${tn("discard")}</button>
+      <button type="button" class="btn btn-primary" onClick=${onApply} disabled=${busy || invalid > 0} title=${busy ? tn("applyBusyLocal") : undefined}>${tn("applyChanges")}</button>
+    </span>
   </div>`;
 }
 

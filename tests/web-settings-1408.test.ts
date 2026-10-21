@@ -274,7 +274,9 @@ describe("#2347: one save model — an edit is unsaved at once, the bar's Save w
     const { readFileSync } = await import("node:fs");
     const css = readFileSync("src/ui/shared/app.css", "utf8");
     const rule = css.match(/\n([^{}]*\.s-dirty::before[^{}]*)\{([^}]*)\}/);
-    expect([!!rule, /width: 3px/.test(rule?.[2] ?? ""), /\.lbar::before/.test(rule?.[1] ?? ""), /\.s-dirty\s*\{[^}]*border-left/.test(css)]).toEqual([true, true, true, false]);
+    expect([!!rule, /width: 3px/.test(rule?.[2] ?? ""), /\.lbar::before/.test(rule?.[1] ?? ""), /\.s-dirty\s*\{[^}]*border-left/.test(css),
+      // its tint is square too: no rounded coloured left edge behind the bar
+      /\.s-dirty\s*\{[^}]*border-radius: 0;/.test(css)]).toEqual([true, true, true, false, true]);
   });
 });
 

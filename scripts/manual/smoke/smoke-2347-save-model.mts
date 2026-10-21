@@ -22,8 +22,8 @@ for (const c of [{ device: "desk", theme: "light", lang: "en" }, { device: "desk
   const bar = p.page.locator(".s-pending");
   ok("barShown", await bar.waitFor({ timeout: 5000 }).then(() => true, () => false));
   const marker = await p.page.evaluate(`(() => { let n = document.querySelector("#g-tp"); while (n && !n.classList.contains("field")) n = n.parentElement;
-    const b = getComputedStyle(n, "::before"); return { cls: n.className, w: b.width, content: b.content, radius: b.borderTopLeftRadius, bl: getComputedStyle(n).borderLeftWidth }; })()`) as any;
-  ok("markerIsStraightBar", /s-dirty/.test(marker.cls) && marker.w === "3px" && marker.content !== "none" && marker.radius === "0px" && marker.bl === "0px");
+    const b = getComputedStyle(n, "::before"); return { cls: n.className, w: b.width, content: b.content, radius: b.borderTopLeftRadius, bl: getComputedStyle(n).borderLeftWidth, tint: getComputedStyle(n).borderTopLeftRadius }; })()`) as any;
+  ok("markerIsStraightBar", /s-dirty/.test(marker.cls) && marker.w === "3px" && marker.content !== "none" && marker.radius === "0px" && marker.bl === "0px" && marker.tint === "0px");
   await p.page.screenshot({ path: shotPath("2347", c as any, "1-edited") });
   await p.page.fill("#g-auto", "-3");
   await p.page.waitForTimeout(300);

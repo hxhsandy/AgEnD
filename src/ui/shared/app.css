@@ -138,7 +138,7 @@ html:has(.shell), html:has(.shell) body { overflow: hidden; }
 /* #2347: a Settings field edited and not saved yet — the shared straight bar (above), a light tint, and the 3px the bar
    takes added to its padding (and taken back from its margin), so the field's text stays put. */
 .s-dirty { --lbar-color: var(--accent); --lbar-inset: var(--s-1); background: color-mix(in srgb, var(--accent) 7%, transparent);
-  padding-left: calc(var(--s-2) + 3px); margin-left: calc(-1 * (var(--s-2) + 3px)); border-radius: var(--r-sm); }
+  padding-left: calc(var(--s-2) + 3px); margin-left: calc(-1 * (var(--s-2) + 3px)); border-radius: 0; align-self: start; }
 .idc-swatches, .idc-places { border: 0; padding: 0; margin: 0 0 var(--s-3); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .idc-swatches legend, .idc-places legend { font-weight: var(--fw-semibold); margin-bottom: 6px; width: 100%; }
 .idc-swatch { --sw: var(--sw-dark); width: 28px; height: 28px; border-radius: 50%; border: 2px solid transparent; background: var(--sw); cursor: pointer; padding: 0; }
@@ -1223,6 +1223,7 @@ textarea.s-yaml { white-space: pre; overflow-x: auto; }
 .s-pending { position: sticky; bottom: 0; display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; padding: var(--s-3) var(--s-5);
   background: var(--bg); border-top: 1px solid var(--border); box-shadow: var(--shadow-2); }
 .s-pending .grow { flex: 1; }
+.s-pending-actions { display: flex; align-items: center; gap: var(--s-3); margin-left: auto; }
 .s-op { border: 1px solid var(--border); }
 .s-op.failed { border-color: var(--danger-line); }
 .s-op-head { display: flex; align-items: center; gap: var(--s-2); }
@@ -1286,6 +1287,7 @@ textarea.s-yaml { white-space: pre; overflow-x: auto; }
   .shell:has(.s-pending) .pending-stack { bottom: calc(64px + 64px + var(--s-3)); }
   .shell:has(.s-pending) .toasts { bottom: auto; }
   .s-pending { padding: var(--s-2) var(--s-3); }
+  .s-pending-actions { flex-basis: 100%; justify-content: flex-end; }
 }
 
 /* ── Needs you (#1408 step 4 = #1386 part b) ── */
