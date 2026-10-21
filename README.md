@@ -7,7 +7,7 @@ All eight images were captured locally with Chromium 156 (Playwright Chromium 12
 - Desktop: 1366 × 900, light, English.
 - Phone: 390 × 844, dark, zh-TW.
 - Seed: Release readiness project; five main tasks distributed over all five statuses; the in-progress task has two subtasks, a goal, scope and three acceptance items.
-- Synthetic smoke fixture data only; scratch AGEND_HOME; owned loopback listeners 48720/48721 and 48730/48731. Fleet start, CLI/provider/tmux startup and real tunnel calls were not invoked. Task-board wake admission was stubbed before attaching the board. No screenshots were uploaded or published.
+- Synthetic smoke fixture data only; scratch AGEND_HOME; owned loopback listeners 48720/48721 and 48730/48731. Fleet start, CLI/provider/tmux startup and real tunnel calls were not invoked. Task-board wake admission was stubbed before attaching the board. The eight synthetic screenshots are published on the review artifact branch for the requested comparison.
 - Driver: ../review-2313-ui.mts. Run receipts: before-run.log, after-run.log. Geometry and CSP/page-error results: before-measurements.json, after-measurements.json.
 
 | View | Before | After |
