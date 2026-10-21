@@ -199,6 +199,30 @@ describe("Settings → Guests, as rendered (#2348)", () => {
     await w.apply(); await settle(12);
     expect([after, w.writes().map((x) => x.body).slice(1)]).toEqual([[false, false, true], [{ guests: { enabled: null, chat: false } }]]);          // off is the default: null
   });
+  for (const outcome of ["lands", "fails"] as const) {
+    it(`#2367 r3: a field put back while its Save runs keeps that latest word when the Save ${outcome}`, async () => {
+      let release!: () => void;
+      webHold = new Promise<void>((r) => { release = r; });
+      if (outcome === "fails") webAnswer = { status: 400, body: { error: "refused" } };
+      const w = await open();
+      await w.check(w.$("#guestsChat"), false);
+      await w.apply(); await settle(4);
+      await w.check(w.$("#guestsChat"), true);                       // back to what was saved before
+      if (outcome === "lands") fleet = { ...fleet, web: { guests: { ...fleet.web.guests, chat: false } } };
+      release();
+      const { appStore } = await import("/assets/app-store.js");
+      for (let i = 0; i < 50 && !["done", "failed"].includes((appStore.get() as any).settingsOp?.phase); i++) await settle(4);
+      await settle(12);
+      const after = [w.$("#guestsChat").checked, !!p.root.querySelector(".s-pending")];
+      const { resetOperation } = await import("/ui/js/settings-apply.js");
+      resetOperation(); webAnswer = null; await settle(4);
+      await w.apply(); await settle(12);
+      // Landed: chat off is saved now, so on again is one unsaved change (on is the default: null). Failed: on is what
+      // is saved, so nothing is left to save.
+      expect([after, w.writes().map((x) => x.body).slice(1)])
+        .toEqual(outcome === "lands" ? [[true, true], [{ guests: { chat: null } }]] : [[true, false], []]);
+    });
+  }
   it("#2367 review: the real Save tells the section how it went — failed (the section says why) and waiting", async () => {
     const { appStore } = await import("/assets/app-store.js");
     webAnswer = { status: 400, body: { error: "grant names someone not seen in chat" } };
