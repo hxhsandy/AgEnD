@@ -15,6 +15,10 @@ import { TunnelPurposeLane } from "../src/tunnel/purpose-lane.js";
 import { tokenEpoch } from "../src/web-session.js";
 import { setLocale, t } from "../src/locale.js";
 import { formatFleetTime } from "../src/tz-utils.js";
+import { existsSync } from "node:fs";
+import { syntheticTunnelToken } from "./helpers/named-tunnel-token.js";
+import { PUBLIC_TUNNEL_TOKEN_ENV } from "../src/public-tunnel-config.js";
+import { PUBLIC_LINK_OWNER_FILE } from "../src/public-link-owner.js";
 const rigs: Array<{dir: string; fm: FleetManager; s: any}> = [];
 let mono = 0;
 function rig(platform: "telegram" | "discord" = "telegram") {
@@ -229,5 +233,80 @@ describe("real dashboard dispatcher/nonce/private delivery, no fleet or tunnel",
     const login = h.s.webLogin.deps.reserveTunnel("login-reservation"); await h.typed(); await h.click(); expect(h.manager.start).not.toHaveBeenCalled();
     login.releaseUnused(); await h.typed(); await h.click(); expect(h.manager.start).toHaveBeenCalledTimes(1);
     expect(h.s.webLogin.deps.reserveTunnel("second-login")).toBeNull();
+  });
+});
+
+describe("#named-link-ttl: no expiry and auto_open in the real dispatcher", () => {
+  const previousToken = process.env[PUBLIC_TUNNEL_TOKEN_ENV];
+  beforeEach(() => { process.env[PUBLIC_TUNNEL_TOKEN_ENV] = syntheticTunnelToken(); });
+  afterEach(() => { if (previousToken === undefined) delete process.env[PUBLIC_TUNNEL_TOKEN_ENV]; else process.env[PUBLIC_TUNNEL_TOKEN_ENV] = previousToken; });
+  const NAMED = (extra: Record<string, unknown> = {}) => ({ public_link: { hostname: "agend.example.com", tunnel_token_env: PUBLIC_TUNNEL_TOKEN_ENV, ttl_minutes: 0, ...extra } });
+  const ownerFile = (h: { dir: string }) => join(h.dir, PUBLIC_LINK_OWNER_FILE);
+  it("a no-expiry link says so privately and in the menu; its opener is remembered, and Close forgets them", async () => {
+    const h = rig(); h.fm.fleetConfig!.web = NAMED();
+    await h.typed(); await h.click();
+    const dm = String(h.adapter.sendDirect.mock.calls[0]![1]);
+    expect(dm).toContain(t("dashboard.public_no_expiry"));
+    expect(h.s.publicWebLink.status()).toEqual({ state: "open", noExpiry: true });
+    expect(existsSync(ownerFile(h))).toBe(true);
+    await h.typed();
+    expect(h.adapter.notifyAlert.mock.calls.at(-1)![1].message).toContain(t("dashboard.public_status_no_expiry", "open"));
+    const close = [...h.s.pendingNonceButtons.values()].find((e: any) => e.chatId === "admin" && e.publicExposureId) as any;
+    await h.s.dispatchAdapterCallback({ callbackData: `dashboard:${close.nonce}:close`, chatId: "admin", messageId: close.messageId, userId: "admin", ack: vi.fn() }, "owner", h.adapter);
+    const step = [...h.s.pendingNonceButtons.values()].find((e: any) => e.closeStep) as any;
+    await h.s.dispatchAdapterCallback({ callbackData: `dashboard:${step.nonce}:confirm`, chatId: "admin", messageId: step.messageId, userId: "admin", ack: vi.fn() }, "owner", h.adapter);
+    expect(h.s.publicWebLink.status().state).toBe("closed");
+    expect(existsSync(ownerFile(h))).toBe(false);
+  });
+  it("a quick-tunnel opening remembers nobody; /web revoke forgets a named opener", async () => {
+    const quick = rig(); await quick.typed(); await quick.click();
+    expect(quick.s.publicWebLink.status().state).toBe("open"); expect(existsSync(ownerFile(quick))).toBe(false);
+    const named = rig(); named.fm.fleetConfig!.web = NAMED(); await named.typed(); await named.click();
+    expect(existsSync(ownerFile(named))).toBe(true);
+    await named.typed("admin", "T0", "/dashboard revoke"); await flush();
+    expect(existsSync(ownerFile(named))).toBe(false);
+  });
+  it("after a start, auto_open reopens it once for the remembered admin — nothing posted, no code issued", async () => {
+    const h = rig(); h.fm.fleetConfig!.web = NAMED({ auto_open: true });
+    await h.typed(); await h.click();
+    await h.s.publicWebLink.close("fleet shutdown");                       // as a restart leaves it
+    expect(h.s.publicWebLink.status().state).toBe("closed");
+    const posted = () => [h.adapter.sendDirect, h.adapter.sendText, h.adapter.notifyAlert].map(f => f.mock.calls.length);
+    const before = posted(); h.s.webLoginCodes.revoke();
+    h.s.healthServerListening = true;
+    h.s.startPublicLinkAutoOpen(); await flush();
+    expect(h.manager.start).toHaveBeenCalledTimes(2);
+    expect(h.s.publicWebLink.status()).toEqual({ state: "open", noExpiry: true });
+    expect(h.s.publicWebLink.openSignin()?.owner).toEqual(expect.objectContaining({ adapterId: "owner", userId: "admin", chatId: "G", threadId: "T0" }));
+    expect(posted()).toEqual(before); expect(h.s.webLoginCodes.hasOutstandingCode).toBe(false);
+    // The admin's next /web joins the same link and gets its URL and a code privately.
+    await h.typed(); await h.click();
+    expect(h.manager.start).toHaveBeenCalledTimes(2);
+    expect(String(h.adapter.sendDirect.mock.calls.at(-2)![1])).toContain("/signin");
+  });
+  it.each([
+    ["a quick tunnel (raw YAML auto_open)", { public_link: { auto_open: true } }],
+    ["auto_open off", NAMED()],
+  ])("auto_open is ignored with %s", async (_why, web) => {
+    const h = rig(); h.fm.fleetConfig!.web = NAMED(); await h.typed(); await h.click();
+    await h.s.publicWebLink.close("fleet shutdown");
+    h.fm.fleetConfig!.web = web as never; h.s.healthServerListening = true;
+    h.s.startPublicLinkAutoOpen(); await flush();
+    expect(h.manager.start).toHaveBeenCalledTimes(1); expect(h.s.publicWebLink.status().state).toBe("closed");
+  });
+  it("a start that keeps failing is retried twice, then its admin hears once by DM, drawn as a failed /web", async () => {
+    const h = rig(); h.fm.fleetConfig!.web = NAMED({ auto_open: true });
+    await h.typed(); await h.click(); await h.s.publicWebLink.close("fleet shutdown");
+    h.manager.start.mockResolvedValue({ ok: false, errorKind: "named-connection-failed", message: "private detail" } as never);
+    const dms = h.adapter.sendDirect.mock.calls.length;
+    h.s.healthServerListening = true; h.s.startPublicLinkAutoOpen(); await flush();
+    await vi.advanceTimersByTimeAsync(30_000); await flush();
+    await vi.advanceTimersByTimeAsync(120_000); await flush();
+    expect(h.manager.start).toHaveBeenCalledTimes(4);
+    expect(h.adapter.sendDirect.mock.calls.length).toBe(dms + 1);
+    const notice = String(h.adapter.sendDirect.mock.calls.at(-1)![1]);
+    expect(notice).toContain(t("dashboard.public_auto_failed")); expect(notice).toContain("❌"); expect(notice).not.toContain("private detail");
+    await vi.advanceTimersByTimeAsync(600_000); await flush();
+    expect(h.manager.start).toHaveBeenCalledTimes(4); expect(h.adapter.sendDirect.mock.calls.length).toBe(dms + 1);
   });
 });
