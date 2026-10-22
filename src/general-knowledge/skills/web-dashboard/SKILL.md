@@ -242,7 +242,10 @@ desk to desk along the corridors in the Key's colours; a delegation in progress 
 desk. Hover (or tap once) a desk for its name, state and backend; click (or tap again) opens the chat. **Find** dims
 the rest. **Show** picks a team or the Lobby and **People** pins chosen instances (both kept per browser); the
 **Office** switcher lists offices kept on the host (`web-offices.json`, `GET`/`PUT /ui/offices`; changing them takes
-an admin session, never the public link — v1 has no editor). Reduced motion: still poses, nothing in the air.
+an admin session, never the public link — v1 has no editor). **Style** (per browser): **Desks** (the default) or
+**Studio** — one scene (Work, Lounge, Help desk, Nap corner) where each instance walks to the area for its state.
+Now and then someone says a short line for their state in a bubble (never message content). Reduced motion: still
+poses, nothing in the air, bubbles shown whole.
 
 **Live traffic** (**Live** switch, on by default; **Key** in the toolbar explains it, as a strip above the canvas): a line for each message between instances.
 Colour by kind — task (delegate_task) purple, send/query/update teal, report pink, broadcast orange; between teams

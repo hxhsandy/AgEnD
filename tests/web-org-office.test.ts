@@ -34,7 +34,7 @@ const ORG = {
 const STORE = { ready: true, instances: INSTANCES, exec: { quill: "working", orbit: "stuck" }, awaiting: { pixel: "a prompt" }, needs: [] };
 
 let p: AppPage;
-let M: any, S: any, K: any, O: any, app: any, fleet: any, nav: any, TR: any;
+let M: any, S: any, K: any, O: any, app: any, fleet: any, nav: any, TR: any, PK: any, Z: any;
 let offices: unknown = { rev: 0, offices: [] };
 beforeAll(async () => {
   p = page({ url: "http://127.0.0.1:19280/ui/fleet/org" });
@@ -47,6 +47,8 @@ beforeAll(async () => {
   M = await import("/ui/js/fleet-office-model.js");
   S = await import("/ui/js/fleet-office-store.js");
   K = await import("/ui/js/fleet-office-skin.js");
+  PK = await import("/ui/js/fleet-office-pack.js");
+  Z = await import("/ui/js/fleet-office-zones.js");
   TR = await import("/ui/js/fleet-traffic.js");
 });
 afterAll(() => { p.restore(); delete (globalThis as any).fetch; });
@@ -300,20 +302,9 @@ describe("the skin seam", () => {
     // The same instance always looks the same; another one may not.
     expect(K.nameHash("atlas")).toBe(K.nameHash("atlas"));
   });
-  it("skinPackOk: a manifest checked (a default character set needed; bad strips, paths and names dropped)", () => {
-    const strip = { src: "chars/idle.png", frames: 4, w: 24, h: 32, fps: 4, ax: 12, ay: 13 };
-    expect(K.skinPackOk({ id: "cozy", characters: { fox: { idle: strip } } })).toBeNull();
-    expect(K.skinPackOk({ id: "pixel", characters: { default: { idle: strip } } })).toBeNull();
-    const pack = K.skinPackOk({ id: "cozy", scale: 3, characters: { default: { idle: strip, working: { ...strip, frames: 0 }, needs: { ...strip, src: "../x.png" } }, fox: { idle: { ...strip, src: "fox.png" } } },
-      byInstance: { atlas: "fox", sage: "wolf" }, props: { task: { src: "task.png", frames: 2, w: 8, h: 8 }, bogus: strip }, room: { floor: "floor.png", wall: "../wall.png" } });
-    expect(Object.keys(pack.characters.default)).toEqual(["idle"]);
-    expect([pack.byInstance, Object.keys(pack.props), pack.room, pack.scale]).toEqual([{ atlas: "fox" }, ["task"], { floor: "floor.png", wall: undefined }, 3]);
-    expect(pack.props.task).toMatchObject({ fps: 4, ax: 4, ay: 4 });
-    expect(K.packImages(pack).sort()).toEqual(["chars/idle.png", "floor.png", "fox.png", "task.png"]);
-  });
   it("spriteSkin: the strip's frame for the pose, the instance's own set; the built-in skin for what the pack lacks", () => {
     const strip = { src: "idle.png", frames: 4, w: 24, h: 32, fps: 4, ax: 12, ay: 30 };
-    const pack = K.skinPackOk({ id: "cozy", characters: { default: { idle: strip }, fox: { idle: { ...strip, src: "fox.png" } } }, byInstance: { a: "fox" } });
+    const pack = PK.skinPackOk({ format: 1, id: "cozy", characters: { default: { idle: strip }, fox: { idle: { ...strip, src: "fox.png" } } }, byInstance: { a: "fox" } });
     const img = (n: string) => ({ img: n });
     const skin = K.spriteSkin(pack, new Map([["idle.png", img("idle")], ["fox.png", img("fox")]]));
     const c = fakeCtx();
@@ -325,7 +316,149 @@ describe("the skin seam", () => {
     const r = fakeCtx();
     skin.drawRoom(r, { x: 0, y: 0, w: 200, h: 100, name: "T", lobby: false, desks: [] }, { ...env, pal: K.DEFAULT_PAL });   // no floor: the built-in room
     expect(r.calls.some(([k]: any) => k === "strokeRect")).toBe(true);
-    expect(K.skinFor("nope")).toBe(K.pixelSkin);
+    expect([K.skinFor("nope"), K.skinFor("studio").id]).toEqual([K.pixelSkin, "studio"]);
+  });
+  it("furniture: an active item plays its strip (or activeSprite); an idle one holds its first frame", () => {
+    const rack = { src: "rack.png", frames: 2, w: 10, h: 10, fps: 2 };
+    const pack = PK.skinPackOk(PACK({ furniture: [{ id: "rack", sprite: rack, x: 100, y: 100, depth: 2, activeWhen: "crashed", activeSprite: { ...rack, src: "rack-on.png" } }] }));
+    const skin = K.spriteSkin(pack, new Map([["rack.png", { r: 1 }], ["rack-on.png", { r: 2 }]]));
+    const f = pack.furniture[0];
+    const off = fakeCtx(); skin.drawFurniture(off, f, false, 900, env);
+    const on = fakeCtx(); skin.drawFurniture(on, f, true, 600, env);
+    expect(off.calls.find(([k]: any) => k === "drawImage")![1].slice(0, 2)).toEqual([{ r: 1 }, 0]);
+    expect(on.calls.find(([k]: any) => k === "drawImage")![1].slice(0, 2)).toEqual([{ r: 2 }, 10]);
+    expect([...Z.activeFurniture(pack, new Set(["idle"]))]).toEqual([]);
+    expect([...Z.activeFurniture(pack, new Set(["idle", "crashed"]))]).toEqual(["rack"]);
+    // The studio's: the alert rack and the bug answer to calls; the work rack to work.
+    expect([...Z.activeFurniture(K.STUDIO_PACK, new Set(["crashed"]))].sort()).toEqual(["bug", "rack-alert"]);
+    expect([...Z.activeFurniture(K.STUDIO_PACK, new Set(["working"]))]).toEqual(["rack-work"]);
+  });
+});
+
+/** A small valid zones pack (format v1), with `o` over it. */
+const STRIP = { src: "idle.png", frames: 4, w: 32, h: 48, fps: 4, ax: 16, ay: 46 };
+const PACK = (o: Record<string, unknown> = {}) => ({
+  format: 1, id: "cozy", background: "office.png",
+  areas: { desks: { rect: [0, 0, 600, 400], seats: [[100, 100], [200, 100]] }, lounge: { rect: [700, 0, 500, 400], seats: [[800, 200]] }, alert: { rect: [700, 420, 500, 280], seats: [[800, 500]] } },
+  stateZones: { working: "desks", idle: "lounge", needs: "alert", crashed: "alert", default: "lounge" },
+  waypoints: [{ id: "a", x: 150, y: 150 }, { id: "b", x: 650, y: 150 }, { id: "c", x: 800, y: 250 }], edges: [["a", "b"], ["b", "c"]],
+  characters: { default: { idle: STRIP, walk: { ...STRIP, src: "walk.png", frames: 2 } } }, ...o,
+});
+
+describe("the skin pack format v1 (strict)", () => {
+  it("a valid pack: areas with ordered seats, stateZones, furniture by depth, defaults filled; its images listed", () => {
+    const r = PK.checkSkinPack(PACK({ furniture: [{ id: "front", sprite: STRIP, x: 10, y: 10, depth: 1200 }, { id: "rug", sprite: { ...STRIP, src: "rug.png" }, x: 10, y: 10 }],
+      props: { task: { src: "task.png", frames: 2, w: 12, h: 12 } }, bubbles: { en: { working: [" On it "] } }, byInstance: { atlas: "default" } }));
+    expect(r.ok).toBe(true);
+    const pack = r.pack;
+    expect([pack.scale, pack.areas.desks.seats, pack.areas.desks.rect, pack.door]).toEqual([2, [{ x: 100, y: 100 }, { x: 200, y: 100 }], { x: 0, y: 0, w: 600, h: 400 }, { x: 640, y: 710 }]);
+    expect(pack.furniture.map((f: any) => [f.id, f.depth, f.activeWhen])).toEqual([["rug", 0, null], ["front", 1200, null]]);
+    expect([pack.props.task.fps, pack.props.task.ax, pack.props.task.ay, pack.bubbles.en.working]).toEqual([4, 6, 12, ["On it"]]);
+    expect(PK.packImages(pack).sort()).toEqual(["idle.png", "office.png", "rug.png", "task.png", "walk.png"]);
+    expect([PK.LOGICAL, PK.CHAR_DEPTH]).toEqual([{ w: 1280, h: 720 }, 1000]);
+    expect(PK.skinPackOk(PACK())).not.toBeNull();
+  });
+  it.each([
+    ["no format", { format: undefined }, "format"],
+    ["a built-in id", { id: "studio" }, "id"],
+    ["an unknown key", { colour: "red" }, 'pack: unknown key "colour"'],
+    ["a seat outside its area", { areas: { desks: { rect: [0, 0, 100, 100], seats: [[150, 50]] } }, stateZones: { working: "desks" } }, "areas.desks.seats[0]: outside"],
+    ["an area past the canvas", { areas: { desks: { rect: [1200, 0, 200, 100], seats: [[1210, 50]] } }, stateZones: { working: "desks" } }, "areas.desks.rect[2]"],
+    ["an area with no seats", { areas: { desks: { rect: [0, 0, 100, 100], seats: [] } }, stateZones: { working: "desks" } }, "areas.desks.seats"],
+    ["a state that is not one", { stateZones: { busy: "desks" } }, "stateZones.busy"],
+    ["a zone with no area", { stateZones: { working: "kitchen" } }, "stateZones.working"],
+    ["stateZones with no background", { background: undefined }, "background"],
+    ["an edge to nowhere", { edges: [["a", "zz"]] }, "edges[0]"],
+    ["a strip's unknown key", { characters: { default: { idle: { ...STRIP, loop: true } } } }, 'characters.default.idle: unknown key "loop"'],
+    ["a strip with no frames", { characters: { default: { idle: { ...STRIP, frames: 0 } } } }, "characters.default.idle.frames"],
+    ["a path out of the pack", { characters: { default: { idle: { ...STRIP, src: "../x.png" } } } }, "characters.default.idle.src"],
+    ["an unknown pose", { characters: { default: { idle: STRIP, dance: STRIP } } }, 'unknown key "dance"'],
+    ["no default set", { characters: { fox: { idle: STRIP } } }, "characters.default"],
+    ["a set with no idle", { characters: { default: { walk: STRIP } } }, "characters.default.idle"],
+    ["a character map to nothing", { byInstance: { atlas: "wolf" } }, "byInstance.atlas"],
+    ["activeWhen not a state", { furniture: [{ id: "r", sprite: STRIP, x: 1, y: 1, activeWhen: "busy" }] }, "furniture[0].activeWhen"],
+    ["activeSprite alone", { furniture: [{ id: "r", sprite: STRIP, x: 1, y: 1, activeSprite: STRIP }] }, "furniture[0].activeSprite"],
+    ["furniture off the canvas", { furniture: [{ id: "r", sprite: STRIP, x: 1281, y: 1 }] }, "furniture[0].x"],
+    ["a long bubble line", { bubbles: { en: { idle: ["x".repeat(41)] } } }, "bubbles.en.idle[0]"],
+    ["bubbles in another language", { bubbles: { fr: { idle: ["Salut"] } } }, "bubbles.fr"],
+  ])("refuses %s", (_what, o, where) => {
+    const r = PK.checkSkinPack(PACK(o));
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain(where);
+    expect(PK.skinPackOk(PACK(o))).toBeNull();
+  });
+});
+
+describe("zones: seats, walking, bubbles", () => {
+  const pack = () => PK.skinPackOk(PACK());
+  const node = (name: string, state: string) => ({ name, state, i: { name } });
+  it("each state's area (else default, else the first area)", () => {
+    const p = pack();
+    expect(["working", "idle", "crashed", "stuck", "paused"].map((s) => Z.zoneOf(p, s))).toEqual(["desks", "lounge", "alert", "lounge", "lounge"]);
+    expect(Z.zoneOf({ ...p, stateZones: { working: "alert" } }, "idle")).toBe("desks");
+    // The studio: work at the desks, idle in the lounge, calls at the help desk, asleep in the nap corner.
+    expect(["working", "idle", "needs", "crashed", "stuck", "paused", "stopped"].map((s) => Z.zoneOf(K.STUDIO_PACK, s))).toEqual(["desks", "lounge", "alert", "alert", "alert", "nap", "nap"]);
+  });
+  it("seats: in order, never shared; kept across calls while the area stays; overflow spots, then a crowd count", () => {
+    const p = pack();
+    const a = Z.zonesLayout(p, [node("x", "working"), node("y", "working"), node("z", "working"), node("gone", "missing")]);
+    const at = (L: any) => Object.fromEntries([...L.seats].map(([n, s]: any) => [n, [s.area, s.slot]]));
+    expect(at(a)).toEqual({ x: ["desks", 0], y: ["desks", 1], z: ["desks", -1] });
+    expect(M.desksOf(a).map((d: any) => d.node.name)).toEqual(["x", "y", "z"]);              // the missing are not drawn
+    // x goes idle: y and z keep theirs (stable), x takes the lounge's seat; a newcomer takes the freed desk seat 0.
+    const b = Z.zonesLayout(p, [node("w", "working"), node("x", "idle"), node("y", "working"), node("z", "working")], a.seats);
+    expect(at(b)).toEqual({ w: ["desks", 0], x: ["lounge", 0], y: ["desks", 1], z: ["desks", -1] });
+    // Positions never collide.
+    const many = Z.zonesLayout(p, Array.from({ length: 40 }, (_, i) => node(`n${i}`, "idle")));
+    const spots = [...many.seats.values()].map((s: any) => `${s.x},${s.y}`);
+    expect(new Set(spots).size).toBe(spots.length);
+    expect(spots.length + (many.crowd.get("lounge") || 0)).toBe(40);
+    expect(Z.overflowSpots(p.areas.lounge).every((q: any) => Math.hypot(q.x - 800, q.y - 200) >= Z.OVERFLOW.CLEAR)).toBe(true);
+    const tiny = { ...p, areas: { ...p.areas, alert: { name: "alert", rect: { x: 700, y: 420, w: 60, h: 60 }, seats: [{ x: 730, y: 450 }] } } };
+    expect(Z.zonesLayout(tiny, [node("a", "crashed"), node("b", "crashed"), node("c", "needs")]).crowd.get("alert")).toBe(2);
+  });
+  it("walking: someone new is already there; a new target walks along the waypoints; still jumps; the gone are forgotten", () => {
+    const w = Z.createWalkers(), g = pack();
+    w.sync(new Map([["x", { x: 100, y: 100 }]]), 0, g);
+    expect(w.at("x", 0)).toEqual({ x: 100, y: 100, walking: false });
+    w.sync(new Map([["x", { x: 800, y: 200 }]]), 1000, g);
+    const mid = w.at("x", 1500);
+    expect(mid.walking).toBe(true);
+    expect(w.moving(1500)).toBe(true);
+    // Along the graph: through a (150, 150) and b (650, 150) — never straight across.
+    const route = M.routeVia(g, { x: 100, y: 100 }, { x: 800, y: 200 });
+    expect(route.map((q: any) => [q.x, q.y])).toEqual([[100, 100], [150, 150], [650, 150], [800, 250], [800, 200]]);
+    const end = 1000 + M.pathLength(route) / Z.WALK.SPEED + 1;
+    expect(w.at("x", end)).toEqual({ x: 800, y: 200, walking: false });
+    w.sync(new Map([["x", { x: 100, y: 100 }]]), end, g, true);
+    expect(w.at("x", end)).toEqual({ x: 100, y: 100, walking: false });
+    w.sync(new Map(), end, g);
+    expect(w.at("x", end)).toBeNull();
+  });
+  it("bubbles: deterministic; a new line each round; typed out; still shows it whole; calls always speak; nothing without lines", () => {
+    const lines = ["One", "Two", "Three"];
+    const said = Array.from({ length: 40 }, (_, i) => Z.bubbleAt(`n${i}`, "idle", 0, lines));
+    expect(said.filter(Boolean).length).toBeGreaterThan(0);
+    expect(said.filter(Boolean).length).toBeLessThan(40);                   // one in SHARE at a time
+    expect(Z.bubbleAt("n1", "idle", 0, lines)).toEqual(Z.bubbleAt("n1", "idle", 0, lines));
+    for (const b of said.filter(Boolean)) expect(b.shown).toBe([...b.text].length);
+    for (let i = 0; i < 20; i++) expect(Z.bubbleAt(`n${i}`, "crashed", 0, lines), `n${i}`).not.toBeNull();
+    // Over time: typed a character at a time, then gone until its next turn; the line changes between rounds.
+    const seen = new Set<string>(), shownAt: number[] = [];
+    for (let ms = 1; ms < 20 * Z.BUBBLE.PERIOD_MS; ms += 50) { const b = Z.bubbleAt("atlas", "needs", ms, lines); if (b) { seen.add(b.text); shownAt.push(b.shown); } }
+    expect(seen.size).toBeGreaterThan(1);
+    expect(Math.min(...shownAt)).toBe(1);
+    expect(Z.bubbleAt("atlas", "idle", 5, [])).toBeNull();
+    // The skin's lines in the page's language win; else the page's own.
+    const p = { bubbles: { en: { idle: ["Hi"] } } };
+    expect([Z.linesFor("idle", "en", p, { idle: ["x"] }), Z.linesFor("idle", "zh-TW", p, { idle: ["x"] }), Z.linesFor("working", "en", null, {})]).toEqual([["Hi"], ["x"], []]);
+  });
+  it("the studio's own pack is a valid zones layout: seats inside their areas, every seat near a waypoint joined to the hall", () => {
+    const S = K.STUDIO_PACK;
+    for (const a of Object.values(S.areas) as any[]) for (const q of a.seats) expect(q.x >= a.rect.x && q.x <= a.rect.x + a.rect.w && q.y >= a.rect.y && q.y <= a.rect.y + a.rect.h, a.name).toBe(true);
+    const ids = S.waypoints.map((w: any) => w.id);
+    for (const id of ids) expect(M.bfsPath(S.edges, ids[0], id), id).not.toBeNull();
+    for (const a of Object.values(S.areas) as any[]) for (const q of a.seats) expect(Math.hypot(M.nearestWaypoint(S.waypoints, q).x - q.x, M.nearestWaypoint(S.waypoints, q).y - q.y)).toBeLessThanOrEqual(30);
   });
 });
 
@@ -358,7 +491,7 @@ describe("the Office view on the page", () => {
   });
   it("who is shown: a team, then pinned people — kept per browser; the Find box dims the rest", async () => {
     await office();
-    const [, team] = p.root.querySelectorAll(".oo-bar select");
+    const [, , team] = p.root.querySelectorAll(".oo-bar select");
     team.value = "t1"; fire(team, "change"); await settle(3);
     expect(desks()).toEqual(["nova", "tide"]);
     expect(JSON.parse(localStorage.getItem("agend_org_office_filter")!)).toEqual({ team: "Web", pinned: [] });
@@ -385,6 +518,30 @@ describe("the Office view on the page", () => {
     expect(desks()).toEqual(["nova", "tide", "quill"]);
     expect(p.root.querySelectorAll(".oo-bar select")).toHaveLength(1);           // the team filter is the auto office's
     expect(localStorage.getItem("agend_org_office")).toBe("ops");
+  });
+  it("the Studio style (zones): kept per browser; everyone in their state's area, drawn with bubbles and active furniture; a desk opens its chat", async () => {
+    const proto = MiniElement.prototype as any;
+    proto.getContext = function () { return (this._ctx ??= fakeCtx()); };
+    try {
+      await office();
+      const style = p.root.querySelectorAll(".oo-bar select")[1];
+      expect(style.querySelectorAll("option").map((o: any) => o.textContent.trim())).toEqual(["Desks", "Studio"]);
+      style.value = "studio"; fire(style, "change"); await settle(4);
+      expect(localStorage.getItem("agend_org_office_skin")).toBe("studio");
+      expect(desks()).toEqual(["atlas", "loner", "pixel", "quill", "sage", "orbit", "nova", "tide"]);
+      const main = p.root.querySelector(".oo-canvas")._ctx;
+      await settle(4);
+      const texts = main.calls.filter(([k]: any) => k === "fillText").map(([, a]: any) => a[0]);
+      expect(texts).toContain("quill");                                         // a name tag under feet
+      expect(texts.some((x: string) => ["Need you!", "A question for you", "Over here!", "Ouch, crashed", "Help!", "Hmm, stuck?", "Still thinking…"].some((l) => l.startsWith(x) && x.length > 0))).toBe(true);
+      // The canvas is the 1280×720 scene scaled to the stage (960 px here).
+      expect(p.root.querySelector(".oo-canvas").style.width).toBe(`${Math.ceil(1280 * (958 / 1280))}px`);
+      await p.unmount(); await mount();
+      expect(p.root.querySelectorAll(".oo-bar select")[1].value).toBe("studio");
+      const quill = p.root.querySelectorAll(".oo-desk").find((b: any) => b.getAttribute("data-name") === "quill");
+      quill.click(); await settle(2);
+      expect(location.pathname).toBe("/ui/chat/quill");
+    } finally { delete proto.getContext; }
   });
   it("on a canvas: the layers are drawn once, the people each frame; the loop stops with the view", async () => {
     const proto = MiniElement.prototype as any;

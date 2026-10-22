@@ -28,6 +28,8 @@ export const lightOf = (state) => (state === "crashed" ? "danger" : state === "n
 export const signOf = (state) => (state === "paused" || state === "stopped" ? "closed" : null);
 export const lampOf = (state) => state === "working";
 
+/** A small stable number from a name (FNV-1a): the same instance always gets the same hair, line, turn. */
+export const nameHash = (s) => { let h = 2166136261; for (const ch of String(s)) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619); } return h >>> 0; };
 /** The frame of a looping strip at time `ms` (0 when still: the reduced-motion pose). */
 export const frameAt = (ms, frames, fps) => (frames > 1 && ms > 0 ? Math.floor((ms / 1000) * fps) % frames : 0);
 
@@ -264,10 +266,17 @@ export function walkPath(L, from, to) {
   const desks = desksOf(L);
   const a = desks.find((d) => d.node.name === from), z = desks.find((d) => d.node.name === to);
   if (!a || !z || a === z) return null;
-  const byId = new Map(L.waypoints.map((w) => [w.id, w]));
-  const wa = (a.wp && byId.get(a.wp)) || nearestWaypoint(L.waypoints, a.seat), wz = (z.wp && byId.get(z.wp)) || nearestWaypoint(L.waypoints, z.seat);
-  const ids = wa && wz ? bfsPath(L.edges, wa.id, wz.id) : null;
-  return ids ? [a.seat, ...ids.map((id) => byId.get(id)), z.seat] : [a.seat, z.seat];
+  return routeVia(L, a.seat, z.seat, a.wp, z.wp);
+}
+/**
+ * The way between two points on a waypoint graph ({ waypoints, edges }): from `a` to its waypoint (`wa`, else the
+ * nearest), the fewest hops to `z`'s, then `z`. A straight line when the graph has no way.
+ */
+export function routeVia(graph, a, z, wa = null, wz = null) {
+  const byId = new Map(graph.waypoints.map((w) => [w.id, w]));
+  const pa = (wa && byId.get(wa)) || nearestWaypoint(graph.waypoints, a), pz = (wz && byId.get(wz)) || nearestWaypoint(graph.waypoints, z);
+  const ids = pa && pz ? bfsPath(graph.edges, pa.id, pz.id) : null;
+  return ids ? [a, ...ids.map((id) => byId.get(id)), z] : [a, z];
 }
 export const pathLength = (pts) => pts.reduce((s, p, i) => (i ? s + Math.hypot(p.x - pts[i - 1].x, p.y - pts[i - 1].y) : 0), 0);
 /** The point a fraction `t` (0–1) of the way along a polyline. */

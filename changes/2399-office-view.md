@@ -10,4 +10,9 @@ section: Added
   for what the card says; click it to open the chat. A team picker and pinned people narrow a big fleet (kept per
   browser), and an office switcher lists the offices kept on the host (`GET`/`PUT /ui/offices`, stored in
   `web-offices.json` in the AgEnD home; a change needs an admin session and is refused over the public link). Reduced
-  motion shows still poses with nothing in the air; the animation stops while the tab is hidden.
+  motion shows still poses with nothing in the air; the animation stops while the tab is hidden. A **Style** picker
+  switches the whole fleet to **Studio**: one scene with a work area, a lounge, a help desk and a nap corner, where each
+  instance walks to the area for its state and takes a free seat there; people now and then say a short line for
+  their state in a speech bubble (never message content), and furniture such as the server racks reacts to who is
+  working or calling. Skin packs (format v1: a 1280×720 background, areas with seats, furniture with depth,
+  state → area, sprite strips) can be checked but not added yet.

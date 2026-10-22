@@ -1,51 +1,39 @@
 // The Office view's art (fleet-office.js draws with it on a <canvas>). A skin draws a layout that fleet-office-model.js
-// made; the built-in one ("pixel") draws everything procedurally — little pixel people, desks, lamps — so no art ships.
-// Every drawing call goes through the OfficeSkin interface below, so a skin pack (pictures from an artist) can replace
-// any part of it; a part a pack does not supply falls back to the built-in drawing. v1 has no way to add a pack (no
-// upload): spriteSkin() and skinPackOk() are the seam a later step plugs into.
+// (desks) or fleet-office-zones.js (zones) made. Two skins are built in and draw everything procedurally — little
+// pixel people, desks, lamps — so no art ships: "pixel" (the desks layout: a room per team, a desk per instance) and
+// "studio" (the zones layout: work desks, a lounge, an alert corner and a nap corner; people walk to the area for their
+// state). Every drawing call goes through the OfficeSkin interface below, so a skin pack (pictures from an artist,
+// format v1 in fleet-office-pack.js) can replace any part; a part a pack does not supply falls back to the built-in
+// drawing. No pack can be added yet (no upload): spriteSkin() and checkSkinPack() are the seam a later step plugs into.
 //
 // ── The interface ──
 //
 // @typedef {"working"|"idle"|"paused"|"needs"|"walk"} OfficePose   (fleet-office-model.js POSES; "away" draws no one)
-// @typedef {{ pal: OfficePalette, mode: "dark"|"light", labels: { lobby: string, closed: string } }} OfficeEnv
-// @typedef {{ name: string, label: string, pose: OfficePose|"away", light: "warn"|"danger"|null, lamp: boolean,
-//   sign: "closed"|null, coat: string, work: number, dim: boolean, match: boolean }} OfficeLook   (one desk's occupant)
+// @typedef {{ pal: OfficePalette, mode: "dark"|"light", labels: { lobby, closed, areas: { [area]: string } } }} OfficeEnv
+// @typedef {{ name: string, label: string, state: string, pose: OfficePose|"away", light: "warn"|"danger"|null,
+//   lamp: boolean, sign: "closed"|null, coat: string, work: number, dim: boolean, match: boolean, free: boolean }} OfficeLook
+//   (one occupant; `free`: standing in a zone, not behind a desk cell)
 // @typedef {object} OfficeSkin
 // @property {string} id
-// @property {{ seats, waypoints, edges }} [layout]  a default layout for an office that has none of its own
-// @property {(ctx, L, env) => void} drawFloor            under everything: the stage and the corridors (L.edges)
-// @property {(ctx, room, env) => void} drawRoom          a room's floor, wall and name (room: autoLayout's)
-// @property {(ctx, desk, look, env) => void} drawDeskBack    behind the character: chair, desk top, screen, lamp
-// @property {(ctx, desk, look, ms, env) => void} drawCharacter   the occupant in its pose at time `ms` (0: still)
-// @property {(ctx, desk, look, env) => void} drawDeskFront   in front: the desk's front, its sign, folders, name tag
+// @property {object} [pack]        a checked pack (fleet-office-pack.js); with `pack.stateZones` the zones layout is used
+// @property {(ctx, L, env) => void} drawFloor            desks: under everything — the stage and the corridors (L.edges)
+// @property {(ctx, room, env) => void} drawRoom          desks: a room's floor, wall and name (room: autoLayout's)
+// @property {(ctx, desk, look, env) => void} drawDeskBack    desks: behind the character — chair, desk top, screen, lamp
+// @property {(ctx, desk, look, env) => void} drawDeskFront   desks: in front — the desk's front, its sign, folders, name tag
+// @property {(ctx, L, env) => void} [drawBackground]     zones: the whole 1280×720 background, areas and their names
+// @property {(ctx, item, active, ms, env) => void} [drawFurniture]   zones: one furniture item (active: activeWhen holds)
+// @property {(ctx, x, y, look, env) => void} [drawTag]   zones: a name tag under feet at (x, y)
+// @property {(ctx, desk, look, ms, env) => void} drawCharacter   the occupant in its pose at time `ms` (0: still); in
+//   zones `desk` is the character's box at its current position (its feet at desk.seat)
 // @property {(ctx, prop, ms, env) => void} drawProp      a traffic item in the air: { kind, hue, x, y, t }
-// The back and front layers change only when the fleet does; the renderer keeps them as pictures and draws only the
-// characters and the props each frame.
-//
-// ── A skin pack: what an artist supplies (skinPackOk checks it) ──
-//
-// A JSON manifest plus PNG images (pixel art: drawn unsmoothed at an integer `scale`, default 2):
-//   {
-//     "id": "cozy",                                   letters, digits, - and _ (≤ 40)
-//     "scale": 2,                                     1–8: one image pixel is this many CSS px
-//     "room":  { "floor": "floor.png", "wall": "wall.png" },    floor: a tile repeated over each room; wall: stretched
-//                                                     over the room's header band (26 CSS px tall)
-//     "desk":  { "back": "desk-back.png", "front": "desk-front.png", "lit": "desk-back-lit.png" },
-//                                                     each the size of a desk cell (96×104 CSS px: 48×52 at scale 2),
-//                                                     drawn at the cell's top-left; back behind the character, front
-//                                                     over it; lit replaces back while the instance works (lamp on)
-//     "characters": {                                 character sets; "default" is required
-//       "default": { "working": STRIP, "idle": STRIP, "paused": STRIP, "needs": STRIP, "walk": STRIP },
-//       "fox": { … } },
-//     "byInstance": { "atlas": "fox" },               optional: an instance name → its character set
-//     "props": { "task": STRIP, "send": STRIP, "report": STRIP, "broadcast": STRIP },   traffic items by kind
-//     "layout": { "seats": [{ "id", "x", "y" }], "waypoints": [{ "id", "x", "y" }], "edges": [["a", "b"]] }  optional
-//   }
-// A STRIP is { "src": "idle.png", "frames": 4, "w": 24, "h": 32, "fps": 4, "ax": 12, "ay": 13 }: `frames` frames of w×h
-// image px side by side, left to right, no gaps (the image is frames·w × h); played at `fps` (0: the first frame only,
-// as with reduced motion); (ax, ay) is the image point placed on the seat (a character) or on the item's position (a
-// prop). A pose a set lacks uses its "idle"; a part the pack lacks is drawn by the built-in skin.
-import { frameAt } from "./fleet-office-model.js";
+// @property {(ctx, x, y, text, env) => void} drawBubble  a speech bubble whose tail points at (x, y)
+// The desks layout's back and front layers change only when the fleet does: the renderer keeps them as pictures and
+// draws the characters, props and bubbles each frame. In zones the background is kept; furniture, people (walking
+// along the pack's waypoints), tags, props and bubbles are drawn each frame, furniture by depth around the people.
+import { frameAt, nameHash } from "./fleet-office-model.js";
+import { CHAR_DEPTH, LOGICAL } from "./fleet-office-pack.js";
+
+export { nameHash };
 
 // ── The palette: the dashboard's tokens, read by the renderer; furniture keeps its own wood and metal ──
 
@@ -69,8 +57,6 @@ const WOOD = { top: "#b07a45", edge: "#8a5a30", front: "#7a4f2a", leg: "#5c3b1f"
 const METAL = { frame: "#2b2f36", screenOff: "#3d4752", screenOn: "#9fe3ff", code: "#2d6f8f", pole: "#6b6f76", shade: "#d9b13b", chair: "#454b57", chairTop: "#545b69" };
 const SKIN_TONES = ["#f2c9a0", "#e5b48a", "#c98e62", "#9a6440"];
 const HAIR = ["#3b2a20", "#6b4423", "#c48a3a", "#1f1f24", "#7a4f8f", "#b9b9c2", "#a8452f"];
-/** A small stable number from a name: the same instance always gets the same hair and skin. */
-export const nameHash = (s) => { let h = 2166136261; for (const ch of String(s)) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619); } return h >>> 0; };
 
 const P = 3;                                             // one art pixel of a character, in CSS px
 const CX = 44, TOP = 14;                                 // the character's centre and head top in its desk cell
@@ -169,8 +155,10 @@ function drawCharacter(ctx, d, look, ms, env) {
     // Typing: the hands take turns on the keyboard; the screen's lines change.
     art(ctx, d, 0, 8, 1, 3, coat); art(ctx, d, 9, 8, 1, 3, coat);
     art(ctx, d, 1, f % 2 ? 10.4 : 11, 2, 0.8, skin); art(ctx, d, 7, f % 2 ? 11 : 10.4, 2, 0.8, skin);
-    px(ctx, d.x + 30, d.y + 47, 28, 3, "#d8d8dc");
-    for (let i = 0; i < 3; i++) px(ctx, d.x + 66, d.y + 32 + i * 4, 4 + ((f + i * 3) % 4) * 3, 2, METAL.code);
+    if (!look.free) {                                    // the keyboard and the screen's lines (in zones the desk is furniture)
+      px(ctx, d.x + 30, d.y + 47, 28, 3, "#d8d8dc");
+      for (let i = 0; i < 3; i++) px(ctx, d.x + 66, d.y + 32 + i * 4, 4 + ((f + i * 3) % 4) * 3, 2, METAL.code);
+    }
   } else if (look.pose === "idle") {
     head(0, false); body(0);
     // Tea: the cup comes up to sip on the second half of the loop; steam rises while it is down.
@@ -197,8 +185,13 @@ function drawCharacter(ctx, d, look, ms, env) {
     if (on) { ctx.fillStyle = c; ctx.globalAlpha *= 0.25; ctx.beginPath(); ctx.arc(d.x + CX, d.y + 6, 9, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = look.dim ? 0.35 : 1; }
     px(ctx, d.x + CX - 4, d.y + 2, 8, 7, c); px(ctx, d.x + CX - 3, d.y + 9, 6, 2, METAL.pole);
   } else {
-    // Walking (a skin pack's strip; drawn here only as a standing step).
-    head(f ? -1 : 0, false); body(f ? -1 : 0); art(ctx, d, 0, 7, 1, 3, coat); art(ctx, d, 9, 7, 1, 3, coat);
+    // Walking: a bob, arms and legs swinging in turn.
+    const up = f ? -1 : 0;
+    head(up, false); body(up); art(ctx, d, 0, 7 + f * 0.5, 1, 3, coat, up); art(ctx, d, 9, 7.5 - f * 0.5, 1, 3, coat, up);
+  }
+  if (look.free && look.pose !== "paused") {             // standing: legs (behind a desk cell they are hidden)
+    const step = look.pose === "walk" ? f : 0, legs = "#3a3f4b";
+    art(ctx, d, 2.5, 11, 2, step ? 1.6 : 2, legs); art(ctx, d, 5.5, 11, 2, step ? 2 : 1.6, legs);
   }
   ctx.restore();
 }
@@ -249,55 +242,161 @@ function drawProp(ctx, it, ms, env) {
 export const FRAMES = { working: 4, idle: 4, paused: 3, needs: 2, walk: 2 };
 export const FPS = 4;
 
+/** A speech bubble, its tail at (x, y): short words on light paper in either theme. */
+function drawBubble(ctx, x, y, text, env) {
+  if (!text) return;
+  ctx.save();
+  ctx.font = "600 11px system-ui, sans-serif";
+  const t = fitText(ctx, text, 150), w = Math.ceil((ctx.measureText ? ctx.measureText(t).width : t.length * 6) + 14), h = 19;
+  const bx = Math.round(x - 10), by = Math.round(y - h - 6);
+  ctx.fillStyle = "#fffdf6"; ctx.strokeStyle = env.mode === "light" ? "rgba(0, 0, 0, 0.35)" : "rgba(0, 0, 0, 0.6)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(bx + 4, by); ctx.lineTo(bx + w - 4, by); ctx.lineTo(bx + w, by + 4); ctx.lineTo(bx + w, by + h - 4); ctx.lineTo(bx + w - 4, by + h);
+  ctx.lineTo(x + 6, by + h); ctx.lineTo(x, y); ctx.lineTo(x + 1, by + h); ctx.lineTo(bx + 4, by + h); ctx.lineTo(bx, by + h - 4); ctx.lineTo(bx, by + 4); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = "#1d1d22"; ctx.textBaseline = "middle"; ctx.textAlign = "left";
+  ctx.fillText(t, bx + 7, by + h / 2 + 0.5);
+  ctx.restore();
+}
+
+/** Zones: a name tag under someone's feet at (x, y). */
+function drawTag(ctx, x, y, look, env) {
+  const { pal } = env;
+  ctx.save();
+  if (look.dim) ctx.globalAlpha = 0.35;
+  ctx.font = "600 10px system-ui, sans-serif";
+  const t = fitText(ctx, look.label, 84), w = Math.ceil((ctx.measureText ? ctx.measureText(t).width : t.length * 6) + 10);
+  ctx.fillStyle = pal.surface; ctx.fillRect(Math.round(x - w / 2), y + 3, w, 14);
+  ctx.strokeStyle = look.match ? pal.focus : pal.border; ctx.lineWidth = look.match ? 2 : 1; ctx.strokeRect(Math.round(x - w / 2) + 0.5, y + 3.5, w - 1, 13);
+  ctx.fillStyle = pal.text; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(t, x, y + 10.5);
+  ctx.restore();
+}
+
 /** @type {OfficeSkin} */
-export const pixelSkin = { id: "pixel", drawFloor, drawRoom, drawDeskBack, drawCharacter, drawDeskFront, drawProp };
+export const pixelSkin = { id: "pixel", drawFloor, drawRoom, drawDeskBack, drawCharacter, drawDeskFront, drawProp, drawBubble, drawTag };
 
-// ── Skin packs (the seam; nothing registers one in v1) ──
+// ── The built-in studio: the zones layout, drawn procedurally ──
 
-const PACK_ID = /^[A-Za-z0-9_-]{1,40}$/;
-const SRC = /^[A-Za-z0-9._/-]{1,200}$/;
-const int = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
-const num = (v) => typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= 4096;
-/** A frame strip, checked; null for anything else. */
-export function stripOk(x) {
-  if (!x || typeof x !== "object" || typeof x.src !== "string" || !SRC.test(x.src) || x.src.includes("..")) return null;
-  if (!int(x.frames, 1, 32) || !int(x.w, 1, 512) || !int(x.h, 1, 512)) return null;
-  const fps = typeof x.fps === "number" && x.fps >= 0 && x.fps <= 30 ? x.fps : 4;
-  return { src: x.src, frames: x.frames, w: x.w, h: x.h, fps, ax: num(x.ax) ? x.ax : x.w / 2, ay: num(x.ay) ? x.ay : x.h / 2 };
+const grid = (xs, ys) => ys.flatMap((y) => xs.map((x) => ({ x, y })));
+const HALL_X = 676;
+const STUDIO_AREAS = {
+  desks: { name: "desks", rect: { x: 24, y: 64, w: 632, h: 448 }, seats: grid([104, 248, 392, 536], [190, 320, 450]) },
+  lounge: { name: "lounge", rect: { x: 696, y: 64, w: 560, h: 304 }, seats: grid([748, 824, 900, 976, 1052, 1128, 1204], [250, 340]) },
+  alert: { name: "alert", rect: { x: 696, y: 392, w: 300, h: 304 }, seats: grid([744, 814, 884], [530, 600, 670]) },
+  nap: { name: "nap", rect: { x: 1020, y: 392, w: 236, h: 304 }, seats: grid([1084, 1184], [530, 600, 670]) },
+};
+/** The studio's walkable graph: an aisle under each row of seats, joined to the hall that runs down the middle. */
+function studioGraph(areas) {
+  const waypoints = [], edges = [], hall = new Set([380, 704]);
+  for (const a of Object.values(areas)) {
+    for (const y of [...new Set(a.seats.map((s) => s.y))]) {
+      const ay = y + 22, xs = [...new Set([...a.seats.filter((s) => s.y === y).map((s) => s.x), HALL_X])].sort((p, q) => p - q);
+      hall.add(ay);
+      const ids = xs.map((x) => { const id = `${a.name}-${ay}-${x}`; waypoints.push({ id, x, y: ay }); return id; });
+      ids.forEach((id, k) => { if (k) edges.push([ids[k - 1], id]); });
+      const join = ids[xs.indexOf(HALL_X)];
+      edges.push([join, `hall-${ay}`]);
+    }
+  }
+  const ys = [...hall].sort((p, q) => p - q);
+  ys.forEach((y, k) => { waypoints.push({ id: `hall-${y}`, x: HALL_X, y }); if (k) edges.push([`hall-${ys[k - 1]}`, `hall-${y}`]); });
+  return { waypoints, edges };
 }
-const srcOk = (s) => (typeof s === "string" && SRC.test(s) && !s.includes("..") ? s : undefined);
-const POSE_KEYS = ["working", "idle", "paused", "needs", "walk"], PROP_KEYS = ["task", "send", "report", "broadcast"];
-const stripsOf = (o, keys) => Object.fromEntries(keys.map((k) => [k, stripOk(o && o[k])]).filter(([, v]) => v));
-/** A skin pack's manifest (format above), checked: unknown keys dropped; null without an id or a default character set. */
-export function skinPackOk(x) {
-  if (!x || typeof x !== "object" || typeof x.id !== "string" || !PACK_ID.test(x.id) || x.id === "pixel") return null;
-  const sets = x.characters && typeof x.characters === "object" ? x.characters : {};
-  const characters = {};
-  for (const [k, v] of Object.entries(sets).slice(0, 64)) if (PACK_ID.test(k)) { const s = stripsOf(v, POSE_KEYS); if (s.idle) characters[k] = s; }
-  if (!characters.default) return null;
-  const byInstance = {};
-  for (const [k, v] of Object.entries(x.byInstance && typeof x.byInstance === "object" ? x.byInstance : {}).slice(0, 500)) if (typeof v === "string" && characters[v]) byInstance[k] = v;
-  const room = x.room || {}, desk = x.desk || {};
-  return {
-    id: x.id, scale: int(x.scale, 1, 8) ? x.scale : 2, characters, byInstance, props: stripsOf(x.props, PROP_KEYS),
-    room: { floor: srcOk(room.floor), wall: srcOk(room.wall) }, desk: { back: srcOk(desk.back), front: srcOk(desk.front), lit: srcOk(desk.lit) },
-    layout: x.layout && typeof x.layout === "object" ? x.layout : undefined,
-  };
+const STUDIO_FURNITURE = [
+  { id: "board", shape: "board", x: 340, y: 100, depth: 5 },
+  { id: "rack-work", shape: "rack", tone: "ok", x: 610, y: 160, depth: 6, activeWhen: ["working"] },
+  ...STUDIO_AREAS.desks.seats.map((s, i) => ({ id: `desk-${i}`, shape: "desk", x: s.x, y: s.y, depth: 1100 })),
+  { id: "sofa", shape: "sofa", x: 900, y: 150, depth: 10 },
+  { id: "coffee", shape: "coffee", x: 1210, y: 130, depth: 20, activeWhen: ["idle"] },
+  { id: "plant-1", shape: "plant", x: 724, y: 120, depth: 20 }, { id: "plant-2", shape: "plant", x: 40, y: 500, depth: 20 },
+  { id: "rack-alert", shape: "rack", tone: "danger", x: 960, y: 460, depth: 900, activeWhen: ["needs", "stuck", "crashed"] },
+  { id: "bug", shape: "bug", x: 760, y: 450, depth: 950, activeWhen: ["crashed"] },
+  ...STUDIO_AREAS.nap.seats.map((s, i) => ({ id: `bag-${i}`, shape: "beanbag", x: s.x, y: s.y + 4, depth: 990 })),
+].sort((a, b) => a.depth - b.depth);
+/** The studio's pack: the same shape as a checked one (fleet-office-pack.js), furniture by `shape` instead of sprites. */
+export const STUDIO_PACK = {
+  format: 1, id: "studio", scale: 1, areas: STUDIO_AREAS, door: { x: HALL_X, y: 704 }, furniture: STUDIO_FURNITURE, ...studioGraph(STUDIO_AREAS),
+  stateZones: { working: "desks", idle: "lounge", needs: "alert", crashed: "alert", stuck: "alert", paused: "nap", stopped: "nap", default: "lounge" },
+  characters: {}, byInstance: {}, props: {}, bubbles: {},
+};
+const ZONE_FLOOR = {
+  dark: { desks: ["#2b313b", "#272c35"], lounge: ["#2c3430", "#28302c"], alert: ["#3a2c2e", "#35282a"], nap: ["#302c3a", "#2c2835"], hall: "#262626" },
+  light: { desks: ["#efe7d8", "#e8dfcd"], lounge: ["#e3ecdf", "#dce6d7"], alert: ["#f3e1df", "#eed9d6"], nap: ["#e8e3f1", "#e1dbec"], hall: "#ececec" },
+};
+function drawBackground(ctx, L, env) {
+  const { pal } = env, F = ZONE_FLOOR[env.mode], T = 24;
+  px(ctx, 0, 0, LOGICAL.w, LOGICAL.h, F.hall);
+  for (const a of Object.values(L.areas)) {
+    const [c1, c2] = F[a.name] || F.desks, r = a.rect;
+    px(ctx, r.x, r.y, r.w, r.h, c1);
+    for (let y = r.y; y < r.y + r.h; y += T) for (let x = r.x + (((y - r.y) / T) % 2) * T; x < r.x + r.w; x += 2 * T) px(ctx, x, y, Math.min(T, r.x + r.w - x), Math.min(T, r.y + r.h - y), c2);
+    ctx.save();
+    ctx.strokeStyle = pal.border; ctx.lineWidth = 2; ctx.strokeRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
+    ctx.fillStyle = pal.text; ctx.font = "600 16px system-ui, sans-serif"; ctx.textBaseline = "top"; ctx.textAlign = "left";
+    ctx.fillText(fitText(ctx, env.labels.areas[a.name] || a.name, r.w - 60), r.x + 12, r.y + 10);
+    const crowd = L.crowd && L.crowd.get(a.name);
+    if (crowd) { ctx.fillStyle = pal.text2; ctx.textAlign = "right"; ctx.fillText(`+${crowd}`, r.x + r.w - 12, r.y + 10); }
+    ctx.restore();
+  }
 }
-/** Every picture a pack names (what a loader fetches before spriteSkin draws). */
-export const packImages = (pack) => [...new Set([pack.room.floor, pack.room.wall, pack.desk.back, pack.desk.front, pack.desk.lit,
-  ...Object.values(pack.characters).flatMap((s) => Object.values(s).map((st) => st.src)), ...Object.values(pack.props).map((st) => st.src)].filter(Boolean))];
+function drawFurniture(ctx, f, active, ms, env) {
+  const x = f.x, y = f.y;
+  switch (f.shape) {
+    case "desk":
+      px(ctx, x - 40, y - 24, 80, 6, WOOD.top); px(ctx, x - 38, y - 18, 76, 18, WOOD.front); px(ctx, x - 38, y - 18, 76, 2, WOOD.edge);
+      px(ctx, x + 12, y - 44, 24, 18, METAL.frame); px(ctx, x + 14, y - 42, 20, 13, METAL.screenOn); px(ctx, x + 22, y - 26, 4, 2, METAL.frame);
+      break;
+    case "board":
+      px(ctx, x - 90, y - 26, 180, 52, "#f4f4f0"); px(ctx, x - 92, y - 28, 184, 3, "#8a8f98"); px(ctx, x - 92, y + 25, 184, 3, "#8a8f98");
+      for (let i = 0; i < 4; i++) px(ctx, x - 78, y - 16 + i * 10, 40 + ((i * 37) % 90), 3, ["#4b8bf4", "#d97757", "#3fa58c", "#9b6bff"][i]);
+      break;
+    case "rack": {
+      px(ctx, x - 22, y - 70, 44, 90, "#2b2f36"); px(ctx, x - 20, y - 68, 40, 86, "#363b44");
+      const on = env.pal[f.tone] || env.pal.ok;
+      for (let r = 0; r < 6; r++) for (let c = 0; c < 3; c++) {
+        const lit = active && (ms <= 0 || frameAt(ms + (r * 3 + c) * 170, 2, 3) === 0);
+        px(ctx, x - 14 + c * 10, y - 60 + r * 13, 6, 4, lit ? on : "#4a505a");
+      }
+      break;
+    }
+    case "sofa":
+      px(ctx, x - 110, y - 30, 220, 26, "#3f7286"); px(ctx, x - 118, y - 14, 236, 34, "#4f8aa1"); px(ctx, x - 118, y - 20, 16, 40, "#3f7286"); px(ctx, x + 102, y - 20, 16, 40, "#3f7286");
+      break;
+    case "coffee":
+      px(ctx, x - 18, y - 34, 36, 50, "#5a5f69"); px(ctx, x - 14, y - 28, 28, 12, "#2b2f36"); px(ctx, x - 6, y + 2, 12, 10, "#ffffff");
+      if (active) for (let i = 0; i < 3; i++) { const k = frameAt(ms + i * 300, 4, 4); px(ctx, x - 4 + ((i + k) % 2) * 4, y - 6 - i * 7 - k, 2, 4, "rgba(230, 230, 236, 0.7)"); }
+      break;
+    case "plant":
+      px(ctx, x - 9, y, 18, 16, "#b5653a"); px(ctx, x - 14, y - 18, 10, 18, "#3f8f4f"); px(ctx, x - 4, y - 26, 9, 26, "#4fa65d"); px(ctx, x + 5, y - 16, 10, 16, "#3f8f4f");
+      break;
+    case "bug": {
+      const wob = active && ms > 0 ? Math.round(Math.sin(ms / 160) * 26) : 0, c = active ? env.pal.danger : "#6b6f76";
+      const bx = x + wob;
+      px(ctx, bx - 9, y - 6, 18, 12, c); px(ctx, bx - 5, y - 11, 10, 6, c); px(ctx, bx - 1, y - 6, 2, 12, "#1d1d22");
+      for (const k of [-1, 1]) for (const r of [-4, 0, 4]) px(ctx, bx + k * 11 - (k < 0 ? 3 : 0), y + r, 3, 2, "#1d1d22");
+      break;
+    }
+    case "beanbag":
+      px(ctx, x - 26, y - 14, 52, 20, "#7a5a8c"); px(ctx, x - 22, y - 20, 44, 8, "#8d6aa0");
+      break;
+    default:
+      break;
+  }
+}
+/** @type {OfficeSkin} */
+export const studioSkin = { ...pixelSkin, id: "studio", pack: STUDIO_PACK, drawBackground, drawFurniture };
+
+// ── Skin packs (the seam; nothing registers one yet) ──
 
 /**
- * An OfficeSkin from a checked pack and its loaded pictures (`images`: src → a drawable image). What it lacks, or a
- * picture not loaded, is drawn by the built-in skin.
+ * An OfficeSkin from a checked pack (fleet-office-pack.js checkSkinPack) and its loaded pictures (`images`: src → a
+ * drawable image). What it lacks, or a picture not loaded, is drawn by the built-in skins.
  */
 export function spriteSkin(pack, images, base = pixelSkin) {
   const img = (src) => (src && images.get(src)) || null;
-  const strip = (ctx, st, ms, x, y) => {
+  const strip = (ctx, st, ms, x, y, frame = null) => {
     const im = img(st && st.src);
     if (!im) return false;
-    const f = frameAt(ms, st.frames, st.fps), s = pack.scale;
+    const f = frame ?? frameAt(ms, st.frames, st.fps), s = pack.scale;
     ctx.save();
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(im, f * st.w, 0, st.w, st.h, Math.round(x - st.ax * s), Math.round(y - st.ay * s), st.w * s, st.h * s);
@@ -305,9 +404,9 @@ export function spriteSkin(pack, images, base = pixelSkin) {
     return true;
   };
   return {
+    ...base,
     id: pack.id,
-    layout: pack.layout,
-    drawFloor: base.drawFloor,
+    pack,
     drawRoom(ctx, room, env) {
       const floor = img(pack.room.floor), wall = img(pack.room.wall);
       if (!floor) { base.drawRoom(ctx, room, env); return; }
@@ -325,25 +424,38 @@ export function spriteSkin(pack, images, base = pixelSkin) {
       if (!im) { base.drawDeskBack(ctx, d, look, env); return; }
       ctx.save(); ctx.imageSmoothingEnabled = false; if (look.dim) ctx.globalAlpha = 0.35; ctx.drawImage(im, d.x, d.y, d.w, d.h); ctx.restore();
     },
-    drawCharacter(ctx, d, look, ms, env) {
-      if (look.pose === "away") return;
-      const set = pack.characters[pack.byInstance[look.name]] || pack.characters.default;
-      ctx.save();
-      if (look.dim) ctx.globalAlpha = 0.35;
-      const done = strip(ctx, set[look.pose] || set.idle, ms, d.seat.x, d.seat.y);
-      ctx.restore();
-      if (!done) base.drawCharacter(ctx, d, look, ms, env);
-    },
     drawDeskFront(ctx, d, look, env) {
       const im = img(pack.desk.front);
       if (im) { ctx.save(); ctx.imageSmoothingEnabled = false; if (look.dim) ctx.globalAlpha = 0.35; ctx.drawImage(im, d.x, d.y, d.w, d.h); ctx.restore(); }
       // The name tag, the sign and the folders are words and counts: always drawn here.
       base.drawDeskFront(ctx, d, { ...look, frontless: !!im }, env);
     },
+    drawBackground(ctx, L, env) {
+      const im = img(pack.background);
+      if (!im) { drawBackground(ctx, L, env); return; }
+      ctx.save(); ctx.imageSmoothingEnabled = false; ctx.drawImage(im, 0, 0, LOGICAL.w, LOGICAL.h); ctx.restore();
+    },
+    drawFurniture(ctx, f, active, ms, env) {
+      if (f.shape) { drawFurniture(ctx, f, active, ms, env); return; }
+      // Active: its strip (or activeSprite) plays; otherwise its first frame holds.
+      if (active) strip(ctx, f.activeSprite || f.sprite, ms, f.x, f.y);
+      else strip(ctx, f.sprite, 0, f.x, f.y, 0);
+    },
+    drawCharacter(ctx, d, look, ms, env) {
+      if (look.pose === "away") return;
+      const set = pack.characters[pack.byInstance[look.name]] || pack.characters.default;
+      ctx.save();
+      if (look.dim) ctx.globalAlpha = 0.35;
+      const done = !!set && strip(ctx, set[look.pose] || set.idle, ms, d.seat.x, d.seat.y);
+      ctx.restore();
+      if (!done) base.drawCharacter(ctx, d, look, ms, env);
+    },
     drawProp(ctx, it, ms, env) { if (!strip(ctx, pack.props[it.hue], ms, it.x, it.y)) base.drawProp(ctx, it, ms, env); },
   };
 }
 
-/** The skins this page has: the built-in one (a pack would be added here once loaded). */
-export const SKINS = new Map([["pixel", pixelSkin]]);
+/** The skins this page has: the built-in ones (a pack would be added here once loaded). */
+export const SKINS = new Map([["pixel", pixelSkin], ["studio", studioSkin]]);
 export const skinFor = (id) => SKINS.get(id) || pixelSkin;
+/** The people's depth in zones (fleet-office-pack.js). */
+export { CHAR_DEPTH };

@@ -2,12 +2,12 @@
 // - the offices people made: the host's (GET / PUT /ui/offices, src/web-office-store.ts — one list for every viewer);
 //   what comes back is checked again here (fleet-office-model.js officesOk), never trusted;
 // - this browser's own choices (localStorage; blocked storage: this page only, as the canvas's Canvas/List): which
-//   office is shown, and the auto office's member filter.
+//   office is shown, the auto office's member filter, and its style (skin).
 // TODO(office editor): adding and renaming offices, assigning people, dragging seats and drawing paths call
 // saveOffices() with the whole list and the rev they read (a change in between answers 409).
 import { AUTO_ID, filterOk, officesOk } from "./fleet-office-model.js";
 
-const CHOICE_KEY = "agend_org_office", FILTER_KEY = "agend_org_office_filter";
+const CHOICE_KEY = "agend_org_office", FILTER_KEY = "agend_org_office_filter", SKIN_KEY = "agend_org_office_skin";
 
 /** `fetch`: the caller's (a lease's, so an answer after the person moved on is dropped); `storage`: default localStorage. */
 export function createOfficeStore({ fetch: get = globalThis.fetch, storage } = {}) {
@@ -38,5 +38,8 @@ export function createOfficeStore({ fetch: get = globalThis.fetch, storage } = {
     saveChoice: (id) => write(CHOICE_KEY, String(id)),
     filter: () => { const s = read(FILTER_KEY); try { return filterOk(s ? JSON.parse(s) : null); } catch { return filterOk(null); } },
     saveFilter: (f) => write(FILTER_KEY, JSON.stringify(filterOk(f))),
+    /** The whole fleet's style here: a skin id ("pixel": desks, "studio": zones); an unknown one is the default where used. */
+    skin: () => { const v = read(SKIN_KEY); return typeof v === "string" && /^[A-Za-z0-9_-]{1,40}$/.test(v) ? v : "pixel"; },
+    saveSkin: (id) => write(SKIN_KEY, String(id)),
   };
 }

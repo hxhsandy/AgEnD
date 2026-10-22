@@ -2,8 +2,14 @@
 // (fleet-canvas.js). The same data as theirs: the structure from /ui/org (buildOrgView), the live state from the app
 // store, the traffic from fleet-traffic.js's store — nothing new is read but the offices people made (/ui/offices).
 //
-// - Each team is a room, each member a desk with a name tag; General and the instances in no team share the lobby. The
-//   layout (fleet-office-model.js autoLayout) is a grid that wraps at the stage's width.
+// - Two layouts, by skin. Desks (the built-in "pixel" skin, the default): each team is a room, each member a desk with a
+//   name tag; General and the instances in no team share the lobby; a grid that wraps at the stage's width
+//   (fleet-office-model.js autoLayout). Zones (a skin whose pack maps states to areas — the built-in "studio"): a
+//   1280×720 scene scaled to fit; each instance takes a seat in the area for its state and walks there along the
+//   pack's waypoints when its state changes (fleet-office-zones.js).
+// - Speech bubbles: now and then a short line for its state (typed out; at once with reduced motion) — the page's own
+//   lines or the skin's, never anything an agent said. Furniture can react: an item with `activeWhen` animates while
+//   anyone shown is in that state.
 // - Each occupant is a little pixel person in a pose that loops a few frames: working (typing, the lamp on), idle (tea),
 //   paused or stopped (asleep, a closed sign), needs you / crashed / looks stuck (a hand up, a blinking light).
 // - Traffic: each new message, delegation or report is an item carried from the sender's desk to the receiver's along
@@ -15,16 +21,17 @@
 //   the lobby) and pinned people — kept per browser (fleet-office-store.js).
 // - One requestAnimationFrame loop, drawing only when a frame changes; it stops while the tab is hidden and when the view
 //   goes. Reduced motion: still poses, nothing in the air. Colours are the dashboard's tokens (dark and light).
-// - Drawing is the skin's (fleet-office-skin.js): the built-in pixel one now; a skin pack can replace any part later.
+// - Drawing is the skin's (fleet-office-skin.js); a skin pack (fleet-office-pack.js) can replace any part later.
 import { html, useEffect, useLayoutEffect, useMemo, useRef, useState } from "/assets/app-html.js";
 import { appStore } from "/assets/app-store.js";
-import { t, register } from "/assets/app-i18n.js";
+import { t, lang, register } from "/assets/app-i18n.js";
 import { identityOf } from "/assets/identity-color.js";
 import { nodeText } from "./fleet-org.js";
 import { hits, needle } from "./fleet-canvas-layout.js";
 import { AUTO_ID, LOBBY, autoLayout, coatOf, createFlights, customLayout, deskAt, desksOf, filterOk, lampOf, layoutOk, lightOf, membersOf,
   officePose, officeRooms, signOf, workOn } from "./fleet-office-model.js";
-import { DEFAULT_PAL, modeOf, skinFor } from "./fleet-office-skin.js";
+import { CHAR_DEPTH, DEFAULT_PAL, modeOf, skinFor } from "./fleet-office-skin.js";
+import { activeFurniture, bubbleAt, createWalkers, linesFor, zonesLayout } from "./fleet-office-zones.js";
 import { createOfficeStore } from "./fleet-office-store.js";
 
 register("orgo", {
@@ -34,6 +41,10 @@ register("orgo", {
     people: "People", peopleN: "People ({0})", findPerson: "Find a person", everyone: "Show everyone", nobody: "No one here matches this filter.",
     unseated: "{0} without a seat", closed: "Closed", desks: "Desks", tapAgain: "Tap again to open the chat",
     capWorking: "Typing away", capIdle: "Tea break", capPaused: "Asleep", capNeeds: "Calling for you", capAway: "Desk empty",
+    styleLabel: "Style", style_pixel: "Desks", style_studio: "Studio", area_desks: "Work", area_lounge: "Lounge", area_alert: "Help desk", area_nap: "Nap corner",
+    b_working: "On it.|Typing…|Almost there|In the zone|One more test", b_idle: "Tea time|Ready when you are|Stretching|Anything for me?",
+    b_paused: "Zzz…|Back later", b_stopped: "Off duty|Zzz…", b_needs: "Need you!|A question for you|Over here!",
+    b_crashed: "Ouch, crashed|Help!", b_stuck: "Hmm, stuck?|Still thinking…",
   },
   "zh-TW": {
     label: "辦公室：每個 team 是一間房間，每個 instance 一張桌子；General 和未加入 team 的 instance 在大廳。",
@@ -41,6 +52,10 @@ register("orgo", {
     people: "成員", peopleN: "成員（{0}）", findPerson: "尋找成員", everyone: "顯示全部", nobody: "沒有符合這個篩選的成員。",
     unseated: "{0} 位沒有座位", closed: "休息中", desks: "桌子", tapAgain: "再點一下開啟聊天",
     capWorking: "埋頭打字中", capIdle: "喝茶休息", capPaused: "睡著了", capNeeds: "在呼叫你", capAway: "空位",
+    styleLabel: "風格", style_pixel: "辦公桌", style_studio: "工作室", area_desks: "工作區", area_lounge: "休息區", area_alert: "求救區", area_nap: "午睡角",
+    b_working: "處理中|打字中…|快好了|專心中|再測一次", b_idle: "喝茶中|隨時可以開工|伸個懶腰|有事找我嗎？",
+    b_paused: "Zzz…|晚點回來", b_stopped: "下班了|Zzz…", b_needs: "需要你！|有個問題|在這裡！",
+    b_crashed: "糟糕，當掉了|救命！", b_stuck: "嗯，卡住了？|還在想…",
   },
 });
 const to = (k, ...v) => t(`orgo.${k}`, ...v);
@@ -50,7 +65,12 @@ export const caption = (pose) => to(CAPTION[pose] || "capIdle");
 
 const reducedMotion = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 const now = () => (typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now());
-const FPS = 4;
+/** How often the picture can change when nothing is in the air (the poses loop at 4 fps; a bubble types faster). */
+const FPS = 12;
+const STYLES = ["pixel", "studio"];
+const BUBBLE_STATES = ["working", "idle", "paused", "stopped", "needs", "crashed", "stuck"];
+/** The page's own bubble lines, by state, in its language (short, never message content). */
+export const bubbleDefaults = () => Object.fromEntries(BUBBLE_STATES.map((s) => [s, to(`b_${s}`).split("|")]));
 
 /** The dashboard's tokens on `el`, for the canvas (the defaults are the dark theme's). */
 function readPal(el) {
@@ -108,12 +128,16 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   const [stored, setStored] = useState([]);
   const [choice, setChoice] = useState(() => store.choice());
   const [filter, setFilter] = useState(() => store.filter());
+  const [style, setStyle] = useState(() => store.skin());
   const [width, setWidth] = useState(960);
+  const [stageH, setStageH] = useState(0);                            // the stage's height (0: not known — fit the width only)
   const [themeRev, setThemeRev] = useState(0);
   const [pal, setPal] = useState(DEFAULT_PAL);                      // the tokens in force (read once the stage is there)
   const [tip, setTip] = useState(null);                               // the desk key the tooltip is for
   const stageRef = useRef(null), canvasRef = useRef(null), tipRef = useRef(null), lastType = useRef("mouse");
   const flights = useMemo(() => createFlights(), []);
+  const walkers = useMemo(() => createWalkers(), []);
+  const seatsRef = useRef(new Map());                                 // the zones layout's last seats: kept where they can be
   const still = useMemo(reducedMotion, []);
 
   // The host's offices: on opening, and again whenever the stream says they changed.
@@ -128,7 +152,11 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   // The stage's width (the grid wraps at it), and the theme (the tokens the canvas reads).
   useEffect(() => {
     const el = stageRef.current;
-    const measure = () => { const w = el && el.clientWidth; if (w > 0) setWidth((cur) => (Math.abs(cur - w) >= 1 ? Math.floor(w) : cur)); };
+    const measure = () => {
+      const w = el && el.clientWidth, h = el && el.clientHeight;
+      if (w > 0) setWidth((cur) => (Math.abs(cur - w) >= 1 ? Math.floor(w) : cur));
+      if (h > 0) setStageH((cur) => (Math.abs(cur - h) >= 1 ? Math.floor(h) : cur));
+    };
     measure();
     const ro = typeof ResizeObserver === "function" ? new ResizeObserver(measure) : null;
     if (ro && el) ro.observe(el); else globalThis.addEventListener?.("resize", measure);
@@ -148,23 +176,34 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   const mode = modeOf(pal);
 
   const custom = choice !== AUTO_ID ? stored.find((o) => o.id === choice) || null : null;
-  const skin = skinFor(custom ? custom.skin : "pixel");
+  const skin = skinFor(custom ? custom.skin : STYLES.includes(style) ? style : "pixel");
+  const zones = !!(skin.pack && skin.pack.stateZones);
   const L = useMemo(() => {
+    const nodes = custom ? membersOf(custom, view) : [...new Map(officeRooms(view, filter).flatMap((r) => r.nodes).map((n) => [n.name, n])).values()];
+    if (zones) { const z = zonesLayout(skin.pack, nodes, seatsRef.current); seatsRef.current = z.seats; return z; }
     if (!custom) return autoLayout(officeRooms(view, filter), { width });
-    const nodes = membersOf(custom, view), lay = custom.layout || layoutOk(skin.layout);
+    const lay = custom.layout || layoutOk(skin.layout);
     return lay ? customLayout({ ...custom, layout: lay }, nodes) : autoLayout([{ key: custom.id, name: custom.name, lobby: false, nodes }], { width });
   }, [view, filter, custom, width, skin]);
+  /** Layout units → CSS px: the zones scene fits the stage (16:9, whole); the desks are drawn at their size. */
+  const k = zones ? Math.max(0.2, Math.min(1.25, (width - 2) / L.width, stageH > 0 ? (stageH - 2) / L.height : Infinity)) : 1;
   const looks = useMemo(() => {
     const work = workOn(traffic);
     return new Map(L.rooms.flatMap((r) => r.desks).map((d) => {
       const n = d.node;
-      if (!n) return [d.key, { name: "", label: "", pose: "away", light: null, lamp: false, sign: null, coat: "", work: 0, dim: !!q, match: false }];
+      if (!n) return [d.key, { name: "", label: "", state: "missing", pose: "away", light: null, lamp: false, sign: null, coat: "", work: 0, dim: !!q, match: false, free: zones }];
       const match = !!q && hits(n, q);
-      return [d.key, { name: n.name, label: nodeText(n).primary, pose: officePose(n.state), light: lightOf(n.state), lamp: lampOf(n.state), sign: signOf(n.state),
-        coat: coatOf(n.i, n.i ? identityOf(n.i) : null, mode), work: work.get(n.name) || 0, dim: !!q && !match, match }];
+      return [d.key, { name: n.name, label: nodeText(n).primary, state: n.state, pose: officePose(n.state), light: lightOf(n.state), lamp: lampOf(n.state),
+        sign: zones ? null : signOf(n.state), coat: coatOf(n.i, n.i ? identityOf(n.i) : null, mode), work: work.get(n.name) || 0, dim: !!q && !match, match, free: zones }];
     }));
   }, [L, traffic, q, mode, themeRev]);
   useEffect(() => { flights.sync(traffic || [], now(), still); }, [traffic]);
+  // Zones: everyone's seat is where they walk to.
+  useEffect(() => {
+    if (!zones) return;
+    walkers.sync(new Map(desksOf(L).map((d) => [d.node.name, d.seat])), now(), L, still);
+    loop.current?.wake();
+  }, [L]);
 
   // ── Drawing: the back and front layers are pictures, remade when the office changes; each frame draws the people
   // and the items in the air between them ──
@@ -175,50 +214,81 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     const ctx = cv && typeof cv.getContext === "function" ? cv.getContext("2d") : null;
     if (!ctx) { scene.current = null; return; }
     const dpr = Math.max(1, Math.min(3, globalThis.devicePixelRatio || 1));
-    const W = Math.ceil(L.width), H = Math.max(1, Math.ceil(L.height));
+    const W = Math.ceil(L.width * k), H = Math.max(1, Math.ceil(L.height * k));
     if (cv.width !== W * dpr || cv.height !== H * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
     cv.style.setProperty("width", `${W}px`);
     cv.style.setProperty("height", `${H}px`);
-    const env = { pal, mode, labels: { lobby: to("lobbyRoom"), closed: to("closed") } };
+    const env = { pal, mode, labels: { lobby: to("lobbyRoom"), closed: to("closed"), areas: { desks: to("area_desks"), lounge: to("area_lounge"), alert: to("area_alert"), nap: to("area_nap") } } };
+    const scale = dpr * k;
     const layer = (paint) => {
       const c = document.createElement("canvas");
       c.width = W * dpr; c.height = H * dpr;
       const g = c.getContext && c.getContext("2d");
       if (!g) return null;
-      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.setTransform(scale, 0, 0, scale, 0, 0);
       g.imageSmoothingEnabled = false;
       paint(g);
       return c;
     };
     const all = L.rooms.flatMap((r) => r.desks);
     const back = layer((g) => {
-      g.fillStyle = env.pal.bg; g.fillRect(0, 0, W, H);
+      g.fillStyle = env.pal.bg; g.fillRect(0, 0, L.width, L.height);
+      if (zones) { skin.drawBackground(g, L, env); return; }
       skin.drawFloor(g, L, env);
       for (const r of L.rooms) skin.drawRoom(g, r, env);
       for (const d of all) skin.drawDeskBack(g, d, looks.get(d.key), env);
     });
-    const front = layer((g) => { for (const d of all) skin.drawDeskFront(g, d, looks.get(d.key), env); });
-    scene.current = { ctx, dpr, W, H, back, front, env, desks: all.filter((d) => d.node), looks, L, skin, dirty: true };
+    const front = zones ? null : layer((g) => { for (const d of all) skin.drawDeskFront(g, d, looks.get(d.key), env); });
+    const shown = new Set([...looks.values()].map((l) => l.state));
+    scene.current = { ctx, dpr, scale, W, H, back, front, env, desks: all.filter((d) => d.node), looks, L, skin, zones, dirty: true,
+      active: zones ? activeFurniture(skin.pack, shown) : new Set(), lines: bubbleDefaults(), lang: lang() };
     if (still) draw(0); else loop.current?.wake();
-  }, [L, looks, skin, pal]);
+  }, [L, looks, skin, pal, k]);
 
-  /** One frame at `ms` (0: still); whether anything is in the air. */
+  /** One frame at `ms` (0: still); whether anything is moving (in the air, or someone walking). */
   function draw(ms) {
     const s = scene.current;
     if (!s) return false;
-    const { ctx, dpr, W, H, env } = s;
+    const { ctx, dpr, scale, W, H, env, skin: sk } = s;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, W * dpr, H * dpr);
     if (s.back) ctx.drawImage(s.back, 0, 0);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
     ctx.imageSmoothingEnabled = false;
-    for (const d of s.desks) s.skin.drawCharacter(ctx, d, s.looks.get(d.key), ms, env);
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    if (s.front) ctx.drawImage(s.front, 0, 0);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const speakers = [];
+    let walking = false;
+    if (s.zones) {
+      // Furniture under the people, the people (nearest last), furniture over them, then their name tags.
+      const t = ms > 0 ? ms : now();
+      const people = s.desks.map((d) => {
+        const at = walkers.at(d.node.name, t) || { ...d.seat, walking: false };
+        if (at.walking) walking = true;
+        return { d, at, look: s.looks.get(d.key) };
+      }).sort((a, b) => a.at.y - b.at.y);
+      const furniture = s.skin.pack.furniture;
+      for (const f of furniture) if (f.depth < CHAR_DEPTH) sk.drawFurniture(ctx, f, s.active.has(f.id), ms, env);
+      for (const p of people) {
+        const box = { ...p.d, x: p.at.x - 44, y: p.at.y - 53, w: 88, h: 53, seat: { x: p.at.x, y: p.at.y } };
+        sk.drawCharacter(ctx, box, p.at.walking ? { ...p.look, pose: "walk" } : p.look, ms, env);
+        if (!p.at.walking) speakers.push({ look: p.look, x: p.at.x + 10, y: p.at.y - 50 });
+      }
+      for (const f of furniture) if (f.depth >= CHAR_DEPTH) sk.drawFurniture(ctx, f, s.active.has(f.id), ms, env);
+      for (const p of people) sk.drawTag(ctx, p.at.x, p.at.y, p.look, env);
+    } else {
+      for (const d of s.desks) { const look = s.looks.get(d.key); sk.drawCharacter(ctx, d, look, ms, env); speakers.push({ look, x: d.x + 58, y: d.y + 12 }); }
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      if (s.front) ctx.drawImage(s.front, 0, 0);
+      ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    }
     const up = still ? [] : flights.frame(ms, s.L);
-    for (const it of up) s.skin.drawProp(ctx, it, ms, env);
-    return up.length > 0 || flights.size() > 0;
+    for (const it of up) sk.drawProp(ctx, it, ms, env);
+    // Speech bubbles: a short line for the state, now and then (typed out; whole at once when still).
+    for (const sp of speakers) {
+      if (sp.look.dim || sp.look.pose === "away") continue;
+      const b = bubbleAt(sp.look.name, sp.look.state, ms, linesFor(sp.look.state, s.lang, sk.pack, s.lines));
+      if (b) sk.drawBubble(ctx, sp.x, sp.y, [...b.text].slice(0, b.shown).join(""), env);
+    }
+    return walking || up.length > 0 || flights.size() > 0;
   }
   // The loop: one requestAnimationFrame at a time, drawing only when the frame (FPS) changed or something is in the air;
   // stopped while the tab is hidden, gone with the view.
@@ -246,12 +316,12 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   useLayoutEffect(() => {
     const el = tipRef.current;
     if (!el || !tipDesk || !el.style) return;
-    const x = Math.max(4, Math.min(tipDesk.x, L.width - 244)), above = tipDesk.y > 90;
-    el.style.setProperty("transform", above ? `translate(${x}px, ${tipDesk.y + 6}px) translateY(-100%)` : `translate(${x}px, ${tipDesk.y + tipDesk.h}px)`);
+    const dx = tipDesk.x * k, dy = tipDesk.y * k, x = Math.max(4, Math.min(dx, L.width * k - 244)), above = dy > 90;
+    el.style.setProperty("transform", above ? `translate(${x}px, ${dy + 6}px) translateY(-100%)` : `translate(${x}px, ${dy + tipDesk.h * k}px)`);
   });
   const deskOf = (e) => {
     const r = canvasRef.current ? canvasRef.current.getBoundingClientRect() : null;
-    return r ? deskAt(L, e.clientX - r.left, e.clientY - r.top) : null;
+    return r ? deskAt(L, (e.clientX - r.left) / k, (e.clientY - r.top) / k) : null;
   };
   const onMove = (e) => { if (e.pointerType === "touch") return; const d = deskOf(e); const k = d ? d.key : null; if (k !== tip) setTip(k); };
   const onClick = (e) => {
@@ -277,6 +347,10 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
           <option value=${AUTO_ID}>${to("allOffice")}</option>
           ${stored.map((o) => html`<option key=${o.id} value=${o.id}>${o.name}</option>`)}
         </select></label>
+      ${auto ? html`<label class="oo-pick"><span class="oo-pick-label">${to("styleLabel")}</span>
+        <select class="tb-select" value=${skin.id} onChange=${(e) => { store.saveSkin(e.target.value); setStyle(e.target.value); setTip(null); }}>
+          ${STYLES.map((id) => html`<option key=${id} value=${id}>${to(`style_${id}`)}</option>`)}
+        </select></label>` : null}
       ${auto ? html`<label class="oo-pick"><span class="oo-pick-label">${to("show")}</span>
         <select class="tb-select" value=${teamValue} onChange=${(e) => { const o = opts.find((x) => x.value === e.target.value); setF({ ...f, team: o ? o.team : "" }); }}>
           ${opts.map((o) => html`<option key=${o.value} value=${o.value}>${o.label}</option>`)}
