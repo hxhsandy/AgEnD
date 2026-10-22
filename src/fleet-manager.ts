@@ -59,6 +59,7 @@ import {
 } from "./update-marker.js";
 import { formatUpdateProgress } from "./update-progress.js";
 import { sdNotify, sdNotifyBlocking, setSdNotifyWarn } from "./sd-notify.js";
+import { StartupMemoryDeadline, fleetStopConcurrency } from "./startup-memory-deadline.js";
 import { readFleetMemory, type FleetMemory } from "./process-memory.js";
 import { MemoryPressure, type MemoryPressureSnapshot } from "./memory-pressure.js";
 import { replyDedupText, ReplyDeduper } from "./reply-dedup.js";
@@ -1328,6 +1329,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
   /** Days of event/activity history to keep. */
   private static readonly EVENT_LOG_RETENTION_DAYS = 30;
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  private startupMemoryDeadline: StartupMemoryDeadline | null = null;
   private eventLoopWatch: EventLoopWatch | null = null;
   private startedAt = 0;
   private stormOpenNotifyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1973,6 +1975,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     this.spawnGate = new SpawnGate({
       storm: this.stormWindow,
       memoryPressure: this.memoryPressure,
+      onStartupMemoryWait: () => this.startupMemoryDeadline?.check(),
       concurrency: () => this.spawnConcurrency(),
       staggerMs: () => this.fleetConfig?.defaults?.startup?.stagger_delay_ms ?? 500,
     });
@@ -7267,6 +7270,38 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
 
   /** Start all instances from fleet config */
   async startAll(configPath: string): Promise<void> {
+    this.startupMemoryDeadline?.stop();
+    const deadline = new StartupMemoryDeadline({
+      current: () => this.startupMemoryDeadline === deadline && !this.shuttingDown,
+      waiting: () => this.spawnGate.isStartupMemoryDeferred(),
+      notify: sdNotify,
+      log: message => this.logger.info(message),
+    });
+    this.startupMemoryDeadline = deadline;
+    // A held first General must not postpone event-loop liveness monitoring.
+    // No independent heartbeat: a genuinely frozen main loop still stops pinging.
+    setSdNotifyWarn((fields, message) => this.logger.warn(fields, message));
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+    this.watchdogTimer = setInterval(() => sdNotify("WATCHDOG=1"), 30_000);
+    this.eventLoopWatch?.stop();
+    this.eventLoopWatch = startEventLoopWatch({ logger: this.logger });
+    try {
+      await this.startAllWithinDeadline(configPath, deadline);
+    } finally {
+      deadline.stop();
+      if (this.startupMemoryDeadline === deadline) {
+        this.startupMemoryDeadline = null;
+        if (!this.startupComplete) {
+          if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+          this.watchdogTimer = null;
+          this.eventLoopWatch?.stop();
+          this.eventLoopWatch = null;
+        }
+      }
+    }
+  }
+
+  private async startAllWithinDeadline(configPath: string, deadline: StartupMemoryDeadline): Promise<void> {
     this.loginWindow.reopen();                          // a stopAll → startAll restart must accept login windows again
     this.loginController?.reopen();
     const startupStartedAt = Date.now();
@@ -7685,23 +7720,6 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       });
     }
 
-    // The systemd watchdog answers exactly one question: is this process still
-    // turning its event loop? Pinging from a timer proves that, and after the
-    // blocking child-process calls were made async it is a meaningful signal —
-    // a deadlocked or frozen fleet stops pinging and systemd restarts it.
-    //
-    // It deliberately does NOT gate on fleet health. "No adapter connected" or
-    // "an instance crashed" must not kill the process: the fleet would be restarted
-    // into the same broken state, and a user who has legitimately stopped every
-    // instance would get a restart loop. Those conditions surface through /health
-    // (which now returns 503) and through the General-topic notifications instead.
-    setSdNotifyWarn((fields, message) => this.logger.warn(fields, message));
-    this.watchdogTimer = setInterval(() => sdNotify("WATCHDOG=1"), 30_000);
-    // #1231: a stalled loop is what turns a slash command into "did not respond";
-    // put each long stall in the log instead of leaving it to be guessed at.
-    this.eventLoopWatch?.stop();
-    this.eventLoopWatch = startEventLoopWatch({ logger: this.logger });
-
     // EventLog.prune() existed but was never called, so `events` and `activity`
     // grew without bound for the life of the install. Prune once at startup and
     // daily after that; the timer is unref'd so it never holds the loop open.
@@ -7908,6 +7926,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     // A SIGHUP may arrive after the PID/general is available but before the
     // rest of startup finishes. Replay one coalesced reload only after all
     // startup-owned lifecycle work and signal handlers are in place.
+    if (this.shuttingDown || this.startupMemoryDeadline !== deadline) return;
     this.finishStartup(bootUpdateMarker);
     this.startupDashboard = null;
     this.publishStartupStatus();
@@ -19966,7 +19985,26 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
 
   private stopAllInFlight: Promise<void> | null = null;
 
+  /** Stops release memory. Reassess between batches without waiting for recovery. */
+  private async stopInstancesInBatches<T>(entries: readonly T[], stop: (entry: T) => Promise<unknown>): Promise<void> {
+    let index = 0;
+    while (index < entries.length) {
+      // Linux procfs can still be read after the periodic sampler is stopped.
+      // Do not revive a stopped Darwin probe/worker just to size a quit batch;
+      // its full shutdown uses the conservative batch size instead.
+      const level = this.memoryPressure.platform === "darwin"
+        ? this.shuttingDown ? "elevated" : this.memoryPressure.snapshot().level
+        : this.memoryPressure.sample().level;
+      const size = fleetStopConcurrency(entries.length, level);
+      const batch = entries.slice(index, index + size);
+      index += batch.length;
+      await Promise.allSettled(batch.map(stop));
+    }
+  }
+
   private async doStopAll(): Promise<void> {
+    this.startupMemoryDeadline?.stop();
+    this.startupMemoryDeadline = null;
     this.startupComplete = false;
     this.startupDashboard = null;
     this.reloadPending = false;
@@ -20093,19 +20131,15 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     // tmux ops, while small fleets stay conservative to avoid overwhelming the
     // tmux server.
     const entries = [...this.daemons.entries()];
-    const STOP_CONCURRENCY = entries.length > 30 ? 15 : entries.length >= 10 ? 10 : 5;
     for (const [name] of entries) this.ipcStoppingInstances.add(name);
-    for (let i = 0; i < entries.length; i += STOP_CONCURRENCY) {
-      const batch = entries.slice(i, i + STOP_CONCURRENCY);
-      await Promise.all(batch.map(async ([name, daemon]) => {
-        try {
-          await daemon.stop();
-        } catch (err) {
-          this.logger.warn({ name, err }, "Stop failed");
-        }
-        this.daemons.delete(name);
-      }));
-    }
+    await this.stopInstancesInBatches(entries, async ([name, daemon]) => {
+      try {
+        await daemon.stop();
+      } catch (err) {
+        this.logger.warn({ name, err }, "Stop failed");
+      }
+      this.daemons.delete(name);
+    });
 
     // Close IPC clients in parallel — serial close over a large fleet adds
     // noticeable latency.
@@ -21813,9 +21847,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     }
     this.instanceIpcClients.clear();
 
-    await Promise.allSettled(
-      instanceNames.map(name => this.stopInstance(name))
-    );
+    await this.stopInstancesInBatches(instanceNames, name => this.stopInstance(name));
 
     // Kill remaining orphan windows to prevent stale state on restart
     try {
