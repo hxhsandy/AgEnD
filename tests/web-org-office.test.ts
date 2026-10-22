@@ -1,0 +1,410 @@
+/**
+ * Fleet → Org chart → Office (src/ui/fleet-office*.js): the fleet as a pixel office, the third view beside Canvas and List.
+ * - Poses come from the org chart's states (fleet-org.js ORG_STATES); coats from the identity colour a person chose,
+ *   else the backend.
+ * - The auto layout: the lobby (General, no team) then a room per team; desks inside their room; rows wrap at the
+ *   stage's width (a phone's too); the same input gives the same picture; a corridor graph joins every desk.
+ * - Walking: BFS on the waypoint graph, from the nearest waypoints of two seats; a straight line when there is no way.
+ * - Traffic: an item per new message / delegation / report, flown once, from desk to desk; none for a stale one or with
+ *   reduced motion; gone when it lands or its desks are not drawn.
+ * - Who is shown: a team, the lobby or pinned people; the stored offices are checked defensively; the store keeps this
+ *   browser's choices and reads the host's offices.
+ * - The skin seam: the built-in pixel skin draws every pose; a skin pack's manifest is checked and drawn from its strips.
+ * - On the page: an Office button beside Canvas and List (kept per device); desks open the chat; the filter is kept.
+ */
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { page, settle, h, type AppPage } from "./helpers/app-harness.js";
+import { fire, MiniElement } from "./helpers/mini-dom.js";
+
+const INSTANCES = [
+  { name: "atlas", display_name: "Atlas", status: "running", backend: "claude-code" },
+  { name: "pixel", display_name: "Comet", status: "running", backend: "codex" },
+  { name: "quill", status: "running", backend: "kiro-cli" },
+  { name: "sage", status: "paused", backend: "grok" },
+  { name: "orbit", status: "running", backend: "opencode" },
+  { name: "nova", status: "stopped", backend: "codex" },
+  { name: "tide", status: "crashed", backend: "claude-code" },
+  { name: "loner", status: "running", backend: "codex" },
+];
+const ORG = {
+  general: ["atlas"],
+  teams: [{ name: "Platform", members: ["pixel", "quill", "sage", "orbit"] }, { name: "Web", members: ["nova", "tide"] }, { name: "Empty", members: [] }],
+  instances: {},
+};
+const STORE = { ready: true, instances: INSTANCES, exec: { quill: "working", orbit: "stuck" }, awaiting: { pixel: "a prompt" }, needs: [] };
+
+let p: AppPage;
+let M: any, S: any, K: any, O: any, app: any, fleet: any, nav: any, TR: any;
+let offices: unknown = { rev: 0, offices: [] };
+beforeAll(async () => {
+  p = page({ url: "http://127.0.0.1:19280/ui/fleet/org" });
+  (globalThis as any).fetch = async (url: string) => ({ ok: true, status: 200, json: async () => (url === "/ui/org" ? ORG : url === "/ui/offices" ? offices : {}) });
+  app = await import("/assets/app-store.js");
+  nav = await import("/assets/app-nav.js");
+  nav.startRouter(p.window);
+  fleet = await import("/ui/js/panel-fleet.js");
+  O = await import("/ui/js/fleet-org.js");
+  M = await import("/ui/js/fleet-office-model.js");
+  S = await import("/ui/js/fleet-office-store.js");
+  K = await import("/ui/js/fleet-office-skin.js");
+  TR = await import("/ui/js/fleet-traffic.js");
+});
+afterAll(() => { p.restore(); delete (globalThis as any).fetch; });
+beforeEach(async () => {
+  await p.unmount();
+  p.storage.clear();
+  offices = { rev: 0, offices: [] };
+  nav.navigate("/ui/fleet/org");
+  app.appStore.set(STORE);
+});
+const view = () => O.buildOrgView(ORG, app.appStore.get());
+const id16 = (n: number) => n.toString(16).padStart(16, "0");
+
+describe("poses and coats", () => {
+  it("every org chart state has a pose: needs you, crashed and stuck call; paused and stopped sleep; missing is an empty desk", () => {
+    expect(O.ORG_STATES.map((s: string) => [s, M.officePose(s)])).toEqual([["needs", "needs"], ["crashed", "needs"], ["stuck", "needs"], ["working", "working"],
+      ["idle", "idle"], ["paused", "paused"], ["stopped", "paused"], ["missing", "away"]]);
+    expect(O.ORG_STATES.map(M.lightOf)).toEqual(["warn", "danger", "warn", null, null, null, null, null]);
+    expect(O.ORG_STATES.filter(M.signOf)).toEqual(["paused", "stopped"]);
+    expect(O.ORG_STATES.filter(M.lampOf)).toEqual(["working"]);
+    // From the app store, as the canvas reads it.
+    const states = Object.fromEntries([...view().top, ...view().teams.flatMap((t: any) => t.nodes)].map((n: any) => [n.name, M.officePose(n.state)]));
+    expect(states).toEqual({ atlas: "idle", pixel: "needs", quill: "working", sage: "paused", orbit: "needs", nova: "paused", tide: "needs" });
+  });
+  it("a frame strip loops at its fps; still (0 ms) is its first frame", () => {
+    expect([0, 249, 250, 999, 1000].map((ms) => M.frameAt(ms, 4, 4))).toEqual([0, 0, 1, 3, 0]);
+    expect(M.frameAt(5000, 1, 4)).toBe(0);
+  });
+  it("the coat: a person's identity colour, else the backend's (the automatic colour is everyone's)", () => {
+    expect(M.coatOf({ backend: "codex" }, { source: "auto", dark: "#111111", light: "#222222" })).toBe(M.COATS.codex);
+    expect(M.coatOf({ backend: "codex" }, { source: "person", dark: "#111111", light: "#222222" }, "light")).toBe("#222222");
+    expect(M.coatOf({ backend: "codex" }, { source: "person", off: true, dark: "#111111" })).toBe(M.COATS.codex);
+    expect([M.coatOf({ backend: "kiro-cli" }), M.coatOf({ backend: "grok" }), M.coatOf({ backend: "opencode" }), M.coatOf(null)])
+      .toEqual([M.COATS["kiro-cli"], M.COATS.grok, M.COATS.other, M.COATS.other]);
+  });
+});
+
+describe("the auto layout", () => {
+  const L = (width = 960, filter?: unknown) => M.autoLayout(M.officeRooms(view(), filter), { width });
+  it("the lobby (General, then no team) first, then the teams in order; a desk per member inside its room", () => {
+    const l = L();
+    expect(l.rooms.map((r: any) => [r.name, r.lobby, r.desks.map((d: any) => d.node.name)])).toEqual([[null, true, ["atlas", "loner"]],
+      ["Platform", false, ["pixel", "quill", "sage", "orbit"]], ["Web", false, ["nova", "tide"]], ["Empty", false, []]]);
+    for (const r of l.rooms) for (const d of r.desks) expect(d.x >= r.x && d.y >= r.y + M.OF.HEAD && d.x + d.w <= r.x + r.w && d.y + d.h <= r.y + r.h, d.key).toBe(true);
+    expect(M.autoLayout(M.officeRooms(view()), { width: 960 })).toEqual(l);                       // the same input, the same picture
+  });
+  it("rows wrap at the width; a phone's width fits every room (no room wider than the stage)", () => {
+    for (const w of [1400, 960, 360]) {
+      const l = L(w);
+      for (const r of l.rooms) expect(r.x + r.w, `${w}: ${r.name}`).toBeLessThanOrEqual(w - M.OF.M);
+      expect(l.width).toBe(w);
+    }
+    expect(new Set(L(1400).rooms.map((r: any) => r.y)).size).toBeLessThan(new Set(L(360).rooms.map((r: any) => r.y)).size);
+    // Rooms never overlap.
+    const rs = L(700).rooms;
+    for (const a of rs) for (const b of rs) if (a !== b) expect(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y, `${a.name}/${b.name}`).toBe(true);
+  });
+  it("a big fleet: 70 instances in a few teams lay out in well under a frame", () => {
+    const nodes = Array.from({ length: 70 }, (_, i) => ({ name: `m${i}`, state: "idle", i: { name: `m${i}` } }));
+    const big = { top: [], rest: { nodes: [] }, teams: Array.from({ length: 7 }, (_, k) => ({ name: `T${k}`, nodes: nodes.slice(k * 10, k * 10 + 10) })) };
+    const t0 = performance.now();
+    const l = M.autoLayout(M.officeRooms(big), { width: 1280 });
+    expect(performance.now() - t0).toBeLessThan(50);
+    expect(M.desksOf(l)).toHaveLength(70);
+  });
+  it("deskAt finds the desk under a point, nothing between them", () => {
+    const l = L(), d = l.rooms[1].desks[2];
+    expect(M.deskAt(l, d.x + 5, d.y + 5).key).toBe(d.key);
+    expect(M.deskAt(l, 1, 1)).toBeNull();
+  });
+});
+
+describe("walking: the corridor graph", () => {
+  it("every waypoint is joined to every other (one connected graph); every desk has its aisle", () => {
+    const l = M.autoLayout(M.officeRooms(view()), { width: 600 });
+    const ids = l.waypoints.map((w: any) => w.id);
+    for (const id of ids) expect(M.bfsPath(l.edges, ids[0], id), id).not.toBeNull();
+    for (const d of M.desksOf(l)) expect(ids).toContain(d.wp);
+  });
+  it("bfsPath: the fewest hops; null when there is no way", () => {
+    const edges = [["a", "b"], ["b", "c"], ["c", "d"], ["a", "x"], ["x", "d"], ["p", "q"]];
+    expect(M.bfsPath(edges, "a", "d")).toEqual(["a", "x", "d"]);
+    expect(M.bfsPath(edges, "a", "a")).toEqual(["a"]);
+    expect(M.bfsPath(edges, "a", "q")).toBeNull();
+    expect(M.bfsPath(edges, "a", "nowhere")).toBeNull();
+  });
+  it("walkPath: seat → aisles and corridors → seat; out of the room by its door, never through another room", () => {
+    const l = M.autoLayout(M.officeRooms(view()), { width: 960 });
+    const pts = M.walkPath(l, "atlas", "tide");
+    const atlas = M.desksOf(l).find((d: any) => d.node.name === "atlas"), tide = M.desksOf(l).find((d: any) => d.node.name === "tide");
+    expect([pts[0], pts.at(-1)]).toEqual([atlas.seat, tide.seat]);
+    expect(pts.length).toBeGreaterThan(4);
+    // Every segment is horizontal or vertical (corridors), except the seat ↔ aisle ends.
+    for (let i = 2; i < pts.length - 1; i++) expect(pts[i].x === pts[i - 1].x || pts[i].y === pts[i - 1].y, `${i}`).toBe(true);
+    // The way between them stays out of the other rooms' desks.
+    const others = M.desksOf(l).filter((d: any) => d !== atlas && d !== tide);
+    for (const q of pts.slice(1, -1)) for (const d of others) expect(q.x > d.x && q.x < d.x + d.w && q.y > d.y && q.y < d.y + d.h - 2 * M.OF.AISLE, `${d.key}`).toBe(false);
+    expect(M.walkPath(l, "atlas", "nobody")).toBeNull();
+  });
+  it("no way through the graph: a straight line; the nearest waypoint when a seat names none", () => {
+    const l = { rooms: [{ desks: [{ node: { name: "a" }, seat: { x: 0, y: 0 }, wp: null, x: 0, y: 0, w: 1, h: 1 }, { node: { name: "b" }, seat: { x: 100, y: 0 }, wp: null, x: 0, y: 0, w: 1, h: 1 }] }],
+      waypoints: [{ id: "w1", x: 1, y: 5 }, { id: "w2", x: 99, y: 5 }], edges: [] as string[][] };
+    expect(M.walkPath(l, "a", "b")).toEqual([{ x: 0, y: 0 }, { x: 100, y: 0 }]);
+    l.edges.push(["w1", "w2"]);
+    expect(M.walkPath(l, "a", "b")).toEqual([{ x: 0, y: 0 }, { id: "w1", x: 1, y: 5 }, { id: "w2", x: 99, y: 5 }, { x: 100, y: 0 }]);
+    expect(M.along([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }], 0.75)).toEqual({ x: 10, y: 5 });
+  });
+});
+
+describe("traffic: items carried desk to desk", () => {
+  const L = () => M.autoLayout(M.officeRooms(view()), { width: 960 });
+  const item = (n: number, o: Record<string, unknown> = {}) => ({ id: id16(n), from: "atlas", to: "quill", kind: "task", state: "delivering", fading: false, ...o });
+  it("each new item flies once, in its kind's hue (the canvas's legend), staggered; it lands and goes", () => {
+    const f = M.createFlights(), l = L();
+    expect(f.sync([item(1), item(2, { kind: "report" }), item(3, { kind: "broadcast" }), item(4, { kind: "query" }), item(5, { kind: "update" })], 1000)).toBe(5);
+    expect(f.sync([item(1)], 1100)).toBe(0);                                     // seen: never again
+    const up = f.frame(1000, l);
+    expect(up.map((x: any) => x.hue)).toEqual(["task"]);                         // the others start after it
+    expect(f.frame(1000 + 4 * M.FLIGHT.STAGGER_MS, l).map((x: any) => x.hue)).toEqual(["task", "report", "broadcast", "send", "send"]);
+    expect([TR.hue("task"), TR.hue("query"), TR.hue("update"), TR.hue("send")]).toEqual(["task", "send", "send", "send"]);
+    expect(f.frame(1000 + M.FLIGHT.MAX_MS + 1000, l)).toEqual([]);
+    expect(f.size()).toBe(0);
+  });
+  it("moves from the sender's seat toward the receiver's", () => {
+    const f = M.createFlights(), l = L();
+    f.sync([item(9)], 0);
+    const a = f.frame(0, l)[0], b = f.frame(400, l)[0];
+    const seat = (n: string) => M.desksOf(l).find((d: any) => d.node.name === n).seat;
+    expect([a.x, a.y]).toEqual([seat("atlas").x, seat("atlas").y]);
+    expect(b.t).toBeGreaterThan(a.t);
+  });
+  it("a delegation's work, its report back: each flies; a stale one (no report) and reduced motion fly nothing", () => {
+    const f = M.createFlights(), l = L();
+    expect(f.sync([{ id: `w${id16(1)}`, from: "atlas", to: "quill", kind: "task", phase: "work" }, { id: `r${id16(1)}`, from: "quill", to: "atlas", kind: "report", phase: "return" },
+      { id: `w${id16(2)}`, from: "atlas", to: "quill", kind: "task", phase: "stale" }], 0)).toBe(2);
+    const g = M.createFlights();
+    expect(g.sync([item(1)], 0, true)).toBe(0);
+    expect(g.frame(0, l)).toEqual([]);
+    expect([...M.workOn([{ to: "quill", phase: "work" }, { to: "quill", phase: "work" }, { to: "sage", phase: "return" }])]).toEqual([["quill", 2]]);
+  });
+  it("a trip whose desks are not drawn (filtered away) goes; at most MAX are in the air", () => {
+    const f = M.createFlights({ max: 3 }), shown = M.autoLayout(M.officeRooms(view(), { team: "Web" }), { width: 960 });
+    f.sync([item(1)], 0);
+    expect(f.frame(10, shown)).toEqual([]);
+    expect(f.size()).toBe(0);
+    f.sync([1, 2, 3, 4, 5].map((n) => item(10 + n)), 0);
+    expect(f.size()).toBe(3);
+  });
+});
+
+describe("who is shown: the auto office's filter", () => {
+  const names = (f: unknown) => M.officeRooms(view(), f).map((r: any) => [r.key === M.LOBBY ? "lobby" : r.key, r.nodes.map((n: any) => n.name)]);
+  it("all; one team; the lobby; a team no longer defined is all", () => {
+    expect(names(undefined).map((r: any) => r[0])).toEqual(["lobby", "Platform", "Web", "Empty"]);
+    expect(names({ team: "Web" })).toEqual([["Web", ["nova", "tide"]]]);
+    expect(names({ team: M.LOBBY })).toEqual([["lobby", ["atlas", "loner"]]]);
+    expect(names({ team: "Gone" }).map((r: any) => r[0])).toEqual(["lobby", "Platform", "Web", "Empty"]);
+  });
+  it("pinned people: only them, in their rooms; with a team, those of them in it", () => {
+    expect(names({ pinned: ["tide", "atlas", "quill"] })).toEqual([["lobby", ["atlas"]], ["Platform", ["quill"]], ["Web", ["tide"]]]);
+    expect(names({ team: "Platform", pinned: ["tide", "quill"] })).toEqual([["Platform", ["quill"]]]);
+    expect(names({ team: "Web", pinned: ["quill"] })).toEqual([]);
+  });
+  it("filterOk: what was stored, checked (anything odd is dropped)", () => {
+    expect(M.filterOk(null)).toEqual({ team: "", pinned: [] });
+    expect(M.filterOk({ team: 3, pinned: ["a", "a", 7, "", "b"] })).toEqual({ team: "", pinned: ["a", "b"] });
+    expect(M.filterOk({ team: "x".repeat(201) }).team).toBe("");
+    expect(M.filterOk({ pinned: Array.from({ length: 900 }, (_, i) => `n${i}`) }).pinned).toHaveLength(500);
+  });
+});
+
+describe("the offices model (the host's list, checked again on the page)", () => {
+  const layout = { seats: [{ id: "s1", x: 100, y: 100, instance: "tide" }, { id: "s2", x: 220, y: 100 }, { id: "s3", x: 340, y: 100 }],
+    waypoints: [{ id: "w1", x: 100, y: 160 }, { id: "w2", x: 340, y: 160 }], edges: [["w1", "w2"], ["w1", "zz"], ["w1", "w1"]] };
+  it("officesOk: valid ones kept, ids unique, the auto office's id refused; odd fields dropped or defaulted", () => {
+    const list = M.officesOk([{ id: "ops", name: "  Ops room ", members: ["tide", 3], layout, extra: 1 }, { id: "ops", name: "dup" }, { id: "auto", name: "x" },
+      { id: "bad id", name: "x" }, null, "x", { id: "two", skin: "../evil" }]);
+    expect(list.map((o: any) => [o.id, o.name, o.skin, o.members])).toEqual([["ops", "Ops room", "pixel", ["tide"]], ["two", "two", "pixel", []]]);
+    expect(list[0].layout.edges).toEqual([["w1", "w2"]]);
+    expect(M.layoutOk({ seats: [{ id: "a", x: -1, y: 0 }, { id: "b", x: 1e9, y: 0 }, { id: "c", x: NaN, y: 0 }] })).toBeNull();
+    expect(M.officesOk({ not: "a list" })).toEqual([]);
+    expect(M.officesOk(Array.from({ length: 30 }, (_, i) => ({ id: `o${i}`, name: "x" })))).toHaveLength(20);
+  });
+  it("membersOf: names and team:<name>, in order, once; none means everyone", () => {
+    const v = view();
+    expect(M.membersOf({ members: ["tide", "team:Platform", "quill", "ghost"] }, v).map((n: any) => n.name)).toEqual(["tide", "pixel", "quill", "sage", "orbit"]);
+    expect(M.membersOf({ members: [] }, v)).toHaveLength(INSTANCES.length);
+  });
+  it("customLayout: an assigned seat holds its person; the rest take free seats in order; who found none is counted", () => {
+    const o = M.officesOk([{ id: "ops", name: "Ops", members: ["quill", "tide", "sage", "nova"], layout }])[0];
+    const l = M.customLayout(o, M.membersOf(o, view()));
+    expect(l.rooms[0].desks.map((d: any) => [d.key, d.node && d.node.name])).toEqual([["ops/s1", "tide"], ["ops/s2", "quill"], ["ops/s3", "sage"]]);
+    expect(l.unseated).toBe(1);
+    expect(M.walkPath(l, "tide", "sage")).toHaveLength(4);                       // seat, w1, w2, seat (the nearest waypoints)
+  });
+});
+
+describe("the store: this browser's choices, the host's offices", () => {
+  it("choice and filter per browser; blocked storage keeps the page working", async () => {
+    const m = new Map<string, string>(), storage = { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => { m.set(k, v); } };
+    const s = S.createOfficeStore({ storage, fetch: async () => ({ ok: false }) });
+    expect([s.choice(), s.filter()]).toEqual(["auto", { team: "", pinned: [] }]);
+    s.saveChoice("ops"); s.saveFilter({ team: "Web", pinned: ["tide", 4] });
+    expect([m.get("agend_org_office"), JSON.parse(m.get("agend_org_office_filter")!)]).toEqual(["ops", { team: "Web", pinned: ["tide"] }]);
+    const t = S.createOfficeStore({ storage });
+    expect([t.choice(), t.filter()]).toEqual(["ops", { team: "Web", pinned: ["tide"] }]);
+    m.set("agend_org_office_filter", "{not json");
+    expect(t.filter()).toEqual({ team: "", pinned: [] });
+    const blocked = { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); } };
+    const b = S.createOfficeStore({ storage: blocked });
+    expect(() => { b.saveChoice("x"); b.saveFilter({}); }).not.toThrow();
+    expect([b.choice(), b.filter()]).toEqual(["auto", { team: "", pinned: [] }]);
+  });
+  it("offices(): GET /ui/offices, checked; a failed read is null; saveOffices PUTs the list and the rev", async () => {
+    const calls: any[] = [];
+    const answer = (status: number, body: unknown) => async (path: string, o: any) => { calls.push([path, o.method, o.body && JSON.parse(o.body)]); return { ok: status === 200, status, json: async () => body }; };
+    expect(await S.createOfficeStore({ fetch: answer(200, { rev: 4, offices: [{ id: "ops", name: "Ops" }, { id: "auto" }] }) }).offices()).toEqual({ rev: 4, offices: [{ id: "ops", name: "Ops", skin: "pixel", members: [], layout: null }] });
+    expect(await S.createOfficeStore({ fetch: answer(503, {}) }).offices()).toBeNull();
+    expect(await S.createOfficeStore({ fetch: async () => { throw new Error("offline"); } }).offices()).toBeNull();
+    expect(await S.createOfficeStore({ fetch: answer(409, { error: "offices_changed" }) }).saveOffices([{ id: "a", name: "A" }], 3)).toEqual({ ok: false, status: 409, error: "offices_changed" });
+    expect(calls.at(-1)).toEqual(["/ui/offices", "PUT", { offices: [{ id: "a", name: "A" }], rev: 3 }]);
+  });
+});
+
+/** A 2D context that records what is drawn (the mini DOM has no canvas). */
+function fakeCtx() {
+  const calls: Array<[string, unknown[]]> = [];
+  const t: any = { calls, measureText: (s: string) => ({ width: [...String(s)].length * 6 }), createPattern: () => ({ pattern: true }) };
+  return new Proxy(t, { get(o, k) { if (k in o) return o[k]; return (...a: unknown[]) => { calls.push([String(k), a]); }; }, set(o, k, v) { o[k] = v; return true; } });
+}
+const env: any = { pal: null, mode: "dark", labels: { lobby: "Lobby", closed: "Closed" } };
+
+describe("the skin seam", () => {
+  const desk = { key: "T/a", node: { name: "a" }, x: 0, y: 0, w: 96, h: 104, seat: { x: 48, y: 40 } };
+  const look = (o: Record<string, unknown> = {}) => ({ name: "a", label: "a", pose: "idle", light: null, lamp: false, sign: null, coat: "#123456", work: 0, dim: false, match: false, ...o });
+  it("the pixel skin draws every pose and its props without throwing; away draws no one; the lamp and sign are drawn", () => {
+    const e = { ...env, pal: K.DEFAULT_PAL };
+    for (const pose of [...M.POSES, "away"]) for (const ms of [0, 300, 900]) {
+      const c = fakeCtx();
+      K.pixelSkin.drawCharacter(c, desk, look({ pose, light: pose === "needs" ? "danger" : null }), ms, e);
+      expect(c.calls.length > 0, `${pose} ${ms}`).toBe(pose !== "away");
+    }
+    const lit = fakeCtx(); K.pixelSkin.drawDeskBack(lit, desk, look({ lamp: true }), e);
+    const dark = fakeCtx(); K.pixelSkin.drawDeskBack(dark, desk, look(), e);
+    expect(lit.calls.filter(([k]: any) => k === "fill").length).toBeGreaterThan(dark.calls.filter(([k]: any) => k === "fill").length);   // the light cone
+    const front = fakeCtx(); K.pixelSkin.drawDeskFront(front, desk, look({ sign: "closed", label: "a very long name that cannot fit on the tag", work: 2 }), e);
+    const texts = front.calls.filter(([k]: any) => k === "fillText").map(([, a]: any) => a[0]);
+    expect(texts[0]).toMatch(/^Clos/);                                          // the sign (this fake measures every glyph 6 px wide)
+    expect(texts[1].endsWith("…")).toBe(true);
+    for (const hue of ["task", "send", "report", "broadcast"]) { const c = fakeCtx(); K.pixelSkin.drawProp(c, { hue, kind: hue, x: 50, y: 50, t: 0.5 }, 100, e); expect(c.calls.length).toBeGreaterThan(2); }
+    // The same instance always looks the same; another one may not.
+    expect(K.nameHash("atlas")).toBe(K.nameHash("atlas"));
+  });
+  it("skinPackOk: a manifest checked (a default character set needed; bad strips, paths and names dropped)", () => {
+    const strip = { src: "chars/idle.png", frames: 4, w: 24, h: 32, fps: 4, ax: 12, ay: 13 };
+    expect(K.skinPackOk({ id: "cozy", characters: { fox: { idle: strip } } })).toBeNull();
+    expect(K.skinPackOk({ id: "pixel", characters: { default: { idle: strip } } })).toBeNull();
+    const pack = K.skinPackOk({ id: "cozy", scale: 3, characters: { default: { idle: strip, working: { ...strip, frames: 0 }, needs: { ...strip, src: "../x.png" } }, fox: { idle: { ...strip, src: "fox.png" } } },
+      byInstance: { atlas: "fox", sage: "wolf" }, props: { task: { src: "task.png", frames: 2, w: 8, h: 8 }, bogus: strip }, room: { floor: "floor.png", wall: "../wall.png" } });
+    expect(Object.keys(pack.characters.default)).toEqual(["idle"]);
+    expect([pack.byInstance, Object.keys(pack.props), pack.room, pack.scale]).toEqual([{ atlas: "fox" }, ["task"], { floor: "floor.png", wall: undefined }, 3]);
+    expect(pack.props.task).toMatchObject({ fps: 4, ax: 4, ay: 4 });
+    expect(K.packImages(pack).sort()).toEqual(["chars/idle.png", "floor.png", "fox.png", "task.png"]);
+  });
+  it("spriteSkin: the strip's frame for the pose, the instance's own set; the built-in skin for what the pack lacks", () => {
+    const strip = { src: "idle.png", frames: 4, w: 24, h: 32, fps: 4, ax: 12, ay: 30 };
+    const pack = K.skinPackOk({ id: "cozy", characters: { default: { idle: strip }, fox: { idle: { ...strip, src: "fox.png" } } }, byInstance: { a: "fox" } });
+    const img = (n: string) => ({ img: n });
+    const skin = K.spriteSkin(pack, new Map([["idle.png", img("idle")], ["fox.png", img("fox")]]));
+    const c = fakeCtx();
+    skin.drawCharacter(c, desk, look({ pose: "working" }), 500, env);          // no working strip: its idle, frame 2
+    expect(c.calls.find(([k]: any) => k === "drawImage")![1]).toEqual([img("fox"), 48, 0, 24, 32, 48 - 24, 40 - 60, 48, 64]);
+    const d = fakeCtx();
+    skin.drawCharacter(d, desk, look({ name: "b", pose: "idle" }), 0, env);
+    expect(d.calls.find(([k]: any) => k === "drawImage")![1][0]).toEqual(img("idle"));
+    const r = fakeCtx();
+    skin.drawRoom(r, { x: 0, y: 0, w: 200, h: 100, name: "T", lobby: false, desks: [] }, { ...env, pal: K.DEFAULT_PAL });   // no floor: the built-in room
+    expect(r.calls.some(([k]: any) => k === "strokeRect")).toBe(true);
+    expect(K.skinFor("nope")).toBe(K.pixelSkin);
+  });
+});
+
+describe("the Office view on the page", () => {
+  const mount = async () => { await p.mount(h(fleet.FleetPanel, { route: { panel: "fleet", tab: "org" }, navKey: `fleet:org|${Math.random()}|en` })); await settle(6); };
+  const office = async () => { await mount(); p.root.querySelectorAll(".oc-tools .seg-inline button")[2].click(); await settle(4); };
+  const desks = () => p.root.querySelectorAll(".oo-desk").map((b: any) => b.getAttribute("data-name"));
+  it("an Office button beside Canvas and List, kept per device; the desks in the lobby-then-teams order", async () => {
+    await mount();
+    const btns = p.root.querySelectorAll(".oc-tools .seg-inline button");
+    expect(btns.map((b: any) => b.textContent.trim())).toEqual(["Canvas", "List", "Office"]);
+    btns[2].click(); await settle(4);
+    expect(localStorage.getItem("agend_org_mode")).toBe("office");
+    expect(!!p.root.querySelector(".oc-svg")).toBe(false);
+    expect(p.root.querySelector(".oo-canvas").getAttribute("aria-label")).toContain("each team is a room");
+    expect(desks()).toEqual(["atlas", "loner", "pixel", "quill", "sage", "orbit", "nova", "tide"]);
+    await p.unmount(); await mount();
+    expect(!!p.root.querySelector(".oo")).toBe(true);
+  });
+  it("a desk says what the canvas's card says, with its caption; it opens that instance's chat", async () => {
+    await office();
+    const quill = p.root.querySelectorAll(".oo-desk").find((b: any) => b.getAttribute("data-name") === "quill");
+    expect(quill.getAttribute("aria-label")).toBe("quill — Working · Kiro CLI · Typing away. Open chat");
+    const sage = p.root.querySelectorAll(".oo-desk").find((b: any) => b.getAttribute("data-name") === "sage");
+    expect(sage.getAttribute("aria-label")).toContain("Paused · Grok Build · Asleep");
+    fire(quill, "focus"); await settle(2);
+    expect(p.root.querySelector(".oo-tip").textContent).toContain("Typing away");
+    quill.click(); await settle(2);
+    expect(location.pathname).toBe("/ui/chat/quill");
+  });
+  it("who is shown: a team, then pinned people — kept per browser; the Find box dims the rest", async () => {
+    await office();
+    const [, team] = p.root.querySelectorAll(".oo-bar select");
+    team.value = "t1"; fire(team, "change"); await settle(3);
+    expect(desks()).toEqual(["nova", "tide"]);
+    expect(JSON.parse(localStorage.getItem("agend_org_office_filter")!)).toEqual({ team: "Web", pinned: [] });
+    team.value = "all"; fire(team, "change"); await settle(3);
+    p.root.querySelector(".oo-people > button").click(); await settle(2);
+    const boxes = p.root.querySelectorAll(".oo-people-list input");
+    expect(boxes).toHaveLength(INSTANCES.length);
+    fire(boxes[0], "change"); await settle(2);                                     // atlas
+    fire(p.root.querySelectorAll(".oo-people-list input")[6], "change"); await settle(2);   // tide
+    expect(desks()).toEqual(["atlas", "tide"]);
+    expect(p.root.querySelector(".oo-people > button").textContent.trim()).toBe("People (2)");
+    const find = p.root.querySelector(".oo-people-pop input[type=search]");
+    find.value = "come"; fire(find, "input"); await settle(2);
+    expect(p.root.querySelectorAll(".oo-people-list li").map((li: any) => li.textContent.trim())).toEqual(["Comet"]);   // the canvas's Find rule (nicknames too)
+    await p.unmount(); await mount();
+    expect(desks()).toEqual(["atlas", "tide"]);
+  });
+  it("the host's offices in the switcher; a stored office shows its members", async () => {
+    offices = { rev: 2, offices: [{ id: "ops", name: "Ops room", members: ["team:Web", "quill"] }, { id: "auto", name: "nope" }] };
+    await office();
+    const sw = p.root.querySelector(".oo-bar select");
+    expect(sw.querySelectorAll("option").map((o: any) => o.textContent.trim())).toEqual(["Whole fleet", "Ops room"]);
+    sw.value = "ops"; fire(sw, "change"); await settle(3);
+    expect(desks()).toEqual(["nova", "tide", "quill"]);
+    expect(p.root.querySelectorAll(".oo-bar select")).toHaveLength(1);           // the team filter is the auto office's
+    expect(localStorage.getItem("agend_org_office")).toBe("ops");
+  });
+  it("on a canvas: the layers are drawn once, the people each frame; the loop stops with the view", async () => {
+    const proto = MiniElement.prototype as any;
+    const made: any[] = [];
+    proto.getContext = function () { return (this._ctx ??= (made.push(fakeCtx()), made[made.length - 1])); };
+    try {
+      await office();
+      await settle(4);
+      const main = p.root.querySelector(".oo-canvas")._ctx;
+      expect(main.calls.filter(([k]: any) => k === "drawImage").length).toBeGreaterThanOrEqual(2);        // back and front layers
+      expect(p.root.querySelector(".oo-canvas").style.width).toMatch(/^\d+px$/);
+      // A click on a desk (measured from the canvas) opens its chat.
+      const l = M.autoLayout(M.officeRooms(view()), { width: 960 }), tide = M.desksOf(l).find((d: any) => d.node.name === "tide");
+      fire(p.root.querySelector(".oo-canvas"), "pointerdown", { pointerType: "mouse" });
+      fire(p.root.querySelector(".oo-canvas"), "click", { clientX: tide.x + 10, clientY: tide.y + 10 });
+      await settle(2);
+      expect(location.pathname).toBe("/ui/chat/tide");
+      const n = main.calls.length;
+      await p.unmount(); await settle(4);
+      expect(main.calls.length).toBe(n);
+    } finally { delete proto.getContext; }
+  });
+});
