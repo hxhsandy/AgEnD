@@ -300,7 +300,7 @@ import {
   type ToolSetName,
   type ToolSink,
 } from "./tool-permissions.js";
-import { authorizeSession, decideWebGate, loadOrCreateWebToken, readWebToken } from "./web-auth.js";
+import { authorizeSession, decideWebGate, loadOrCreateWebToken, readWebToken, sessionCookieUpgrade } from "./web-auth.js";
 import { bypassesWebGate, handleAuthRequest, serveSigninPage, type AuthApiContext } from "./auth-api.js";
 import { isWebPageNavigation } from "./web-shell-routes.js";
 import { guestSessionPolicy, localSessionPolicy, tokenEpoch, WebSessionStore, type SessionRecord } from "./web-session.js";
@@ -22109,6 +22109,11 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
             history: () => this.webChatHistory,
             // #1920 §5.1: guests chat unless the host made them read-only (web.guests.chat: false).
             chat: () => this.fleetConfig?.web?.guests?.chat !== false });
+        }
+        if (decision.via === "session" && this.webToken) {
+          const upgrade = sessionCookieUpgrade(req, this.webToken, decision.session);
+          // No cookie header is set before this gate; auth routes own their headers separately.
+          if (upgrade) res.setHeader("Set-Cookie", upgrade);
         }
       }
 
