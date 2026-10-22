@@ -11,6 +11,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { page, settle, h, type AppPage } from "./helpers/app-harness.js";
 import { fire } from "./helpers/mini-dom.js";
 import { buildSettingsImpactSchema } from "../src/instance-config-impact.js";
+import { readFileSync } from "node:fs";
 
 const schema = buildSettingsImpactSchema();
 let p: AppPage, fleet: any, overview: any, sendCodeAnswer: any = { ok: true, outcome: "sent", expiresAt: Date.now() + 600_000 };
@@ -325,5 +326,30 @@ describe("Settings → Guests, as rendered (#2348)", () => {
     const w = await open();
     expect(w.$(".s-guest-fields")).toBeNull();
     expect(sent.filter((s) => s.path.startsWith("/api/settings/guests"))).toEqual([]);
+  });
+});
+
+describe("#2390: why a code was not sent, in the page's language (the server's error text is English)", () => {
+  it("each outcome sendGuestCodeByAdmin can answer with has its words; anything else is shown as sent", async () => {
+    const src = readFileSync("src/fleet-manager.ts", "utf8");
+    const body = src.slice(src.indexOf("sendGuestCodeByAdmin("), src.indexOf("sendGuestCodeByAdmin(") + 6000);
+    const kinds = new Set([...body.matchAll(/outcome: "([a-z_]+)"/g)].map((m) => m[1]!));
+    for (const m of src.matchAll(/\{ kind: "([a-z_]+)"/g)) if (/GuestCodeOutcome/.test(src.slice(Math.max(0, m.index! - 200), m.index!))) kinds.add(m[1]!);
+    const { CODE_REASONS } = await import("/ui/js/settings-guests.js");
+    const handled = new Set(["sent", "wait", "admin_limit", "dm_failed", ...Object.keys(CODE_REASONS)]);   // the first four have their own words
+    expect([...kinds].filter((k) => !handled.has(k))).toEqual([]);
+    expect(["guests_off", "nothing", "admin", "starting", "revoked", "paused", "busy"].every((k) => kinds.has(k)), [...kinds].join()).toBe(true);
+  });
+  it("English and zh-TW words for an outcome, never the server's English; an unknown one falls back to what was sent", async () => {
+    const { guestCodeReason } = await import("/ui/js/settings-guests.js");
+    const i18n = await import("/assets/app-i18n.js");
+    const answer = { ok: false, outcome: "guests_off", error: "Guest sign-in is off" };
+    const en = [guestCodeReason(answer), guestCodeReason({ outcome: "busy" }), guestCodeReason({ outcome: "new_kind", error: "Some new reason" })];
+    i18n.setLang("zh-TW", { store: false });
+    try {
+      expect([en, guestCodeReason(answer), guestCodeReason({ outcome: "nothing", error: "Nothing is granted to this person yet: save their access first" })])
+        .toEqual([["guest sign-in is off", "too many guest codes are waiting to be used — try again in a few minutes", "Some new reason"],
+          "訪客登入未開啟", "這個人還沒有任何授權——請先儲存對方的存取權限"]);
+    } finally { i18n.setLang("en", { store: false }); }
   });
 });
