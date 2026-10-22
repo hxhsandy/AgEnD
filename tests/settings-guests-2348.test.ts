@@ -73,12 +73,13 @@ const PEOPLE = [
   { adapterId: "tg", userId: "444", platform: "telegram", username: "sarak", name: "Sara K.", lastSeen: "2026-10-18T09:00:00Z", instances: ["alpha"] },
 ];
 const GRANTS = { "dc:111": { name: "Alice", instances: ["alpha"] }, "tg:222": { name: "Bob", instances: ["beta"] } };
-async function open(guests: Record<string, unknown> = { enabled: true, grants: structuredClone(GRANTS) }, over: Record<string, unknown> = {}) {
+async function open(guests: Record<string, unknown> = { enabled: true, grants: structuredClone(GRANTS) }, over: Record<string, unknown> = {}, toasts = false) {
   fleet = { defaults: { locale: "en" }, instances: { alpha: {}, beta: {}, gamma: {} }, channels: [], web: { guests } };
   overview = { ...structuredClone(OVERVIEW), ...over };
   const { SettingsPanel } = await import("/ui/js/panel-settings.js");
   await p.unmount();
-  await p.mount(h(SettingsPanel, { route: { panel: "settings", section: "web" }, navKey: "settings:web" }));
+  const panel = h(SettingsPanel, { route: { panel: "settings", section: "web" }, navKey: "settings:web" });
+  await p.mount(toasts ? h("div", {}, panel, h((await import("/assets/ui-toast.js")).Toasts, {})) : panel);
   await settle(12);
   const $ = (sel: string) => p.root.querySelector(sel) as any;
   const click = async (el: any) => { fire(el, "click"); await settle(); };
@@ -339,6 +340,15 @@ describe("#2390: why a code was not sent, in the page's language (the server's e
     const handled = new Set(["sent", "wait", "admin_limit", "dm_failed", ...Object.keys(CODE_REASONS)]);   // the first four have their own words
     expect([...kinds].filter((k) => !handled.has(k))).toEqual([]);
     expect(["guests_off", "nothing", "admin", "starting", "revoked", "paused", "busy"].every((k) => kinds.has(k)), [...kinds].join()).toBe(true);
+  });
+  it("Send sign-in code refused: the toast says why in the page's words, not the server's", async () => {
+    sendCodeAnswer = { ok: false, outcome: "nothing", error: "Nothing is granted to this person yet: save their access first" };
+    try {
+      const w = await open(undefined, {}, true);
+      await w.click(w.button("Send sign-in code", w.row("tg:222"))); await settle(6);
+      expect(p.root.querySelectorAll(".toast").map((x: any) => x.textContent.trim()).at(-1))
+        .toBe("The code was not sent: nothing is granted to this person yet — save their access first");
+    } finally { sendCodeAnswer = { ok: true, outcome: "sent", expiresAt: Date.now() + 600_000 }; }
   });
   it("English and zh-TW words for an outcome, never the server's English; an unknown one falls back to what was sent", async () => {
     const { guestCodeReason } = await import("/ui/js/settings-guests.js");
