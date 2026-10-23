@@ -19,7 +19,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, w
 import { join } from "node:path";
 import { atomicWriteFileSync } from "./atomic-write.js";
 import { imageSize, sniffMedia, stripMetadata } from "./web-image-meta.js";
-import { checkSkinPack, packImages, packStrips, type CheckedPack } from "./ui/fleet-office-pack.js";
+import { checkSkinPack, own, packImages, packStrips, type CheckedPack } from "./ui/fleet-office-pack.js";
 
 const MiB = 1024 * 1024;
 export const SKIN_LIMITS = {
@@ -116,7 +116,7 @@ export function checkSkinUpload(body: unknown, by: string, now: number): SkinChe
   const files: Record<string, SkinFile> = {}, pictures = new Map<string, Buffer>(), sizes = new Map<string, { width: number; height: number }>();
   let total = 0;
   for (const src of named) {
-    const b64 = body.files[src];
+    const b64 = own(body.files, src);
     if (typeof b64 !== "string" || b64.length % 4 !== 0 || !B64.test(b64)) return refuse(400, "skin_invalid", `files.${src}: base64`);
     if (b64.length > Math.ceil((SKIN_LIMITS.fileBytes * 4) / 3) + 4) return refuse(413, "skin_file_too_large", `${src}: at most ${SKIN_LIMITS.fileBytes / MiB} MiB`);
     const pic = checkSkinPicture(src, Buffer.from(b64, "base64"));
@@ -144,7 +144,7 @@ function recordOk(raw: unknown, dirName: string): { record: SkinRecord; pack: Ch
   const named = packImages(checked.pack);
   if (Object.keys(files).length !== named.length) return null;
   for (const src of named) {
-    const f = files[src];
+    const f = own<SkinFile>(files, src);
     if (!skinFileNameOk(src) || !isObj(f) || !FILE_ID.test(String(f.id)) || !Number.isSafeInteger(f.bytes) || !Number.isSafeInteger(f.width) || !Number.isSafeInteger(f.height)) return null;
     sizes.set(src, { width: f.width, height: f.height });
   }

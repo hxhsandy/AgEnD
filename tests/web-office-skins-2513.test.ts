@@ -10,6 +10,10 @@
  *   admin session only — a read session 403, the CLI token 403, anonymous 401, the public link refused by its manifest
  *   and by the handler; pictures as image/png, nosniff, sandboxed, cached by their content id; announced on the stream.
  * - Overrides: PUT /ui/offices checks an office's overrides' shape, and for a pack the host keeps puts them on it.
+ * - #2513 review: an inherited name ("constructor", "toString", "__proto__") is never a pack reference — in a manifest a
+ *   refusal, in an office's overrides a 400 (never a 500); the reads a page makes on its own (the list, a manifest, its
+ *   pictures) never slide an idle session, while uploads and deletes keep their session and CSRF checks.
+ * - Format v1 additions: a strip's displayed size (dw/dh) and walkDown / walkUp / walkSide pass the host's checks.
  * The fixture (tests/fixtures/office-skin-clinic) is a real pack drawn by the fleet's own artist for this project.
  */
 import { EventEmitter } from "node:events";
@@ -82,6 +86,32 @@ describe("checkSkinUpload: the manifest by the page's rules, then the pictures",
     const r = refused(body);
     expect(r?.[1]).toBe(error);
     expect(String(r?.[2])).toContain(detail);
+  });
+  it("review: an inherited name is never a reference — the otherwise normal clinic upload with stateZones naming \"constructor\" is refused; the declared area (control) passes", () => {
+    expect(checkSkinUpload(UPLOAD(), "me", 1).ok).toBe(true);
+    const nap = UPLOAD(); nap.manifest.stateZones.default = "nap";
+    expect(checkSkinUpload(nap, "me", 1).ok).toBe(true);
+    for (const bad of ["constructor", "toString", "__proto__"]) {
+      const u = UPLOAD(); u.manifest.stateZones.default = bad;
+      expect(refused(u), bad).toEqual([400, "skin_manifest_invalid", "stateZones.default: an area the pack defines"]);
+      const by = UPLOAD(); by.manifest.byInstance = { atlas: bad };
+      expect(refused(by), bad).toEqual([400, "skin_manifest_invalid", "byInstance.atlas: a character set the pack defines"]);
+    }
+  });
+  it("format v1 additions: a strip's displayed size (dw/dh) and walkDown / walkUp / walkSide pass; the picture is still frames·w × h; a size out of range is refused", () => {
+    const u: any = UPLOAD();
+    u.manifest.characters.default = { ...u.manifest.characters.default,
+      walkDown: { src: "fox_walk.png", frames: 2, w: 32, h: 48, ax: 16, ay: 44, dw: 48 }, walkUp: { src: "fox_walk.png", frames: 2, w: 32, h: 48 },
+      walkSide: { src: "fox_walk.png", frames: 2, w: 32, h: 48, dw: 48, dh: 72 } };
+    u.files["fox_walk.png"] = png(64, 48).toString("base64");
+    const r = checkSkinUpload(u, "me", 1);
+    expect(r.ok).toBe(true);
+    if (r.ok) { const d = r.pack.characters.default!; expect([d.walkDown!.dw, d.walkDown!.dh, d.walkUp!.dw, d.walkUp!.dh, d.walkSide!.dh]).toEqual([48, 72, 64, 96, 72]); }
+    u.files["fox_walk.png"] = png(48, 72).toString("base64");                                // the displayed size is not the picture's
+    expect(refused(u)?.[1]).toBe("skin_strip_dimensions");
+    u.files["fox_walk.png"] = png(64, 48).toString("base64");
+    u.manifest.characters.default.walkSide.dw = 2000;
+    expect(refused(u)).toEqual([400, "skin_manifest_invalid", "characters.default.walkSide.dw: a number from 1 to 1280"]);
   });
   it("a picture that is not a PNG (a JPEG, a GIF, text named .png) or one cut short is refused, naming the file", () => {
     const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0xff, 0xd9]);
@@ -281,6 +311,36 @@ describe("the routes", () => {
       expect(f.fm.officeSkins.list().packs).toHaveLength(1);
     } finally { await f.stop(); }
   }, 30_000);
+  it("review: the reads a page makes on its own — the list, a manifest, its pictures — never slide an idle session; a person's read does; deletes still need CSRF", async () => {
+    const id = "a".repeat(32);
+    expect(["/ui/office-skins", "/ui/office-skins/clinic-sample", `/ui/office-skins/clinic-sample/img/${id}.png`].map(p => isPassiveWebRead("GET", p))).toEqual([true, true, true]);
+    expect([isPassiveWebRead("POST", "/ui/office-skins"), isPassiveWebRead("DELETE", "/ui/office-skins/clinic-sample"), isPassiveWebRead("HEAD", "/ui/office-skins"),
+      isPassiveWebRead("GET", "/ui/office-skins/a/b"), isPassiveWebRead("GET", "/ui/office-skins/clinic-sample/img/x.png"), isPassiveWebRead("GET", "/ui/office-skinsx")]).toEqual([false, false, false, false, false, false]);
+    const f = await fleet();
+    try {
+      f.fm.officeSkins.add(UPLOAD(), "me");
+      let clock = Date.now();
+      f.fm.webSessions.now = () => clock;
+      const { sessionId, record } = f.fm.webSessions.create({ tier: "admin", surface: "local", label: "t", tokenEpoch: tokenEpoch(f.fm.webToken) });
+      const cookie = { cookie: `agend_session=${sessionId}` };
+      const before = [record.lastSeen, record.idleExpiry];
+      clock += 60_000;
+      const man = await raw(f.port, "GET", "/ui/office-skins/clinic-sample", cookie);
+      expect(man.status).toBe(200);
+      const { sha, files } = parse(man);
+      for (const path of ["/ui/office-skins", `/ui/office-skins/clinic-sample?v=${sha}`, `/ui/office-skins/clinic-sample/img/${files["fox_idle.png"]}.png`, `/ui/office-skins/clinic-sample/img/${files["office_bg.png"]}.png`]) {
+        expect((await raw(f.port, "GET", path, cookie)).status, path).toBe(200);
+      }
+      expect([record.lastSeen, record.idleExpiry]).toEqual(before);                         // another person's upload refreshed nothing
+      expect((await raw(f.port, "GET", "/ui/org", cookie)).status).toBe(200);              // control: the person's own read slides it
+      expect(record.lastSeen).toBe(clock);
+      const noCsrf = await raw(f.port, "DELETE", "/ui/office-skins/clinic-sample", { ...cookie, origin: f.origin });
+      expect(noCsrf.status).toBe(403);
+      expect(f.fm.officeSkins.list().packs).toHaveLength(1);
+      const del = await raw(f.port, "DELETE", "/ui/office-skins/clinic-sample", { ...cookie, origin: f.origin, "x-agend-csrf": csrfTokenFor(sessionId) });
+      expect([del.status, f.fm.officeSkins.list().packs]).toEqual([200, []]);
+    } finally { await f.stop(); }
+  }, 30_000);
   it("a guest never reads the packs: no guest route, and the stream drops `office_skins` for a guest", async () => {
     const { guestRouteDecision, guestFrameData } = await import("../src/web-guest-access.js");
     for (const path of ["/ui/office-skins", "/ui/office-skins/clinic-sample"]) for (const method of ["GET", "POST", "DELETE"]) {
@@ -319,6 +379,30 @@ describe("an office's layout overrides", () => {
     // Made on another pack (or a built-in style): only the shape is the host's to check.
     expect(s.replace([{ ...office(OV)[0], overrides: { ...OV, pack: "studio", seats: { anywhere: [[1, 1]] } } }], 1)).toMatchObject({ ok: true });
   });
+  it("review: overrides naming an inherited area or item are a refusal (400), never a 500 — in the store and over PUT; a declared area (control) is kept", async () => {
+    const dir = scratch(), skins = new OfficeSkinStore(dir);
+    skins.add(UPLOAD(), "me");
+    const s = new OfficeStore(dir, id => skins.pack(id));
+    for (const bad of ["constructor", "toString", "__proto__"]) {
+      const seats = JSON.parse(`{"pack":"clinic-sample","seats":{${JSON.stringify(bad)}:[[0,0]]}}`);
+      expect(s.replace(office(seats), 0), bad).toMatchObject({ ok: false, status: 400, detail: `offices[0].overrides.seats.${bad}: an area's name` });
+      const furniture = JSON.parse(`{"pack":"clinic-sample","furniture":{${JSON.stringify(bad)}:[1,1]}}`);
+      expect(s.replace(office(furniture), 0), bad).toMatchObject({ ok: false, status: 400, detail: `offices[0].overrides.furniture.${bad}: an item's id` });
+    }
+    expect(s.replace(office({ pack: "clinic-sample", seats: { nap: [[936, 572], [1018, 572], [1100, 600]] } }), 0)).toMatchObject({ ok: true, rev: 1 });
+    const f = await fleet();
+    try {
+      f.fm.officeSkins.add(UPLOAD(), "me");
+      const admin = f.session("admin").write;
+      for (const bad of ["constructor", "__proto__"]) {
+        const body = `{"rev":0,"offices":[{"id":"clinic","name":"Clinic","skin":"clinic-sample","members":[],"overrides":{"pack":"clinic-sample","seats":{${JSON.stringify(bad)}:[[0,0]]}}}]}`;
+        const r = await raw(f.port, "PUT", "/ui/offices", admin, body);
+        expect([r.status, parse(r).detail], bad).toEqual([400, `offices[0].overrides.seats.${bad}: an area's name`]);
+      }
+      const ok = await raw(f.port, "PUT", "/ui/offices", admin, JSON.stringify({ rev: 0, offices: office(OV) }));
+      expect(ok.status).toBe(200);
+    } finally { await f.stop(); }
+  }, 30_000);
   it("PUT /ui/offices refuses overrides that do not fit an uploaded pack, and keeps ones that do", async () => {
     const f = await fleet();
     try {

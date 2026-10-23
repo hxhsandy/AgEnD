@@ -11,7 +11,7 @@
 // The pure part (handles, moving, adding and removing) is exported for tests; LayoutEditor is the overlay.
 import { html, useEffect, useLayoutEffect, useRef, useState } from "/assets/app-html.js";
 import { t, register } from "/assets/app-i18n.js";
-import { LOGICAL, overridesBetween } from "./fleet-office-pack.js";
+import { LOGICAL, overridesBetween, own } from "./fleet-office-pack.js";
 
 register("orgl", {
   en: {
@@ -21,6 +21,7 @@ register("orgl", {
     seat: "Seat {0} in {1}", furniture: "Item {0}", door: "Door", waypoint: "Waypoint {0}", at: "{0} at {1}, {2}",
     changed: "Someone changed the offices meanwhile. Your layout is kept: Save again puts it on the current list.",
     failed: "The layout was not saved ({0}).", rateLimited: "Too many saves. Try again in a minute.",
+    stale: "This office was removed or its style changed meanwhile: this layout can no longer be saved. Cancel closes it.",
   },
   "zh-TW": {
     edit: "編輯配置", title: "編輯配置", coords: "顯示座標", addWaypoint: "新增路徑點", removeWaypoint: "移除路徑點",
@@ -29,6 +30,7 @@ register("orgl", {
     seat: "{1} 的座位 {0}", furniture: "家具 {0}", door: "門", waypoint: "路徑點 {0}", at: "{0}，位置 {1}, {2}",
     changed: "有人在這期間修改了辦公室。你的配置已保留：再按一次儲存，會套用到目前的清單。",
     failed: "配置沒有儲存（{0}）。", rateLimited: "儲存太頻繁，請一分鐘後再試。",
+    stale: "這個辦公室在這期間被移除，或它的風格已改變：這份配置無法再儲存。按取消關閉。",
   },
 });
 const tl = (k, ...v) => t(`orgl.${k}`, ...v);
@@ -50,7 +52,7 @@ export function moveHandle(pack, key, x, y) {
   const [kind, a, b] = key.split(":");
   const inCanvas = () => ({ x: clamp(x, 0, LOGICAL.w), y: clamp(y, 0, LOGICAL.h) });
   if (kind === "seat") {
-    const area = pack.areas[a], i = Number(b);
+    const area = own(pack.areas, a), i = Number(b);
     if (!area || !area.seats[i]) return pack;
     const r = area.rect, p = { x: clamp(x, Math.ceil(r.x), Math.floor(r.x + r.w)), y: clamp(y, Math.ceil(r.y), Math.floor(r.y + r.h)) };
     return { ...pack, areas: { ...pack.areas, [a]: { ...area, seats: area.seats.map((s, j) => (j === i ? p : s)) } } };
@@ -90,9 +92,10 @@ const KEY_STEP = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], Arr
  * The editor over the canvas: `base` the pack as uploaded; `start` the layout shown when it opens (the base with the
  * office's overrides on it); `width`/`height` the canvas's CSS px; `canvas` a ref to it (the overlay sits on it, placed
  * through the CSSOM, never a style attribute: #1300); `onChange(edited)` as anything moves (the canvas
- * redraws it); `onSave(overrides | null)` → { ok } or { ok: false, message }; `onClose()`.
+ * redraws it); `onSave(overrides | null)` → { ok } or { ok: false, message }; `onClose()`. `stale` (a message): the
+ * office or its style changed underneath the session — no handles, nothing to save, only Cancel.
  */
-export function LayoutEditor({ base, start, width, height, canvas = null, onChange, onSave, onClose }) {
+export function LayoutEditor({ base, start, width, height, canvas = null, stale = "", onChange, onSave, onClose }) {
   const [edited, setEdited] = useState(start);
   const [sel, setSel] = useState(null);
   const [coords, setCoords] = useState(true);
@@ -151,6 +154,12 @@ export function LayoutEditor({ base, start, width, height, canvas = null, onChan
   }
   const at = new Map(edited.waypoints.map((w) => [w.id, w]));
   const edgeKey = (e) => `${e[0]}\u0000${e[1]}`;
+  if (stale) {
+    return html`<div class="ol" role="group" aria-label=${tl("title")}><div class="ol-bar">
+      <p class="note ol-msg ol-stale" role="status">${stale}</p>
+      <span class="ol-actions"><button type="button" class="btn btn-sm ol-cancel" onClick=${onClose} disabled=${busy}>${tl("cancel")}</button></span>
+    </div></div>`;
+  }
   return html`<div class="ol" role="group" aria-label=${tl("title")}>
     <div class="ol-overlay" ref=${overlay}>
       <svg ref=${svg} class="ol-svg" viewBox=${`0 0 ${LOGICAL.w} ${LOGICAL.h}`} width=${width} height=${height}

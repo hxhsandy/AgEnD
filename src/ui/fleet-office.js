@@ -28,6 +28,11 @@
 //   first, then work), no bubble covers a name tag, and the tags show on hover or focus only. "Hide paused and stopped"
 //   (per browser) leaves the sleepers out.
 // - Edit layout (an admin, a stored office on a zones skin): fleet-office-layout.js, saved as the office's overrides.
+//   An editing session (#2513 review) is bound to the office it opened on, that office's style (the pack's id and sha)
+//   and the list and rev read then: a re-read of the offices meanwhile (the stream) changes the view, never the session,
+//   so Save sends that rev and a change made meanwhile is a 409 (the session then takes the list read again, and Save
+//   again is the person's decision). While it is open the office picker and Edit offices wait; if the office goes or its
+//   style changes underneath it, the editor says so and only Cancel is left.
 import { html, useEffect, useLayoutEffect, useMemo, useRef, useState } from "/assets/app-html.js";
 import { appStore } from "/assets/app-store.js";
 import { t, lang, register } from "/assets/app-i18n.js";
@@ -150,8 +155,11 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   const [hideAsleep, setHideAsleep] = useState(() => store.hideAsleep());
   const [packs, setPacks] = useState([]);                             // the skin packs the host keeps: [{ id, name, sha }]
   const [packSkins, setPackSkins] = useState(() => new Map());        // id@sha → a loaded skin, or null (not a pack)
-  const [layoutEditing, setLayoutEditing] = useState(false);
-  const [layoutDraft, setLayoutDraft] = useState(null);               // the edited pack while Edit layout is open
+  // Edit layout's session while it is open: { id, officeId, skin, pack (the style's identity), base (the pack as kept),
+  // start, draft, rev, list (the offices and rev read when it opened — what Save sends) }; null when closed.
+  const [layout, setLayout] = useState(null);
+  const layoutRef = useRef(null), layoutSeq = useRef(0);
+  layoutRef.current = layout;
   const [width, setWidth] = useState(960);
   const [stageH, setStageH] = useState(0);                            // the stage's height (0: not known — fit the width only)
   const [themeRev, setThemeRev] = useState(0);
@@ -246,15 +254,19 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   const loading = !!packInfo && !packSkins.has(packKey);
   const baseSkin = packInfo ? packSkins.get(packKey) || skinFor("pixel") : skinFor(STYLES.includes(wanted) ? wanted : custom ? wanted : "pixel");
   const zones = !!(baseSkin.pack && baseSkin.pack.stateZones);
+  /** The style's identity: a pack's id and sha (a pack replaced is another), or the built-in skin's id. */
+  const styleKey = packKey || baseSkin.id;
+  // An open session no longer on its office and style (the office went, or its style changed meanwhile): only Cancel.
+  const layoutStale = !!layout && (!custom || custom.id !== layout.officeId || custom.skin !== layout.skin || styleKey !== layout.pack || !zones || loading);
   // A stored office's own layout on a zones style (its overrides; while Edit layout is open, the draft).
   const placed = useMemo(() => {
     if (!zones) return { skin: baseSkin, ignored: false };
-    if (layoutEditing && layoutDraft) return { skin: { ...baseSkin, pack: layoutDraft }, ignored: false };
+    if (layout && !layoutStale) return { skin: { ...baseSkin, pack: layout.draft }, ignored: false };
     const ov = custom && custom.overrides;
     if (!ov || ov.pack !== baseSkin.id) return { skin: baseSkin, ignored: false };
     const a = applyOverrides(baseSkin.pack, ov);
     return a.ok ? { skin: { ...baseSkin, pack: a.pack }, ignored: false } : { skin: baseSkin, ignored: true };
-  }, [baseSkin, zones, custom, layoutEditing, layoutDraft]);
+  }, [baseSkin, zones, custom, layout, layoutStale]);
   const skin = placed.skin;
   const L = useMemo(() => {
     const all = custom ? membersOf(custom, view) : [...new Map(officeRooms(view, filter).flatMap((r) => r.nodes).map((n) => [n.name, n])).values()];
@@ -356,7 +368,7 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
       for (const f of furniture) if (f.depth < CHAR_DEPTH) sk.drawFurniture(ctx, f, s.active.has(f.id), ms, env);
       for (const p of people) {
         const box = { ...p.d, x: p.at.x - 44, y: p.at.y - 53, w: 88, h: 53, seat: { x: p.at.x, y: p.at.y } };
-        sk.drawCharacter(ctx, box, p.at.walking ? { ...p.look, pose: "walk" } : p.look, ms, env);
+        sk.drawCharacter(ctx, box, p.at.walking ? { ...p.look, pose: "walk", heading: p.at.heading } : p.look, ms, env);
         if (!p.at.walking) speakers.push({ look: p.look, x: p.at.x + 10, y: p.at.y - 50, area: p.d.area });
       }
       for (const f of furniture) if (f.depth >= CHAR_DEPTH) sk.drawFurniture(ctx, f, s.active.has(f.id), ms, env);
@@ -439,8 +451,12 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     const r = canvasRef.current ? canvasRef.current.getBoundingClientRect() : null;
     if (!r) return null;
     const x = (e.clientX - r.left) / k, y = (e.clientY - r.top) / k;
-    // The zones scene draws people where they walk: they are hit there, not at the seat they are heading for.
-    return zones ? personAt(L.rooms.flatMap((rm) => rm.desks), x, y, (d) => walkers.at(d.node.name, now())) : deskAt(L, x, y);
+    // The zones scene draws people where they walk: they are hit there, not at the seat they are heading for, and in
+    // the box the skin draws them in (an uploaded character's strip, anchor and size: #2513 review), nearest first.
+    if (!zones) return deskAt(L, x, y);
+    const t = now(), s = scene.current, sk = (s && s.skin) || skin, lk = s ? s.looks : looks;
+    return personAt(L.rooms.flatMap((rm) => rm.desks), x, y, (d) => walkers.at(d.node.name, t),
+      (d, at) => (sk.charBox && lk.get(d.key) ? sk.charBox(lk.get(d.key), at) : null));
   };
   const onMove = (e) => { if (e.pointerType === "touch") return; const d = deskOf(e); const k = d ? d.key : null; if (k !== tip) setTip(k); };
   const onClick = (e) => {
@@ -451,18 +467,31 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   };
 
   const auto = !custom;
-  // Edit layout: an admin, a stored office, a zones style (built in, or a pack loaded here).
-  const canLayout = canEdit && storedRev !== null && !!custom && zones && !loading && baseSkin.id === custom.skin;
-  const openLayout = () => { setLayoutDraft(skin.pack); setLayoutEditing(true); setTip(null); };
-  const closeLayout = () => { setLayoutEditing(false); setLayoutDraft(null); };
-  // Save: the whole list as read, this office's overrides replaced (none: back to the style's own); a change made
-  // meanwhile (409) reads the list again and keeps the draft — Save again puts it on the newer list.
+  // Edit layout: an admin, a stored office, a zones style (built in, or a pack loaded here); not while the offices'
+  // editor is open, nor a second session.
+  const canLayout = canEdit && storedRev !== null && !!custom && zones && !loading && baseSkin.id === custom.skin && !editing && !layout;
+  const openLayout = () => {
+    setLayout({ id: ++layoutSeq.current, officeId: custom.id, skin: custom.skin, pack: styleKey, base: baseSkin.pack, start: skin.pack, draft: skin.pack, rev: storedRev, list: stored });
+    setTip(null);
+  };
+  const closeLayout = () => setLayout(null);
+  const onDraft = (draft) => setLayout((cur) => (cur ? { ...cur, draft } : cur));
+  // Save: the session's list, this office's overrides replaced (none: back to the style's own), with the session's rev.
+  // A change made meanwhile (409) reads the list again: the session takes it (the view too), the draft is kept, and
+  // Save again — the person's call, told so — puts it on that list.
   const saveLayout = async (ov) => {
-    const list = stored.map((o) => (o.id === custom.id ? (({ overrides: _gone, ...rest }) => (ov ? { ...rest, overrides: ov } : rest))(o) : o)).map(officeForSave);
+    const s = layoutRef.current;
+    const mine = s && s.list.find((o) => o.id === s.officeId);
+    if (!s || !mine || mine.skin !== s.skin) return { ok: false, message: t("orgl.stale") };
+    const list = s.list.map((o) => (o.id === s.officeId ? (({ overrides: _gone, ...rest }) => (ov ? { ...rest, overrides: ov } : rest))(o) : o)).map(officeForSave);
     const sent = ask();
-    const r = await store.saveOffices(list, storedRev);
+    const r = await store.saveOffices(list, s.rev);
     if (r.ok) { adopt({ rev: r.rev, offices: r.offices }, sent); return { ok: true }; }
-    if (r.status === 409) { const at = ask(); const fresh = await store.offices(); adopt(fresh, at); return { ok: false, message: t("orgl.changed") }; }
+    if (r.status === 409) {
+      const at = ask(); const cur = adopt(await store.offices(), at);
+      if (cur) setLayout((c) => (c && c.id === s.id ? { ...c, list: cur.offices, rev: cur.rev } : c));
+      return { ok: false, message: t("orgl.changed") };
+    }
     return { ok: false, message: r.status === 429 ? t("orgl.rateLimited") : t("orgl.failed", r.error || r.status) };
   };
   const styleName = (id) => (STYLES.includes(id) ? to(`style_${id}`) : (packs.find((pk) => pk.id === id) || { name: id }).name);
@@ -470,14 +499,15 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   const opts = teamOptions(view);
   const teamValue = (opts.find((o) => o.team === f.team) || opts[0]).value;
   const setF = (next) => { const v = filterOk(next); store.saveFilter(v); setFilter(v); };
-  const pick = (id) => { store.saveChoice(id); setChoice(id); setTip(null); };
+  // While Edit layout is open the office stays (its picker is disabled; this is the guard behind it).
+  const pick = (id) => { if (layoutRef.current) return; store.saveChoice(id); setChoice(id); setTip(null); };
   const everyone = useMemo(() => { const m = new Map(); for (const n of [...view.top, ...view.teams.flatMap((tm) => tm.nodes), ...view.rest.nodes]) if (!m.has(n.name)) m.set(n.name, n); return [...m.values()]; }, [view]);
   const desks = desksOf(L);
   const tipText = tipDesk ? nodeText(tipDesk.node) : null;
   return html`<div class="oo">
     <div class="oo-bar">
       <label class="oo-pick"><span class="oo-pick-label">${to("office")}</span>
-        <select class="tb-select" value=${custom ? custom.id : AUTO_ID} onChange=${(e) => pick(e.target.value)}>
+        <select class="tb-select oo-office" value=${layout ? layout.officeId : custom ? custom.id : AUTO_ID} disabled=${!!layout} onChange=${(e) => pick(e.target.value)}>
           <option value=${AUTO_ID}>${to("allOffice")}</option>
           ${stored.map((o) => html`<option key=${o.id} value=${o.id}>${o.name}</option>`)}
         </select></label>
@@ -495,8 +525,8 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
       ${custom && baseSkin.id !== custom.skin && !loading ? html`<span class="muted oo-note">${to("skinUnknown", styleName(custom.skin))}</span>` : null}
       ${placed.ignored ? html`<span class="muted oo-note">${to("layoutIgnored")}</span>` : null}
       ${L.unseated ? html`<span class="muted oo-note">${to("unseated", L.unseated)}</span>` : null}
-      ${canEdit && storedRev !== null ? html`<button type="button" class="btn btn-sm oo-edit" onClick=${() => setEditing(true)} disabled=${layoutEditing}>${t("orge.edit")}</button>` : null}
-      ${canLayout && !layoutEditing ? html`<button type="button" class="btn btn-sm oo-layout" onClick=${openLayout}>${t("orgl.edit")}</button>` : null}
+      ${canEdit && storedRev !== null ? html`<button type="button" class="btn btn-sm oo-edit" onClick=${() => setEditing(true)} disabled=${!!layout}>${t("orge.edit")}</button>` : null}
+      ${canLayout ? html`<button type="button" class="btn btn-sm oo-layout" onClick=${openLayout}>${t("orgl.edit")}</button>` : null}
     </div>
     ${editing ? html`<${OfficeEditor} offices=${stored} rev=${storedRev} view=${view} store=${store} packs=${packs}
       ask=${ask} current=${() => shown.current} onSaved=${adopt} onClose=${() => setEditing(false)} />` : null}
@@ -504,8 +534,8 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     <div class="oo-stage" ref=${stageRef}>
       <canvas ref=${canvasRef} class=${`oo-canvas${tipDesk && tipDesk.node.i ? " hot" : ""}`} role="img" aria-label=${to("label")}
         onPointerMove=${onMove} onPointerLeave=${() => setTip(null)} onPointerDown=${(e) => { lastType.current = e.pointerType || "mouse"; }} onClick=${onClick}></canvas>
-      ${layoutEditing && canLayout && layoutDraft ? html`<${LayoutEditor} key=${custom.id} base=${baseSkin.pack} start=${layoutDraft} width=${Math.ceil(L.width * k)} height=${Math.ceil(L.height * k)}
-        canvas=${canvasRef} onChange=${setLayoutDraft} onSave=${saveLayout} onClose=${closeLayout} />` : null}
+      ${layout ? html`<${LayoutEditor} key=${layout.id} base=${layout.base} start=${layout.start} width=${Math.ceil(L.width * k)} height=${Math.ceil(L.height * k)}
+        canvas=${canvasRef} stale=${layoutStale ? t("orgl.stale") : ""} onChange=${onDraft} onSave=${saveLayout} onClose=${closeLayout} />` : null}
       ${tipText ? html`<div ref=${tipRef} class="oo-tip" role="tooltip">
         <strong>${tipText.primary}</strong>${tipText.secondary ? html` <span class="muted mono">${tipText.secondary}</span>` : null}
         <div>${tipText.sub}</div><div class="muted">${caption(officePose(tipDesk.node.state), tipDesk.node.state)}</div>

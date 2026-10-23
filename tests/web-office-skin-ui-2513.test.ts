@@ -10,6 +10,12 @@
  * - The page: the style picker lists the host's packs; an office on a pack is drawn with it once loaded; a pack it cannot
  *   load (unknown, or no manifest) is drawn as Desks and says so; Edit layout for an admin only, saved as overrides with
  *   the rev read, Reset back to the pack's; "Hide paused and stopped" kept per browser.
+ * - #2513 review: an editing session keeps the office, style, list and rev it opened on (a stream re-read meanwhile is a
+ *   409 on Save, never a silent overwrite; the office picker waits, also while a save is pending; an office removed
+ *   underneath leaves Cancel); inherited names ("constructor", "toString", "__proto__") are never pack references; an
+ *   uploaded character is hit in the box it is drawn in (its strip, anchor, size and direction).
+ * - Format v1 additions: a strip's displayed size (dw/dh) apart from its image size; four-direction walking
+ *   (walkDown/walkUp/walkSide, side mirrored for left; missing → walk → idle).
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -34,10 +40,17 @@ let p: AppPage;
 let PK: any, Z: any, K: any, LY: any, app: any, nav: any, fleet: any;
 let offices: any = { rev: 0, offices: [] }, skins: any = { rev: "", packs: [] }, manifestAnswer: any = null;
 const puts: any[] = [];
+let holdPut: Promise<void> | null = null;                                                   // a save pending until it settles
 beforeAll(async () => {
   p = page({ url: "http://127.0.0.1:19280/ui/fleet/org" });
   (globalThis as any).fetch = async (url: string, o: any = {}) => {
-    if (url === "/ui/offices" && o.method === "PUT") { const b = JSON.parse(o.body); puts.push(b); offices = { rev: b.rev + 1, offices: b.offices }; return { ok: true, status: 200, json: async () => offices }; }
+    if (url === "/ui/offices" && o.method === "PUT") {
+      const b = JSON.parse(o.body); puts.push(b);
+      if (holdPut) await holdPut;
+      if (b.rev !== offices.rev) return { ok: false, status: 409, json: async () => ({ error: "offices_changed" }) };   // as the host: the rev read, or 409
+      offices = { rev: b.rev + 1, offices: b.offices };
+      return { ok: true, status: 200, json: async () => offices };
+    }
     if (url.startsWith("/ui/office-skins/")) return manifestAnswer ? { ok: true, status: 200, json: async () => manifestAnswer } : { ok: false, status: 404, json: async () => ({}) };
     return { ok: true, status: 200, json: async () => (url === "/ui/org" ? ORG : url === "/ui/offices" ? offices : url === "/ui/office-skins" ? skins : {}) };
   };
@@ -54,7 +67,7 @@ afterAll(() => { p.restore(); delete (globalThis as any).fetch; });
 beforeEach(async () => {
   await p.unmount();
   p.storage.clear();
-  offices = { rev: 0, offices: [] }; skins = { rev: "", packs: [] }; manifestAnswer = null; puts.length = 0;
+  offices = { rev: 0, offices: [] }; skins = { rev: "", packs: [] }; manifestAnswer = null; puts.length = 0; holdPut = null;
   nav.navigate("/ui/fleet/org");
   app.appStore.set(STORE);
 });
@@ -285,6 +298,100 @@ describe("the Office view with packs", () => {
     await p.unmount(); await office();
     expect(desks()).toEqual(["atlas", "quill"]);
   });
+
+
+  // ── #2513 review: an editing session is bound to its office, style, list and rev ──
+  const streamed = () => { const on: Record<string, () => void> = {}; app.appStore.set({ ...STORE, streamOn: (name: string, fn: () => void) => { on[name] = fn; return () => {}; } }); return on; };
+  const seatLabel = () => p.root.querySelector('[data-handle="seat:desks:0"]')?.getAttribute("aria-label") ?? null;
+  const nudge = async () => { fire(p.root.querySelector('[data-handle="seat:desks:0"]'), "keydown", { key: "ArrowRight", shiftKey: true }); await settle(2); };
+  const A = (extra: any = {}) => ({ id: "clinic", name: "Clinic", skin: "clinic-sample", members: ["quill"], ...extra });
+  const B = (extra: any = {}) => ({ id: "lab", name: "Lab", skin: "clinic-sample", members: ["atlas"], overrides: { pack: "clinic-sample", door: [600, 700] }, ...extra });
+  const MOVED = { pack: "clinic-sample", seats: { desks: [[222, 240], [430, 240], [208, 360], [428, 360]] } };
+
+  it("review: a stream re-read while editing never moves the session's rev — Save is a 409, not an overwrite, and Save again is the person's call; an ordinary save (control) is kept", async () => {
+    // Control: nothing changed meanwhile — Save sends the rev read and is kept.
+    withPack(); offices = { rev: 3, offices: [A()] }; localStorage.setItem("agend_org_office", "clinic");
+    auth(true); streamed(); await office();
+    p.root.querySelector(".oo-layout").click(); await settle(4);
+    await nudge();
+    p.root.querySelector(".ol-save").click(); await settle(8);
+    expect([puts.map((b) => b.rev), offices.rev, p.root.querySelector(".ol")]).toEqual([[3], 4, null]);
+    expect(offices.offices[0].overrides).toEqual(MOVED);
+    // Another person's layout lands (rev 4) while this one edits; the stream re-reads it into the view.
+    await p.unmount(); puts.length = 0;
+    withPack(); offices = { rev: 3, offices: [A()] };
+    const on = streamed(); await office();
+    p.root.querySelector(".oo-layout").click(); await settle(4);
+    await nudge();
+    const theirs = { pack: "clinic-sample", door: [600, 700] };
+    offices = { rev: 4, offices: [A({ overrides: theirs })] };
+    on.offices(); await settle(6);
+    expect(seatLabel()).toBe("Seat 1 in desks at 222, 240");                                // the draft is still what is shown
+    p.root.querySelector(".ol-save").click(); await settle(8);
+    expect(puts.map((b) => b.rev)).toEqual([3]);                                             // the session's rev, never the re-read's
+    expect(offices).toEqual({ rev: 4, offices: [A({ overrides: theirs })] });               // their layout is not overwritten
+    expect(p.root.querySelector(".ol-msg")?.textContent).toBe("Someone changed the offices meanwhile. Your layout is kept: Save again puts it on the current list.");
+    expect(seatLabel()).toBe("Seat 1 in desks at 222, 240");
+    // Save again: deliberately, on the list read after the 409.
+    p.root.querySelector(".ol-save").click(); await settle(8);
+    expect([puts.map((b) => b.rev), offices.rev, offices.offices[0].overrides, p.root.querySelector(".ol")]).toEqual([[3, 4], 5, MOVED, null]);
+  });
+  it("review: while editing the office stays — choosing another office or the whole fleet waits (also while a save is pending); Save puts only this office's layout on this office", async () => {
+    withPack(); offices = { rev: 3, offices: [A(), B()] }; localStorage.setItem("agend_org_office", "clinic");
+    auth(true); await office();
+    p.root.querySelector(".oo-layout").click(); await settle(4);
+    await nudge();
+    const sw = () => p.root.querySelector(".oo-office");
+    expect([sw().disabled, p.root.querySelector(".oo-edit").disabled]).toEqual([true, true]);
+    for (const to of ["lab", "auto"]) { sw().value = to; fire(sw(), "change"); await settle(4); }
+    expect([localStorage.getItem("agend_org_office"), seatLabel(), !!p.root.querySelector(".ol-cancel")]).toEqual(["clinic", "Seat 1 in desks at 222, 240", true]);
+    // A save pending: still no switching, and Cancel waits for it too.
+    let release: () => void = () => {};
+    holdPut = new Promise<void>((r) => { release = r; });
+    p.root.querySelector(".ol-save").click(); await settle(4);
+    expect(p.root.querySelector(".ol-cancel").disabled).toBe(true);
+    for (const to of ["lab", "auto"]) { sw().value = to; fire(sw(), "change"); await settle(2); }
+    expect(localStorage.getItem("agend_org_office")).toBe("clinic");
+    release(); holdPut = null; await settle(8);
+    expect(puts).toHaveLength(1);
+    expect(puts[0].offices.map((o: any) => [o.id, o.overrides])).toEqual([["clinic", MOVED], ["lab", { pack: "clinic-sample", door: [600, 700] }]]);   // B as it was
+    expect(p.root.querySelector(".ol")).toBeNull();
+    // Closed: the picker is back, and B's own layout opens on B.
+    expect(sw().disabled).toBe(false);
+    sw().value = "lab"; fire(sw(), "change"); await settle(6);
+    p.root.querySelector(".oo-layout").click(); await settle(4);
+    expect(p.root.querySelector('[data-handle="door"]').getAttribute("aria-label")).toBe("Door at 600, 700");
+  });
+  it("review: the office's style changed, or the office removed, underneath an open editor: it says so, nothing to save, Cancel closes it and Edit offices is back", async () => {
+    withPack(); offices = { rev: 3, offices: [A(), B()] }; localStorage.setItem("agend_org_office", "clinic");
+    auth(true); const on = streamed(); await office();
+    const STALE = "This office was removed or its style changed meanwhile: this layout can no longer be saved. Cancel closes it.";
+    for (const next of [[A({ skin: "studio" }), B()], [B()]]) {
+      p.root.querySelector(".oo-layout").click(); await settle(4);
+      expect(p.root.querySelector(".oo-edit").disabled).toBe(true);
+      offices = { rev: offices.rev + 1, offices: next }; on.offices(); await settle(6);
+      expect([p.root.querySelector(".ol-stale")?.textContent, p.root.querySelector(".ol-save"), p.root.querySelector(".ol-svg")]).toEqual([STALE, null, null]);
+      p.root.querySelector(".ol-cancel").click(); await settle(4);
+      expect([p.root.querySelector(".ol"), p.root.querySelector(".oo-edit").disabled, p.root.querySelector(".oo-office").disabled]).toEqual([null, false, false]);
+    }
+    expect(puts).toEqual([]);
+  });
+  it("review: an uploaded character is hovered where it is drawn — the clinic fox's head (above the old fixed box) shows its card, as its body does", async () => {
+    const was = (globalThis as any).Image;
+    class Img { onload: any = null; onerror: any = null; set src(_u: string) { setTimeout(() => this.onload && this.onload(), 0); } }
+    (globalThis as any).Image = Img;
+    try {
+      withPack(); offices = { rev: 3, offices: [A()] }; localStorage.setItem("agend_org_office", "clinic");
+      await office(); await settle(6);
+      const cv = p.root.querySelector(".oo-canvas"), k = (960 - 2) / 1280;                // the scene fitted to the stage
+      const hover = async (x: number, y: number) => { fire(cv, "pointermove", { clientX: x * k, clientY: y * k, pointerType: "mouse" }); await settle(3); return p.root.querySelector(".oo-tip strong")?.textContent ?? null; };
+      // quill works at desks seat 0 (212, 240): the fox (32×48 at scale 2, anchor 16, 44) is drawn 64×96 from (180, 152).
+      expect(await hover(212 - 16, 240 - 72)).toBe("quill");                                // its head: the old 48×66 box began at y 188
+      expect(await hover(0, 0)).toBeNull();
+      expect(await hover(212, 240 - 20)).toBe("quill");                                     // its body (control)
+      expect(await hover(212 - 16, 240 - 100)).toBeNull();                                  // above the picture: no one
+    } finally { (globalThis as any).Image = was; }
+  });
 });
 
 describe("packUpload: what the upload sends from the picked files", () => {
@@ -295,5 +402,142 @@ describe("packUpload: what the upload sends from the picked files", () => {
     expect(r).toEqual({ body: { manifest: { id: "x" }, files: { "sprites/idle.png": "AQID" } } });
     expect((await E.packUpload([file("idle.png", "x")])).error).toBe("no manifest.json among the files");
     expect((await E.packUpload([file("manifest.json", "{ nope")])).error).toBe("manifest.json is not JSON");
+  });
+});
+
+describe("review: inherited names are never pack references", () => {
+  const withName = (m: any, where: "areas" | "characters", name: string, value: unknown) =>
+    JSON.parse(JSON.stringify({ ...m, [where]: { ...m[where], NAME_HERE: value } }).replace('"NAME_HERE"', JSON.stringify(name)));
+  it("a state's area, an instance's set, an area or set declared under an inherited name: refused; the declared ones (control) pass", () => {
+    const m = MANIFEST();
+    expect(PK.checkSkinPack(m).ok).toBe(true);
+    expect(PK.checkSkinPack({ ...m, stateZones: { ...m.stateZones, default: "nap" }, byInstance: { atlas: "fox" } }).ok).toBe(true);
+    for (const bad of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]) {
+      expect(PK.checkSkinPack({ ...m, stateZones: { ...m.stateZones, default: bad } }), bad).toEqual({ ok: false, error: "stateZones.default: an area the pack defines" });
+      expect(PK.checkSkinPack({ ...m, byInstance: { atlas: bad } }), bad).toEqual({ ok: false, error: "byInstance.atlas: a character set the pack defines" });
+      expect(PK.checkSkinPack(withName(m, "areas", bad, { rect: [0, 0, 100, 100], seats: [[10, 10]] })), bad).toEqual({ ok: false, error: `areas.${bad}: a name of letters, digits, _ or - (not an inherited one)` });
+      expect(PK.checkSkinPack(withName(m, "characters", bad, { idle: m.characters.default.idle })), bad).toEqual({ ok: false, error: `characters.${bad}: a name of letters, digits, _ or - (not an inherited one)` });
+    }
+    expect(PK.checkSkinPack(JSON.parse(JSON.stringify({ ...m, byInstance: { NAME_HERE: "fox" } }).replace('"NAME_HERE"', '"__proto__"')))).toEqual({ ok: false, error: "byInstance.__proto__: an instance's name (not an inherited one)" });
+  });
+  it("lookups are of a pack's own names: a state or language named like Object.prototype's falls back as an unknown one does", () => {
+    const base = pack();
+    expect([Z.zoneOf(base, "constructor"), Z.zoneOf(base, "toString"), Z.zoneOf(base, "working")]).toEqual(["lounge", "lounge", "desks"]);
+    const defaults = { working: ["On it."] };
+    expect([Z.linesFor("constructor", "en", base, defaults), Z.linesFor("working", "toString", base, defaults)]).toEqual([[], ["On it."]]);
+    const L = Z.zonesLayout(base, [{ name: "x", state: "constructor", i: { name: "x" } }]);
+    expect(L.seats.get("x").area).toBe("lounge");
+  });
+  it("overrides naming an inherited area or item: a refusal, never a TypeError; a declared area (control) is put on", () => {
+    const base = pack();
+    for (const bad of ["constructor", "toString", "__proto__"]) {
+      const seats = JSON.parse(`{"pack":"clinic-sample","seats":{${JSON.stringify(bad)}:[[0,0]]}}`);
+      expect(PK.checkLayoutOverrides(seats), bad).toEqual({ ok: false, error: `overrides.seats.${bad}: an area's name` });
+      expect(PK.applyOverrides(base, seats), bad).toEqual({ ok: false, error: `overrides.seats.${bad}: an area the pack defines` });   // made by hand, never checked
+      const furniture = JSON.parse(`{"pack":"clinic-sample","furniture":{${JSON.stringify(bad)}:[1,1]}}`);
+      expect(PK.checkLayoutOverrides(furniture), bad).toEqual({ ok: false, error: `overrides.furniture.${bad}: an item's id` });
+      expect(PK.applyOverrides(base, furniture), bad).toEqual({ ok: false, error: `overrides.furniture.${bad}: an item the pack has` });
+      expect(LY.moveHandle(base, `seat:${bad}:0`, 1, 1)).toBe(base);
+    }
+    const nap = PK.applyOverrides(base, { pack: "clinic-sample", seats: { nap: [[936, 572], [1018, 572], [1100, 600]] } });
+    expect([nap.ok, nap.pack.areas.nap.seats[2]]).toEqual([true, { x: 1100, y: 600 }]);
+  });
+});
+
+describe("review: an uploaded character is hit where it is drawn", () => {
+  const imgs = (...srcs: string[]) => new Map(srcs.map((s) => [s, { width: 1 }]));
+  const desk = (name: string, seat: { x: number; y: number }) => ({ key: `zone/${name}`, node: { name, state: "idle" }, x: seat.x - 24, y: seat.y - 52, w: 48, h: 66, seat });
+  const look = (name: string, pose = "idle") => ({ name, pose, state: "idle", dim: false });
+  it("the clinic fox: its box is the strip's (64×96 from seat.x − 32, seat.y − 88); its head hits as its body does — the fixed box alone missed it", () => {
+    const sk = K.spriteSkin(pack(), imgs("fox_idle.png"));
+    const d = desk("quill", { x: 212, y: 240 });
+    const box = (dd: any, at: any) => sk.charBox(look(dd.node.name), at);
+    expect(sk.charBox(look("quill"), { x: 212, y: 240 })).toEqual({ x: 180, y: 152, w: 64, h: 96 });
+    expect(Z.personAt([d], 196, 168, () => null, box)).toBe(d);
+    expect(Z.personAt([d], 196, 168, () => null)).toBeNull();                               // the old fixed 48×66 box
+    expect(Z.personAt([d], 212, 230, () => null, box)).toBe(d);
+  });
+  it("a large sprite (64×128 px at scale 2: 128×256), where it walks now, the nearest first; a picture not loaded is the built-in box", () => {
+    const m = { ...MANIFEST(), characters: { default: { idle: { src: "big.png", frames: 1, w: 64, h: 128, ax: 32, ay: 124 } } } };
+    const sk = K.spriteSkin(PK.skinPackOk(m), imgs("big.png"));
+    const a = desk("a", { x: 600, y: 400 }), b = desk("b", { x: 620, y: 420 });
+    const box = (dd: any, at: any) => sk.charBox(look(dd.node.name), at);
+    expect(sk.charBox(look("a"), { x: 600, y: 400 })).toEqual({ x: 536, y: 152, w: 128, h: 256 });
+    expect(Z.personAt([a], 600, 160, () => null, box)).toBe(a);                              // its head, 240 above its feet
+    expect(Z.personAt([b, a], 610, 380, () => null, box)).toBe(b);                           // both cover it: b is nearer (drawn last)
+    const walking = (dd: any) => (dd === a ? { x: 300, y: 400, walking: true, heading: { dx: -1, dy: 0 } } : null);
+    expect(Z.personAt([a], 300, 200, walking, box)).toBe(a);                                 // where it walks, not its seat
+    expect(Z.personAt([a], 600, 160, walking, box)).toBeNull();
+    expect(K.spriteSkin(PK.skinPackOk(m), new Map()).charBox(look("a"), { x: 600, y: 400 })).toEqual({ x: 576, y: 348, w: 48, h: 66 });
+  });
+});
+
+describe("format v1: a strip's displayed size, and walking four ways", () => {
+  const imgs = (...srcs: string[]) => new Map(srcs.map((s) => [s, { width: 1 }]));
+  const look = (name: string, pose = "idle", heading: any = undefined) => ({ name, pose, state: "idle", dim: false, ...(heading ? { heading } : {}) });
+  const fakeCtx = () => {
+    const calls: any[] = [];
+    return { calls, imageSmoothingEnabled: true, globalAlpha: 1, save() {}, restore() {}, translate: (x: number, y: number) => calls.push(["translate", x, y]),
+      scale: (x: number, y: number) => calls.push(["scale", x, y]), drawImage: (...a: any[]) => calls.push(["drawImage", ...a.slice(1)]) };
+  };
+  it("dw/dh: the displayed size in logical units, apart from the image's; one keeps the aspect; none is w·scale × h·scale; checked", () => {
+    const st = (x: any, scale = 2) => { const r = PK.checkStrip({ src: "a.png", frames: 1, w: 120, h: 120, ...x }, "s", scale); return [r.dw, r.dh]; };
+    expect([st({}), st({}, 1), st({ dw: 96, dh: 96 }), st({ dw: 60 }), st({ dh: 90.5 })]).toEqual([[240, 240], [120, 120], [96, 96], [60, 60], [90.5, 90.5]]);
+    expect(PK.checkStrip({ src: "a.png", frames: 1, w: 30, h: 60, dh: 90 }, "s").dw).toBe(45);
+    const m = MANIFEST(), idle = m.characters.default.idle;
+    const refused = (x: any) => PK.checkSkinPack({ ...m, characters: { default: { idle: { ...idle, ...x } } } });
+    expect(refused({ dw: 0 })).toEqual({ ok: false, error: "characters.default.idle.dw: a number from 1 to 1280" });
+    expect(refused({ dh: 721 })).toEqual({ ok: false, error: "characters.default.idle.dh: a number from 1 to 720" });
+    expect(refused({ dw: "96" })).toEqual({ ok: false, error: "characters.default.idle.dw: a number from 1 to 1280" });
+    expect(refused({ size: 1 })).toEqual({ ok: false, error: 'characters.default.idle: unknown key "size"' });
+  });
+  it("drawn at its displayed size, unsmoothed, the anchor scaled with it: 120×120 art shown 96×96; furniture and its box too", () => {
+    const m = { ...MANIFEST(), characters: { default: { idle: { src: "big.png", frames: 2, w: 120, h: 120, ax: 60, ay: 110, dw: 96, dh: 96 } } },
+      furniture: [{ id: "lamp", sprite: { src: "lamp.png", frames: 1, w: 20, h: 40, dw: 30 }, x: 100, y: 200 }] };
+    const sk = K.spriteSkin(PK.skinPackOk(m), imgs("big.png", "lamp.png"));
+    const ctx = fakeCtx();
+    sk.drawCharacter(ctx, { seat: { x: 500, y: 400 } }, look("a"), 0, {});
+    expect(ctx.calls).toEqual([["drawImage", 0, 0, 120, 120, 452, 312, 96, 96]]);             // 500 − 60·0.8, 400 − 110·0.8
+    expect(ctx.imageSmoothingEnabled).toBe(false);
+    expect(sk.charBox(look("a"), { x: 500, y: 400 })).toEqual({ x: 452, y: 312, w: 96, h: 96 });
+    const fc = fakeCtx();
+    sk.drawFurniture(fc, sk.pack.furniture[0], false, 0, {});
+    expect(fc.calls).toEqual([["drawImage", 0, 0, 20, 40, 85, 140, 30, 60]]);               // 30 wide keeps 20×40's aspect: 60 high
+  });
+  it("walking: the step's main axis picks walkDown / walkUp / walkSide, side mirrored moving left; a missing one is walk (never mirrored), then idle", () => {
+    const S = (src: string) => ({ src, frames: 1, w: 10, h: 20, ax: 2, ay: 20, dw: 10, dh: 20 });
+    const full = { idle: S("i"), walk: S("w"), walkDown: S("d"), walkUp: S("u"), walkSide: S("s") };
+    const pick = (set: any, h: any, pose = "walk") => { const r = PK.poseStrip(set, pose, h); return r && [r.strip.src, r.mirror]; };
+    expect([pick(full, { dx: 1, dy: 5 }), pick(full, { dx: 1, dy: -5 }), pick(full, { dx: 5, dy: 1 }), pick(full, { dx: -5, dy: 1 }), pick(full, { dx: -3, dy: 3 })])
+      .toEqual([["d", false], ["u", false], ["s", false], ["s", true], ["s", true]]);         // a tie is side
+    const walkOnly = { idle: S("i"), walk: S("w") };
+    expect([pick(walkOnly, { dx: 0, dy: 4 }), pick(walkOnly, { dx: -4, dy: 0 }), pick({ idle: S("i") }, { dx: 4, dy: 0 }), pick(full, null), pick(full, { dx: 0, dy: 0 })])
+      .toEqual([["w", false], ["w", false], ["i", false], ["w", false], ["w", false]]);
+    expect([pick({ idle: S("i"), walkDown: S("d") }, { dx: 9, dy: 1 }), pick(full, { dx: 0, dy: 9 }, "working"), pick(full, null, "constructor"), PK.poseStrip(null, "idle")])
+      .toEqual([["i", false], ["i", false], ["i", false], null]);
+    // As the host checks them: the three are poses; any other name is not.
+    const m = MANIFEST(), idle = m.characters.default.idle;
+    expect(PK.checkSkinPack({ ...m, characters: { default: { idle, walkDown: idle, walkUp: idle, walkSide: idle } } }).ok).toBe(true);
+    expect(PK.checkSkinPack({ ...m, characters: { default: { idle, walkLeft: idle } } })).toEqual({ ok: false, error: 'characters.default: unknown key "walkLeft"' });
+  });
+  it("the walker's heading is its current step; the side strip is drawn mirrored about its anchor moving left, and hit there", () => {
+    expect([Z.headingAt([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 30 }], 0.1), Z.headingAt([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 30 }], 0.9), Z.headingAt([{ x: 1, y: 1 }], 0.5)])
+      .toEqual([{ dx: 10, dy: 0 }, { dx: 0, dy: 30 }, null]);
+    const w = Z.createWalkers(), g = { waypoints: [], edges: [] };
+    w.sync(new Map([["x", { x: 100, y: 100 }]]), 0, g);
+    w.sync(new Map([["x", { x: 100, y: 500 }]]), 1000, g);
+    expect(w.at("x", 1500)).toMatchObject({ walking: true, heading: { dx: 0, dy: 400 } });
+    const strip = { src: "s.png", frames: 1, w: 32, h: 48, ax: 10, ay: 44 };
+    const m = { ...MANIFEST(), characters: { default: { idle: { ...strip, src: "i.png" }, walkSide: strip } } };
+    const sk = K.spriteSkin(PK.skinPackOk(m), imgs("i.png", "s.png"));
+    const ctx = fakeCtx();
+    sk.drawCharacter(ctx, { seat: { x: 300, y: 300 } }, look("a", "walk", { dx: -2, dy: 1 }), 0, {});
+    // Mirrored about the anchor: from 300 − (32 − 10)·2 = 256 to 320.
+    expect(ctx.calls).toEqual([["translate", 320, 212], ["scale", -1, 1], ["drawImage", 0, 0, 32, 48, 0, 0, 64, 96]]);
+    expect(sk.charBox(look("a"), { x: 300, y: 300, walking: true, heading: { dx: -2, dy: 1 } })).toEqual({ x: 256, y: 212, w: 64, h: 96 });
+    expect(sk.charBox(look("a"), { x: 300, y: 300, walking: true, heading: { dx: 2, dy: 1 } })).toEqual({ x: 280, y: 212, w: 64, h: 96 });
+    const right = fakeCtx();
+    sk.drawCharacter(right, { seat: { x: 300, y: 300 } }, look("a", "walk", { dx: 2, dy: 1 }), 0, {});
+    expect(right.calls).toEqual([["drawImage", 0, 0, 32, 48, 280, 212, 64, 96]]);
   });
 });

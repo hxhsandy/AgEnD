@@ -26,14 +26,17 @@
 // @property {(ctx, x, y, look, env) => void} [drawTag]   zones: a name tag under feet at (x, y)
 // @property {(ctx, area, n, env) => void} [drawCrowd]    zones: an area's "+n" (who found no spot in it)
 // @property {(ctx, desk, look, ms, env) => void} drawCharacter   the occupant in its pose at time `ms` (0: still); in
-//   zones `desk` is the character's box at its current position (its feet at desk.seat)
+//   zones `desk` is the character's box at its current position (its feet at desk.seat); walking, `look.heading` is
+//   the current step's { dx, dy }
+// @property {(look, at) => {x, y, w, h}} [charBox]   zones: the box drawCharacter covers with the feet at `at`
+//   ({ x, y, walking, heading }): what hover and click hit (fleet-office-zones.js personAt)
 // @property {(ctx, prop, ms, env) => void} drawProp      a traffic item in the air: { kind, hue, x, y, t }
 // @property {(ctx, x, y, text, env, lift?) => void} drawBubble  a speech bubble whose tail points at (x, y), its box `lift` px higher
 // The desks layout's back and front layers change only when the fleet does: the renderer keeps them as pictures and
 // draws the characters, props and bubbles each frame. In zones the background is kept; furniture, people (walking
 // along the pack's waypoints), tags, props and bubbles are drawn each frame, furniture by depth around the people.
 import { frameAt, nameHash } from "./fleet-office-model.js";
-import { CHAR_DEPTH, LOGICAL, checkSkinPack, packImages } from "./fleet-office-pack.js";
+import { CHAR_DEPTH, LOGICAL, checkSkinPack, own, packImages, poseStrip, stripBox } from "./fleet-office-pack.js";
 
 export { nameHash };
 
@@ -320,7 +323,9 @@ function drawCrowd(ctx, area, n, env) {
 }
 
 /** @type {OfficeSkin} */
-export const pixelSkin = { id: "pixel", drawFloor, drawRoom, drawDeskBack, drawCharacter, drawDeskFront, drawProp, drawBubble, drawTag, drawCrowd };
+/** The built-in character in zones covers this box around its feet (as zonesLayout's desk box). */
+const charBox = (look, at) => ({ x: at.x - 24, y: at.y - 52, w: 48, h: 66 });
+export const pixelSkin = { id: "pixel", drawFloor, drawRoom, drawDeskBack, drawCharacter, drawDeskFront, drawProp, drawBubble, drawTag, drawCrowd, charBox };
 
 // ── The built-in studio: the zones layout, drawn procedurally ──
 
@@ -439,15 +444,23 @@ export const studioSkin = { ...pixelSkin, id: "studio", pack: STUDIO_PACK, drawB
  */
 export function spriteSkin(pack, images, base = pixelSkin) {
   const img = (src) => (src && images.get(src)) || null;
-  const strip = (ctx, st, ms, x, y, frame = null) => {
+  // A strip's frame at its displayed size (dw × dh, unsmoothed), its anchor on (x, y); mirrored about the anchor.
+  const strip = (ctx, st, ms, x, y, frame = null, mirror = false) => {
     const im = img(st && st.src);
     if (!im) return false;
-    const f = frame ?? frameAt(ms, st.frames, st.fps), s = pack.scale;
+    const f = frame ?? frameAt(ms, st.frames, st.fps), b = stripBox(st, x, y, mirror);
     ctx.save();
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(im, f * st.w, 0, st.w, st.h, Math.round(x - st.ax * s), Math.round(y - st.ay * s), st.w * s, st.h * s);
+    if (mirror) { ctx.translate(b.x + b.w, b.y); ctx.scale(-1, 1); ctx.drawImage(im, f * st.w, 0, st.w, st.h, 0, 0, b.w, b.h); }
+    else ctx.drawImage(im, f * st.w, 0, st.w, st.h, b.x, b.y, b.w, b.h);
     ctx.restore();
     return true;
+  };
+  const setOf = (look) => own(pack.characters, own(pack.byInstance, look.name)) || own(pack.characters, "default");
+  /** The strip a look shows (its pose; walking, by its heading), when its picture is loaded. */
+  const shown = (look, walking = look.pose === "walk") => {
+    const ps = poseStrip(setOf(look), walking ? "walk" : look.pose, look.heading);
+    return ps && img(ps.strip.src) ? ps : null;
   };
   return {
     ...base,
@@ -489,14 +502,18 @@ export function spriteSkin(pack, images, base = pixelSkin) {
     },
     drawCharacter(ctx, d, look, ms, env) {
       if (look.pose === "away") return;
-      const set = pack.characters[pack.byInstance[look.name]] || pack.characters.default;
+      const ps = shown(look);
       ctx.save();
       if (look.dim) ctx.globalAlpha = 0.35;
-      const done = !!set && strip(ctx, set[look.pose] || set.idle, ms, d.seat.x, d.seat.y);
+      const done = !!ps && strip(ctx, ps.strip, ms, d.seat.x, d.seat.y, null, ps.mirror);
       ctx.restore();
       if (!done) base.drawCharacter(ctx, d, look, ms, env);
     },
-    drawProp(ctx, it, ms, env) { if (!strip(ctx, pack.props[it.hue], ms, it.x, it.y)) base.drawProp(ctx, it, ms, env); },
+    charBox(look, at) {
+      const ps = shown({ ...look, heading: at.heading }, !!at.walking);
+      return ps ? stripBox(ps.strip, at.x, at.y, ps.mirror) : base.charBox(look, at);
+    },
+    drawProp(ctx, it, ms, env) { if (!strip(ctx, own(pack.props, it.hue), ms, it.x, it.y)) base.drawProp(ctx, it, ms, env); },
   };
 }
 
@@ -534,7 +551,7 @@ export function loadPackSkin(id, sha, { fetch: get = globalThis.fetch, image = d
       const files = d.files && typeof d.files === "object" ? d.files : {};
       const images = new Map();
       await Promise.all(packImages(c.pack).map(async (src) => {
-        const fid = files[src];
+        const fid = own(files, src);
         if (typeof fid !== "string" || !/^[0-9a-f]{32}$/.test(fid)) return;
         const im = await image(`${base}/img/${fid}.png`);
         if (im) images.set(src, im);

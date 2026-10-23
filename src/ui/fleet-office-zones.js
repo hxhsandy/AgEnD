@@ -2,13 +2,13 @@
 // fleet-office-pack.js). Each instance goes to the area for its state now and takes a seat slot there; when its state
 // changes it walks (along the pack's waypoints) to the new area. Pure — fleet-office.js draws it. Also here: what a
 // character says in its speech bubble, and which furniture is active.
-import { LOGICAL } from "./fleet-office-pack.js";
+import { LOGICAL, own } from "./fleet-office-pack.js";
 import { nameHash, pathLength, along, routeVia } from "./fleet-office-model.js";
 
 /** The area for a state: the pack's own, else its "default", else its first area. */
 export function zoneOf(pack, state) {
   const z = pack.stateZones || {};
-  return z[state] || z.default || Object.keys(pack.areas)[0];
+  return own(z, state) || own(z, "default") || Object.keys(pack.areas)[0];
 }
 
 /**
@@ -44,29 +44,30 @@ export function overflowSpots(area, need = 0) {
  */
 export function assignSeats(pack, wants, prev = new Map()) {
   const seats = new Map(), crowd = new Map(), taken = new Map(), spill = new Map(), demand = new Map();
+  const areaOf = (a) => own(pack.areas, a);
   for (const w of wants) demand.set(w.area, (demand.get(w.area) || 0) + 1);
   const spotsOf = (area) => {
-    if (!spill.has(area)) spill.set(area, overflowSpots(pack.areas[area], Math.max(0, (demand.get(area) || 0) - pack.areas[area].seats.length)));
+    if (!spill.has(area)) spill.set(area, overflowSpots(areaOf(area), Math.max(0, (demand.get(area) || 0) - areaOf(area).seats.length)));
     return spill.get(area);
   };
-  const pos = (area, slot) => (slot >= 0 ? pack.areas[area].seats[slot] : spotsOf(area)[-slot - 1]);
+  const pos = (area, slot) => (slot >= 0 ? areaOf(area).seats[slot] : spotsOf(area)[-slot - 1]);
   const usedIn = (area) => { if (!taken.has(area)) taken.set(area, new Set()); return taken.get(area); };
   const give = (name, area, slot) => { const p = pos(area, slot); usedIn(area).add(slot); seats.set(name, { area, slot, x: p.x, y: p.y }); };
   for (const w of wants) {
     const p = prev.get(w.name);
-    if (!p || p.area !== w.area || !pack.areas[w.area] || !pos(w.area, p.slot) || usedIn(w.area).has(p.slot)) continue;
+    if (!p || p.area !== w.area || !areaOf(w.area) || !pos(w.area, p.slot) || usedIn(w.area).has(p.slot)) continue;
     give(w.name, w.area, p.slot);
   }
   for (const w of wants) {
-    if (seats.has(w.name) || !pack.areas[w.area]) continue;
-    const used = usedIn(w.area), area = pack.areas[w.area];
+    if (seats.has(w.name) || !areaOf(w.area)) continue;
+    const used = usedIn(w.area), area = areaOf(w.area);
     let slot = area.seats.findIndex((_, i) => !used.has(i));
     if (slot < 0) { const j = spotsOf(w.area).findIndex((_, i) => !used.has(-i - 1)); slot = j < 0 ? null : -j - 1; }
     if (slot === null) crowd.set(w.area, (crowd.get(w.area) || 0) + 1);
     else give(w.name, w.area, slot);
   }
   // Over capacity: more people want the area than it has seats (their bubbles and tags are thinned, fleet-office.js).
-  const over = new Set([...demand].filter(([a, n]) => pack.areas[a] && n > pack.areas[a].seats.length).map(([a]) => a));
+  const over = new Set([...demand].filter(([a, n]) => areaOf(a) && n > areaOf(a).seats.length).map(([a]) => a));
   return { seats, crowd, over };
 }
 
@@ -90,10 +91,23 @@ export function zonesLayout(pack, nodes, prev = new Map()) {
 
 /** Logical units per ms (crossing the canvas takes about six seconds). */
 export const WALK = { SPEED: 0.2 };
+/** The step of a polyline a fraction `t` (0–1) of the way along it: { dx, dy } (its direction), or null (no length). */
+export function headingAt(pts, t) {
+  const total = pathLength(pts);
+  if (!total) return null;
+  let left = Math.max(0, Math.min(1, t)) * total;
+  for (let i = 1; i < pts.length; i++) {
+    const dx = pts[i].x - pts[i - 1].x, dy = pts[i].y - pts[i - 1].y, l = Math.hypot(dx, dy);
+    if (l > 0 && (left <= l || i === pts.length - 1)) return { dx, dy };
+    left -= l;
+  }
+  return null;
+}
 /**
  * Where each character is. `sync(targets, now, graph, still)`: targets name → { x, y }; someone new is already there;
  * someone whose target moved walks from where they are now along the graph (routeVia) — or is there at once when
- * `still` (reduced motion); someone gone is forgotten. `at(name, now)` → { x, y, walking }; `moving(now)`.
+ * `still` (reduced motion); someone gone is forgotten. `at(name, now)` → { x, y, walking } and, while walking, `heading`: the
+ * current step's { dx, dy }, which picks a pack's walkDown / walkUp / walkSide strip; `moving(now)`.
  */
 export function createWalkers() {
   const by = new Map();
@@ -102,7 +116,7 @@ export function createWalkers() {
     const t = (now - w.start) / w.ms;
     if (t >= 1) return { x: w.to.x, y: w.to.y, walking: false };
     const p = along(w.pts, Math.max(0, t));
-    return { x: p.x, y: p.y, walking: true };
+    return { x: p.x, y: p.y, walking: true, heading: headingAt(w.pts, Math.max(0, t)) };
   };
   return {
     sync(targets, now, graph, still = false) {
@@ -122,14 +136,17 @@ export function createWalkers() {
 
 /**
  * The person at (x, y) in layout px as the scene draws them (#2431 review): each desk's box moved to where its person is
- * now (`posOf(desk)`: a walker's position; null: at the seat), the one drawn last (the nearest) tried first.
+ * now (`posOf(desk)`: a walker's position; null: at the seat), the one drawn last (the nearest) tried first — the same
+ * order the scene draws them in. `boxOf(desk, at)` (#2513 review): the box the skin draws that person in there (an
+ * uploaded character's strip, anchor and size, in its current pose and walking direction); null: the desk's own box.
  */
-export function personAt(desks, x, y, posOf) {
-  const people = desks.filter((d) => d.node).map((d) => { const at = posOf(d) || d.seat; return { d, at, dx: at.x - d.seat.x, dy: at.y - d.seat.y }; })
+export function personAt(desks, x, y, posOf, boxOf = null) {
+  const people = desks.filter((d) => d.node).map((d) => ({ d, at: posOf(d) || { ...d.seat, walking: false, heading: null } }))
     .sort((a, b) => a.at.y - b.at.y);
   for (let i = people.length - 1; i >= 0; i--) {
-    const { d, dx, dy } = people[i];
-    if (x >= d.x + dx && x < d.x + dx + d.w && y >= d.y + dy && y < d.y + dy + d.h) return d;
+    const { d, at } = people[i];
+    const b = (boxOf && boxOf(d, at)) || { x: d.x + at.x - d.seat.x, y: d.y + at.y - d.seat.y, w: d.w, h: d.h };
+    if (x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h) return d;
   }
   return null;
 }
@@ -208,8 +225,8 @@ export function thinBubbles(items, over) {
 
 /** The lines for a state: the skin's (in the page's language), else the page's own. */
 export function linesFor(state, lang, pack, defaults) {
-  const own = pack && pack.bubbles && pack.bubbles[lang] && pack.bubbles[lang][state];
-  return own && own.length ? own : defaults[state] || [];
+  const mine = pack && own(own(pack.bubbles, lang), state);
+  return Array.isArray(mine) && mine.length ? mine : own(defaults, state) || [];
 }
 
 // ── Furniture ──

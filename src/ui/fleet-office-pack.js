@@ -28,8 +28,14 @@
 //                                                     them; (x, y) is where the strip's anchor goes. `activeWhen` (a
 //                                                     state, or a list): while anyone shown is in it, the item plays its
 //                                                     strip (or `activeSprite`); otherwise it holds the first frame
-//     "characters": { "default": { "working": STRIP, "idle": STRIP, "paused": STRIP, "needs": STRIP, "walk": STRIP },
-//                     "fox": { … } },                 "default" with at least "idle" is required; a missing pose is idle
+//     "characters": { "default": { "working": STRIP, "idle": STRIP, "paused": STRIP, "needs": STRIP, "walk": STRIP,
+//                                  "walkDown": STRIP, "walkUp": STRIP, "walkSide": STRIP },
+//                     "fox": { … } },                 "default" with at least "idle" is required; a missing pose is idle.
+//                                                     Walking (poseStrip): the current step's main axis picks the strip —
+//                                                     |dy| > |dx|: walkDown (dy > 0, toward the viewer) or walkUp; else
+//                                                     walkSide, drawn as it is when moving right and mirrored when moving
+//                                                     left (so draw it facing right). A missing one is "walk", then idle
+//                                                     ("walk" itself is never mirrored)
 //     "byInstance": { "atlas": "fox" },               optional: an instance name → its character set
 //     "props": { "task": STRIP, "send": STRIP, "report": STRIP, "broadcast": STRIP },   optional traffic items
 //     "bubbles": { "en": { "working": ["On it."] }, "zh-TW": { … } }   optional: short lines per state (≤ 12 a state,
@@ -45,6 +51,15 @@
 // character 32×48, a prop 12×12, furniture as drawn. `src` is a file name in the pack: letters, digits, . _ - and /, no
 // "..". The check is strict: an unknown key, a value out of range or a name that refers to nothing refuses the pack,
 // with where it broke.
+//
+// Its displayed size: w·scale × h·scale logical units, unless the strip says `dw` and/or `dh` (logical units, 1–1280 and
+// 1–720): its frame is then drawn dw × dh (still unsmoothed: nearest neighbour), and with only one of them the other keeps
+// the frame's aspect. The anchor (ax, ay) stays in image pixels and moves with it. So art drawn at 120×120 px shows at
+// 96×96 with "dw": 96, "dh": 96 — whatever the pack's scale. What a person hovers or clicks is the box drawn (stripBox).
+//
+// A name the pack declares and refers to (an area, a character set, a furniture item, an instance in byInstance, and the
+// same in an office's overrides) is never one an object already has (Object.prototype's: "constructor", "toString",
+// "__proto__", …): such a name is refused, and every lookup is of the pack's own names only (own()).
 //
 // The host keeps an uploaded pack whole and never changes it: every PNG starts with its signature, a STRIP's image is
 // exactly frames·w × h, the background is 16:9, and each file and the pack have a size cap (web-office-skins.ts).
@@ -69,13 +84,19 @@ export const LOGICAL = { w: 1280, h: 720 };
 /** The people's depth: furniture below it is drawn under them, the rest over them. */
 export const CHAR_DEPTH = 1000;
 export const PACK_STATES = ["needs", "crashed", "stuck", "working", "idle", "paused", "stopped", "missing"];
-const POSES = ["working", "idle", "paused", "needs", "walk"], PROPS = ["task", "send", "report", "broadcast"];
+const POSES = ["working", "idle", "paused", "needs", "walk", "walkDown", "walkUp", "walkSide"], PROPS = ["task", "send", "report", "broadcast"];
 const BUILT_IN = new Set(["pixel", "studio"]);
 const ID = /^[A-Za-z0-9_-]{1,40}$/;
 const SRC = /^[A-Za-z0-9._/-]{1,200}$/;
 const LIMIT = { areas: 32, seats: 64, furniture: 128, waypoints: 512, edges: 2048, sets: 64, byInstance: 500, lines: 12, line: 40 };
 
 class Refused extends Error { constructor(at, why) { super(`${at}: ${why}`); } }
+/** `o[k]` when it is o's own property, else undefined: a name from a pack or a page never reaches Object.prototype. */
+export const own = (o, k) => (o !== null && typeof o === "object" && typeof k === "string" && Object.prototype.hasOwnProperty.call(o, k) ? o[k] : undefined);
+/** Whether `k` is a name every object already has ("constructor", "toString", "__proto__", …): never a pack's name. */
+export const inherited = (k) => typeof k === "string" && k in Object.prototype;
+/** A name a pack declares or refers to: ID's letters, never an inherited one. */
+const nameOk = (k) => typeof k === "string" && ID.test(k) && !inherited(k);
 const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 function keys(v, allowed, at) { for (const k of Object.keys(v)) if (!allowed.includes(k)) throw new Refused(at, `unknown key "${k}"`); }
 function obj(v, at) { if (!isObj(v)) throw new Refused(at, "an object"); return v; }
@@ -88,18 +109,20 @@ function point(v, at) {
 }
 function list(v, max, at) { if (!Array.isArray(v)) throw new Refused(at, "a list"); if (v.length > max) throw new Refused(at, `at most ${max}`); return v; }
 
-/** A frame strip, strictly. */
-export function checkStrip(v, at = "strip") {
+/** A frame strip, strictly; `scale` the pack's (its displayed size, dw × dh, is resolved here). */
+export function checkStrip(v, at = "strip", scale = 2) {
   obj(v, at);
-  keys(v, ["src", "frames", "w", "h", "fps", "ax", "ay"], at);
+  keys(v, ["src", "frames", "w", "h", "fps", "ax", "ay", "dw", "dh"], at);
   const w = int(v.w, 1, 512, `${at}.w`), h = int(v.h, 1, 512, `${at}.h`);
+  const dw0 = v.dw === undefined ? null : num(v.dw, 1, LOGICAL.w, `${at}.dw`), dh0 = v.dh === undefined ? null : num(v.dh, 1, LOGICAL.h, `${at}.dh`);
+  const dw = dw0 ?? (dh0 !== null ? (dh0 * w) / h : w * scale), dh = dh0 ?? (dw0 !== null ? (dw0 * h) / w : h * scale);
   return { src: src(v.src, `${at}.src`), frames: int(v.frames, 1, 32, `${at}.frames`), w, h, fps: v.fps === undefined ? 4 : num(v.fps, 0, 30, `${at}.fps`),
-    ax: v.ax === undefined ? w / 2 : num(v.ax, 0, w, `${at}.ax`), ay: v.ay === undefined ? h : num(v.ay, 0, h, `${at}.ay`) };
+    ax: v.ax === undefined ? w / 2 : num(v.ax, 0, w, `${at}.ax`), ay: v.ay === undefined ? h : num(v.ay, 0, h, `${at}.ay`), dw, dh };
 }
-function strips(v, names, at) {
+function strips(v, names, at, scale) {
   obj(v, at);
   keys(v, names, at);
-  return Object.fromEntries(Object.entries(v).map(([k, s]) => [k, checkStrip(s, `${at}.${k}`)]));
+  return Object.fromEntries(Object.entries(v).map(([k, s]) => [k, checkStrip(s, `${at}.${k}`, scale)]));
 }
 function states(v, at) {
   const one = (s, here) => { if (!PACK_STATES.includes(s)) throw new Refused(here, `one of ${PACK_STATES.join(", ")}`); return s; };
@@ -120,7 +143,7 @@ export function checkSkinPack(x) {
     if (Object.keys(rawAreas).length > LIMIT.areas) throw new Refused("areas", `at most ${LIMIT.areas}`);
     for (const [name, a] of Object.entries(rawAreas)) {
       const at = `areas.${name}`;
-      if (!ID.test(name)) throw new Refused(at, "a name of letters, digits, _ or -");
+      if (!nameOk(name)) throw new Refused(at, "a name of letters, digits, _ or - (not an inherited one)");
       obj(a, at); keys(a, ["rect", "seats"], at);
       if (!Array.isArray(a.rect) || a.rect.length !== 4) throw new Refused(`${at}.rect`, "[x, y, w, h]");
       const [rx, ry] = [num(a.rect[0], 0, LOGICAL.w, `${at}.rect[0]`), num(a.rect[1], 0, LOGICAL.h, `${at}.rect[1]`)];
@@ -140,7 +163,7 @@ export function checkSkinPack(x) {
       stateZones = {};
       for (const [s, area] of Object.entries(x.stateZones)) {
         if (s !== "default" && !PACK_STATES.includes(s)) throw new Refused(`stateZones.${s}`, `a state (${PACK_STATES.join(", ")}) or "default"`);
-        if (typeof area !== "string" || !areas[area]) throw new Refused(`stateZones.${s}`, "an area the pack defines");
+        if (typeof area !== "string" || !own(areas, area)) throw new Refused(`stateZones.${s}`, "an area the pack defines");
         stateZones[s] = area;
       }
       if (x.background === undefined) throw new Refused("background", "required with stateZones");
@@ -161,26 +184,30 @@ export function checkSkinPack(x) {
     const furniture = list(x.furniture ?? [], LIMIT.furniture, "furniture").map((f, i) => {
       const at = `furniture[${i}]`;
       obj(f, at); keys(f, ["id", "sprite", "x", "y", "depth", "activeWhen", "activeSprite"], at);
-      if (typeof f.id !== "string" || !ID.test(f.id) || fids.has(f.id)) throw new Refused(`${at}.id`, "a new name of letters, digits, _ or -");
+      if (!nameOk(f.id) || fids.has(f.id)) throw new Refused(`${at}.id`, "a new name of letters, digits, _ or - (not an inherited one)");
       fids.add(f.id);
       if (f.activeSprite !== undefined && f.activeWhen === undefined) throw new Refused(`${at}.activeSprite`, "only with activeWhen");
-      return { id: f.id, sprite: checkStrip(f.sprite, `${at}.sprite`), x: num(f.x, 0, LOGICAL.w, `${at}.x`), y: num(f.y, 0, LOGICAL.h, `${at}.y`),
+      return { id: f.id, sprite: checkStrip(f.sprite, `${at}.sprite`, scale), x: num(f.x, 0, LOGICAL.w, `${at}.x`), y: num(f.y, 0, LOGICAL.h, `${at}.y`),
         depth: int(f.depth ?? 0, -10000, 10000, `${at}.depth`), activeWhen: f.activeWhen === undefined ? null : states(f.activeWhen, `${at}.activeWhen`),
-        activeSprite: f.activeSprite === undefined ? null : checkStrip(f.activeSprite, `${at}.activeSprite`) };
+        activeSprite: f.activeSprite === undefined ? null : checkStrip(f.activeSprite, `${at}.activeSprite`, scale) };
     }).sort((a, b) => a.depth - b.depth);
     const sets = obj(x.characters, "characters");
     if (Object.keys(sets).length > LIMIT.sets) throw new Refused("characters", `at most ${LIMIT.sets} sets`);
     const characters = {};
     for (const [k, v] of Object.entries(sets)) {
-      if (!ID.test(k)) throw new Refused(`characters.${k}`, "a name of letters, digits, _ or -");
-      characters[k] = strips(v, POSES, `characters.${k}`);
+      if (!nameOk(k)) throw new Refused(`characters.${k}`, "a name of letters, digits, _ or - (not an inherited one)");
+      characters[k] = strips(v, POSES, `characters.${k}`, scale);
       if (!characters[k].idle) throw new Refused(`characters.${k}.idle`, "required");
     }
-    if (!characters.default) throw new Refused("characters.default", "required");
+    if (!own(characters, "default")) throw new Refused("characters.default", "required");
     const byInstance = {};
     const rawBy = x.byInstance === undefined ? {} : obj(x.byInstance, "byInstance");
     if (Object.keys(rawBy).length > LIMIT.byInstance) throw new Refused("byInstance", `at most ${LIMIT.byInstance}`);
-    for (const [k, v] of Object.entries(rawBy)) { if (typeof v !== "string" || !characters[v]) throw new Refused(`byInstance.${k}`, "a character set the pack defines"); byInstance[k] = v; }
+    for (const [k, v] of Object.entries(rawBy)) {
+      if (inherited(k)) throw new Refused(`byInstance.${k}`, "an instance's name (not an inherited one)");
+      if (typeof v !== "string" || !own(characters, v)) throw new Refused(`byInstance.${k}`, "a character set the pack defines");
+      byInstance[k] = v;
+    }
     const bubbles = {};
     for (const [lang, table] of Object.entries(x.bubbles === undefined ? {} : obj(x.bubbles, "bubbles"))) {
       if (lang !== "en" && lang !== "zh-TW") throw new Refused(`bubbles.${lang}`, '"en" or "zh-TW"');
@@ -201,7 +228,7 @@ export function checkSkinPack(x) {
     return { ok: true, pack: {
       format: 1, id: x.id, scale, background: opt(x.background, "background"), areas, stateZones,
       door: x.door === undefined ? { x: LOGICAL.w / 2, y: LOGICAL.h - 10 } : point(x.door, "door"), waypoints, edges, furniture, characters, byInstance,
-      props: x.props === undefined ? {} : strips(x.props, PROPS, "props"), bubbles,
+      props: x.props === undefined ? {} : strips(x.props, PROPS, "props", scale), bubbles,
       room: { floor: opt(room.floor, "room.floor"), wall: opt(room.wall, "room.wall") }, desk: { back: opt(desk.back, "desk.back"), front: opt(desk.front, "desk.front"), lit: opt(desk.lit, "desk.lit") },
     } };
   } catch (err) {
@@ -241,7 +268,7 @@ export function checkLayoutOverrides(x) {
       out.seats = {};
       for (const [area, list0] of Object.entries(x.seats)) {
         const at = `overrides.seats.${area}`;
-        if (!ID.test(area)) throw new Refused(at, "an area's name");
+        if (!nameOk(area)) throw new Refused(at, "an area's name");
         const pts = list(list0, OV_LIMIT.seats, at).map((p, i) => { const q = point(p, `${at}[${i}]`); return [q.x, q.y]; });
         if (!pts.length) throw new Refused(at, "at least one seat");
         out.seats[area] = pts;
@@ -252,7 +279,7 @@ export function checkLayoutOverrides(x) {
       if (Object.keys(x.furniture).length > OV_LIMIT.furniture) throw new Refused("overrides.furniture", `at most ${OV_LIMIT.furniture}`);
       out.furniture = {};
       for (const [id, p] of Object.entries(x.furniture)) {
-        if (!ID.test(id)) throw new Refused(`overrides.furniture.${id}`, "an item's id");
+        if (!nameOk(id)) throw new Refused(`overrides.furniture.${id}`, "an item's id");
         const q = point(p, `overrides.furniture.${id}`);
         out.furniture[id] = [q.x, q.y];
       }
@@ -293,7 +320,7 @@ export function applyOverrides(pack, ov) {
     if (!ov || ov.pack !== pack.id) return { ok: true, pack };
     const areas = { ...pack.areas };
     for (const [name, pts] of Object.entries(ov.seats || {})) {
-      const a = pack.areas[name], at = `overrides.seats.${name}`;
+      const a = own(pack.areas, name), at = `overrides.seats.${name}`;
       if (!a) throw new Refused(at, "an area the pack defines");
       if (pts.length !== a.seats.length) throw new Refused(at, `${a.seats.length} seats, as the pack has`);
       const r = a.rect;
@@ -304,7 +331,7 @@ export function applyOverrides(pack, ov) {
     }
     const fids = new Set(pack.furniture.map((f) => f.id));
     for (const id of Object.keys(ov.furniture || {})) if (!fids.has(id)) throw new Refused(`overrides.furniture.${id}`, "an item the pack has");
-    const furniture = pack.furniture.map((f) => (ov.furniture && ov.furniture[f.id] ? { ...f, x: ov.furniture[f.id][0], y: ov.furniture[f.id][1] } : f));
+    const furniture = pack.furniture.map((f) => { const q = own(ov.furniture, f.id); return q ? { ...f, x: q[0], y: q[1] } : f; });
     const door = ov.door ? { x: ov.door[0], y: ov.door[1] } : pack.door;
     const graph = ov.waypoints ? { waypoints: ov.waypoints.map((w) => ({ ...w })), edges: (ov.edges || []).map((e) => [e[0], e[1]]) } : { waypoints: pack.waypoints, edges: pack.edges };
     return { ok: true, pack: { ...pack, areas, furniture, door, ...graph } };
@@ -322,7 +349,7 @@ export function overridesBetween(pack, edited) {
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   const ov = { pack: pack.id };
   for (const [name, a] of Object.entries(pack.areas)) {
-    const e = edited.areas[name];
+    const e = own(edited.areas, name);
     if (e && !same(a.seats, e.seats)) (ov.seats ||= {})[name] = e.seats.map((s) => [s.x, s.y]);
   }
   const at = new Map(pack.furniture.map((f) => [f.id, f]));
@@ -333,4 +360,30 @@ export function overridesBetween(pack, edited) {
     ov.edges = edited.edges.map((e) => [e[0], e[1]]);
   }
   return Object.keys(ov).length > 1 ? ov : null;
+}
+
+// ── Drawing a strip: which one a pose shows, and the box it covers ──
+
+/**
+ * The strip a character set shows for `pose` (heading: the current step { dx, dy }, while walking): { strip, mirror }, or
+ * null (no set). Walking: |dy| > |dx| → walkDown (dy > 0) or walkUp, else walkSide (mirror: moving left); a missing one
+ * → "walk" (never mirrored) → idle. Any other pose: its own strip, else idle.
+ */
+export function poseStrip(set, pose, heading = null) {
+  if (!set || typeof set !== "object") return null;
+  if (pose === "walk" && heading) {
+    const dx = Number(heading.dx) || 0, dy = Number(heading.dy) || 0;
+    if (dx || dy) {
+      const dir = Math.abs(dy) > Math.abs(dx) ? (dy > 0 ? "walkDown" : "walkUp") : "walkSide";
+      const st = own(set, dir);
+      if (st) return { strip: st, mirror: dir === "walkSide" && dx < 0 };
+    }
+  }
+  const st = own(set, pose) || own(set, "idle");
+  return st ? { strip: st, mirror: false } : null;
+}
+/** The box (logical units) a strip covers with its anchor at (x, y): its displayed size; mirrored about the anchor. */
+export function stripBox(st, x, y, mirror = false) {
+  const kx = st.dw / st.w, ky = st.dh / st.h;
+  return { x: Math.round(x - (mirror ? st.w - st.ax : st.ax) * kx), y: Math.round(y - st.ay * ky), w: st.dw, h: st.dh };
 }
