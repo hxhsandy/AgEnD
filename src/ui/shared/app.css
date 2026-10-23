@@ -1571,13 +1571,15 @@ strong.org-name { font-size: var(--fs-sm); color: var(--text); }
 /* ── Fleet → Org chart → Office (fleet-office.js): the fleet as a pixel office on one <canvas>. Its size is set through
    the CSSOM (never a style attribute, #1300). #2540: it fills the Fleet panel — no frame or margins around the canvas,
    the bars above it keep the column's padding; the stage pans and zooms (touch gestures are its own, touch-action:
-   none on it only) and the page around it no longer scrolls sideways. ── */
+   none on it only) and the page around it no longer scrolls sideways. The column's `margin: 0 auto` must go too: in
+   the panel's flex column an auto margin shrinks the column to its content (the bars: the canvas is absolutely placed
+   and adds no width) and centres it — the Office was as wide as its toolbar, not the panel. ── */
 .p-fleet .panel-body:has(> .col > .oc-office) { display: flex; flex-direction: column; }
-.p-fleet .panel-body > .col:has(> .oc-office) { flex: 1 0 auto; display: flex; flex-direction: column; max-width: none; padding: 0; }
-.oc-office { flex: 1 0 auto; display: flex; flex-direction: column; min-width: 0; }
+.p-fleet .panel-body > .col:has(> .oc-office) { flex: 1 0 auto; display: flex; flex-direction: column; max-width: none; padding: 0; margin: 0; width: 100%; align-self: stretch; }
+.oc-office { flex: 1 0 auto; display: flex; flex-direction: column; min-width: 0; width: 100%; }
 .oc-office > .oc-bar { margin: 0; padding: var(--s-3) var(--s-5) var(--s-2); }
 .oc-office > .oc-legend { margin: 0 var(--s-5) var(--s-2); }
-.oo { flex: 1 0 auto; display: flex; flex-direction: column; gap: var(--s-2); min-width: 0; }
+.oo { flex: 1 0 auto; display: flex; flex-direction: column; gap: var(--s-2); min-width: 0; width: 100%; }
 .oo > :not(.oo-stage) { margin-left: var(--s-5); margin-right: var(--s-5); }
 .oo-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
 .oo-pick { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--text-2); }
@@ -1619,7 +1621,12 @@ strong.org-name { font-size: var(--fs-sm); color: var(--text); }
 /* The canvas controls, as the org chart canvas's (.oc-zoom, .oc-mini): over the stage's corners. */
 .oo-zoom { z-index: 6; }
 .oo-zoom .icon-btn { color: var(--text); }
-.oo-mini { z-index: 6; height: 104px; overflow: hidden; }
+/* The overview's box (left, top, width, height) is set by the page, inside the stage and scaled to it (miniBox). */
+.oo-mini { z-index: 6; right: auto; bottom: auto; overflow: hidden; }
+.oo-zoom-pct { display: block; padding: 3px 0; font-size: 11px; line-height: 14px; text-align: center; color: var(--text-2); font-variant-numeric: tabular-nums;
+  border-bottom: 1px solid var(--border); user-select: none; }
+.oo-zoom .oo-fill { font-size: 11px; font-weight: var(--fw-semibold); }
+.oo-zoom .oo-fill.on { background: var(--accent-dim); color: var(--text); }
 .oo-stage.editing .oo-mini { display: none; }
 .oo-mini-scene { fill: var(--bg); }
 .oo-mini-room { fill: var(--surface); stroke: var(--border-strong); stroke-width: 6; }

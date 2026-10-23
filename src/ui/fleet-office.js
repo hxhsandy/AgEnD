@@ -7,10 +7,12 @@
 //   (fleet-office-model.js autoLayout). Zones (a skin whose pack maps states to areas — the built-in "studio"): a
 //   1280×720 scene; each instance takes a seat in the area for its state and walks there along the pack's waypoints
 //   when its state changes (fleet-office-zones.js).
-// - #2540: the canvas fills the Fleet panel (no frame); the scene is panned and zoomed as the org chart's canvas is
-//   (fleet-canvas-view.js: drag, wheel, pinch, + / − / Fit and the `+ - 0` keys, an overview), in pixel levels, around
-//   it a matte (fleet-office-view.js). The view (zoom and centre) is kept per device per office and style. Everything
-//   on the scene — hit-testing, tooltips, Edit layout's handles — goes through the same view transform.
+// - #2540: the canvas fills the Fleet panel (no frame: the whole width of the Fleet area, down to the window's foot);
+//   the scene is panned and zoomed as the org chart's canvas is (fleet-canvas-view.js: drag, wheel, pinch, + / − / Fit
+//   and the `+ - 0` keys, an overview), Fit filling the panel (contain; Fill: cover), + and − in pixel levels, the zoom
+//   shown as a percentage, around it a matte (fleet-office-view.js). The view (zoom and centre) and the fit mode are
+//   kept per device per office and style. Everything on the scene — hit-testing, tooltips, Edit layout's handles —
+//   goes through the same view transform.
 // - Speech bubbles: now and then a short line for its state (typed out; at once with reduced motion) — the page's own
 //   lines or the skin's, never anything an agent said. Furniture can react: an item with `activeWhen` animates while
 //   anyone shown is in that state.
@@ -58,7 +60,8 @@ import { OfficeEditor, officeForSave } from "./fleet-office-editor.js";
 import { LayoutEditor, handlesOf } from "./fleet-office-layout.js";
 import { applyOverrides } from "./fleet-office-pack.js";
 import { centreOn, gestureState, gestures, miniPoint, toScreen, toWorld, wheelFactor, zoomKey, zoomTo } from "./fleet-canvas-view.js";
-import { OK_MAX, OK_MIN, clampPan, desksK, edgeMatte, edgeStrips, fitScene, layerScale, openingView, pinchOffice, savedOf, snapK, stepK, viewFromSaved } from "./fleet-office-view.js";
+import { OK_MAX, OK_MIN, clampPan, desksK, edgeMatte, edgeStrips, fitScene, layerScale, miniBox, miniFrame, openingView, pinchOffice, savedOf, stepK, viewFromSaved,
+  zoomLabel, zoomOffice } from "./fleet-office-view.js";
 
 register("orgo", {
   en: {
@@ -73,6 +76,7 @@ register("orgo", {
     b_crashed: "Ouch, crashed|Help!", b_stuck: "Hmm, stuck?|Still thinking…",
     hideAsleep: "Hide paused and stopped", layoutIgnored: "Its saved layout does not fit this style: drawn as the style's own.",
     fit: "Fit the office", overview: "Overview: click to move there", fullscreen: "Fullscreen", exitFullscreen: "Exit fullscreen",
+    fill: "Fill", fillTitle: "Fill the panel (the scene's overflow is cropped; drag to see it)", zoomLevel: "Zoom {0}",
   },
   "zh-TW": {
     label: "辦公室：每個 team 是一間房間，每個 instance 一張桌子；General 和未加入 team 的 instance 在大廳。拖曳平移；滾輪、雙指、+ 和 − 縮放，0 顯示整個場景，F 切換全螢幕。",
@@ -86,6 +90,7 @@ register("orgo", {
     b_crashed: "糟糕，當掉了|救命！", b_stuck: "嗯，卡住了？|還在想…",
     hideAsleep: "隱藏暫停與停止的成員", layoutIgnored: "它儲存的配置不適用這個風格：以風格本身的配置顯示。",
     fit: "顯示整個辦公室", overview: "總覽：點一下移到那裡", fullscreen: "全螢幕", exitFullscreen: "結束全螢幕",
+    fill: "填滿", fillTitle: "填滿整個面板（超出的部分會被裁切，拖曳即可看到）", zoomLevel: "縮放 {0}",
   },
 });
 const to = (k, ...v) => t(`orgo.${k}`, ...v);
@@ -346,15 +351,19 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
 
   // ── The view (#2540): { k, x, y } as the org chart canvas's (fleet-canvas-view.js) — logical units → the stage's CSS
   // px. Set without a render (a ref): the canvas redraws, the overview, the tooltip and Edit layout's overlay follow ──
-  const vp = useRef(null), raw = useRef(1);                          // raw: the wheel's and a pinch's unsnapped zoom
-  const touched = useRef(false), drag = useRef(gestureState());
-  const miniViewRef = useRef(null), miniRef = useRef(null), overlayEl = useRef(null), tipDeskRef = useRef(null);
+  const vp = useRef(null), raw = useRef(1);                          // raw: the wheel's and a pinch's zoom (before the range)
+  // touched: a person moved the view (it is kept); fitted: the view is a fit (a resize fits it again, to the new size).
+  const touched = useRef(false), fitted = useRef(false), drag = useRef(gestureState());
+  const miniViewRef = useRef(null), miniRef = useRef(null), overlayEl = useRef(null), tipDeskRef = useRef(null), pctRef = useRef(null);
   const officeKey = `${custom ? custom.id : AUTO_ID}@${baseSkin.id}`;   // what a view is kept for: the office and its style
   const keyRef = useRef(officeKey), saveTimer = useRef(0);
+  // The fit mode (Fit: contain; Fill: cover), kept per office and style like the view.
+  const [fitRev, setFitRev] = useState(0);
+  const fitMode = useMemo(() => store.fitMode(officeKey), [store, officeKey, fitRev]);
   const view0 = () => vp.current || { k: 1, x: 0, y: 0 };
   const flushSave = () => {
     if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = 0; }
-    if (touched.current && vp.current) store.saveView(keyRef.current, savedOf(vp.current, sizeRef.current));
+    if (touched.current && vp.current) store.saveView(keyRef.current, savedOf(vp.current, sizeRef.current, fitted.current));
   };
   const sizeRef = useRef(size);
   sizeRef.current = size;
@@ -373,10 +382,23 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     const v = view0(), p = toScreen(v, d.x, d.y), x = Math.max(4, Math.min(p.x, size.w - 244)), above = p.y > 90;
     el.style.setProperty("transform", above ? `translate(${x}px, ${p.y + 6}px) translateY(-100%)` : `translate(${x}px, ${p.y + d.h * v.k}px)`);
   };
-  /** Put the view on everything that shows it beside the canvas: the overview's frame, the overlay, the tooltip. */
+  /**
+   * Put the view on everything that shows it beside the canvas: the overview's frame (the part of the scene in view;
+   * the whole view on its data-k/x/y), the zoom's percentage, the overlay, the tooltip.
+   */
   const mark = () => {
     const v = view0(), m = miniViewRef.current;
-    if (m) for (const [a, val] of [["x", -v.x / v.k], ["y", -v.y / v.k], ["width", size.w / v.k], ["height", size.h / v.k]]) m.setAttribute(a, String(val));
+    if (m) {
+      const f = miniFrame(v, size, L.width, L.height);
+      for (const [a, val] of [["x", f.x], ["y", f.y], ["width", f.width], ["height", f.height], ["data-k", v.k], ["data-x", v.x], ["data-y", v.y]]) m.setAttribute(a, String(val));
+    }
+    const mb = miniRef.current;
+    if (mb && mb.style) {                                              // the overview: inside the stage, scaled to it
+      const b = miniBox(size, L.width, L.height);
+      for (const [a, val] of [["left", b.x], ["top", b.y], ["width", b.w], ["height", b.h]]) mb.style.setProperty(a, `${val}px`);
+    }
+    const pc = pctRef.current;
+    if (pc) { const lb = zoomLabel(v.k); if (pc.textContent !== lb) pc.textContent = lb; pc.setAttribute("aria-label", to("zoomLevel", lb)); }
     if (overlayEl.current) placeOverlay(overlayEl.current);
     placeTip();
   };
@@ -385,38 +407,55 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     mark();
     if (scene.current) { scene.current.dirty = true; if (still) { if (!globalThis.document?.hidden) draw(0); } else loop.current?.wake(); }
   };
-  /** A new view (kept in reach of the scene); `user`: a person moved it (it is kept, a moment later). */
-  const setView = (v, user = true) => {
+  /**
+   * A new view (kept on the scene: clampPan); `user`: a person moved it (it is kept, a moment later); `fit`: it is a
+   * fit (a resize fits it again).
+   */
+  const setView = (v, user = true, fit = false) => {
     vp.current = clampPan(v, L.width, L.height, size);
+    fitted.current = fit;
     apply();
     if (!user) return;
     touched.current = true;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(flushSave, 400);
   };
+  /** The view an office opens on: its kept one (a kept fit: fitted to this size), else its opening; and whether a fit. */
   const openView = () => {
     const kept = store.view(officeKey);
-    return kept ? viewFromSaved(kept, size, ratio) : openingView(L.width, L.height, size, ratio, zones);
+    if (kept && kept.fit) return { v: fitScene(L.width, L.height, size, fitMode), fit: true };
+    if (kept) return { v: viewFromSaved(kept, size), fit: false };
+    return { v: openingView(L.width, L.height, size, ratio, zones, fitMode), fit: zones };
   };
-  // An office (or style) opened: its kept view, else its opening (zones whole; desks from the top left). Until a person
-  // moves it, a resize opens it again; after, the same point stays in the middle.
+  // An office (or style) opened: its kept view, else its opening (zones fitted; desks from the top left). A resize fits
+  // a fitted view again (and opens an untouched one again); a view a person moved keeps the same point in the middle.
+  // Either way it is then kept on the scene (clampPan): a kept view from a bigger panel cannot leave it off-screen.
   const opened = useRef(null), sized = useRef(null);
   useLayoutEffect(() => {
     const was = sized.current;
     sized.current = { w: size.w, h: size.h, ratio };
+    const reopen = () => { const o = openView(); vp.current = o.v; fitted.current = o.fit; };
     if (opened.current !== officeKey) {
       if (opened.current !== null) flushSave();
       opened.current = officeKey; keyRef.current = officeKey; touched.current = false;
-      vp.current = openView();
+      reopen();
     } else if (was && (was.w !== size.w || was.h !== size.h || was.ratio !== ratio)) {
-      if (!touched.current) vp.current = openView();
-      else { const v = vp.current, k = snapK(v.k, ratio), cx = (was.w / 2 - v.x) / v.k, cy = (was.h / 2 - v.y) / v.k; vp.current = { k, x: size.w / 2 - cx * k, y: size.h / 2 - cy * k }; }
-    }
+      if (fitted.current) vp.current = fitScene(L.width, L.height, size, fitMode);
+      else if (!touched.current) reopen();
+      else { const v = vp.current, cx = (was.w / 2 - v.x) / v.k, cy = (was.h / 2 - v.y) / v.k; vp.current = { k: v.k, x: size.w / 2 - cx * v.k, y: size.h / 2 - cy * v.k }; }
+    } else if (fitted.current) vp.current = fitScene(L.width, L.height, size, fitMode);   // the scene's size changed
     vp.current = clampPan(view0(), L.width, L.height, size);
     raw.current = vp.current.k;
   }, [officeKey, size.w, size.h, ratio, L.width, L.height]);
   useEffect(() => () => flushSave(), []);
-  const fit = () => { const v = fitScene(L.width, L.height, size, ratio); raw.current = v.k; setView(v); };
+  /** Fit (the button, `0`): the office's mode — `mode` when it was just switched. */
+  const fit = (mode = fitMode) => { const v = fitScene(L.width, L.height, size, mode); raw.current = v.k; setView(v, true, true); };
+  /** Fill on or off: kept for this office, and fitted at once. */
+  const toggleFill = () => {
+    const next = fitMode === "cover" ? "contain" : "cover";
+    store.saveFitMode(officeKey, next); setFitRev((n) => n + 1);
+    fit(next);
+  };
   /** + / −: the next pixel level about the stage's middle. */
   const zoomStep = (dir) => { const v = view0(), k = stepK(v.k, dir, ratio); raw.current = k; setView(zoomTo(v, k, size.w / 2, size.h / 2)); };
   /** Bring a box (logical units) into view, unchanged when it already is. */
@@ -501,6 +540,8 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   const loop = useRef(null);
   // The matte around the scene: the pack's own, else its background's edge (sampled once), else the skin's (tokens).
   const matte = (skin.pack && skin.pack.matte) || sampledMatte(skin.backdrop) || (skin.matte ? skin.matte({ pal, mode }) : pal.bg);
+  // …and behind the canvas too (the stage), so no page grey shows while it is (re)sized.
+  useLayoutEffect(() => { const el = stageRef.current; if (el && el.style) el.style.setProperty("background-color", matte); }, [matte]);
   useLayoutEffect(() => {
     const cv = canvasRef.current;
     const ctx = cv && typeof cv.getContext === "function" ? cv.getContext("2d") : null;
@@ -671,7 +712,7 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
       (d, at) => (sk.charBox && lk.get(d.key) ? sk.charBox(lk.get(d.key), at) : null));
   };
   const g = gestures(drag.current, { el: () => stageRef.current, pan: (dx, dy) => { const v = view0(); setView({ ...v, x: v.x + dx, y: v.y + dy }); },
-    pinch: (from, to) => { raw.current = Math.min(OK_MAX, Math.max(OK_MIN, raw.current * (to.dist / from.dist))); setView(pinchOffice(view0(), from, to, raw.current, ratio)); } });
+    pinch: (from, to) => { raw.current = Math.min(OK_MAX, Math.max(OK_MIN, raw.current * (to.dist / from.dist))); setView(pinchOffice(view0(), from, to, raw.current)); } });
   /** Where a drag pans: the canvas, and Edit layout's overlay off its handles (the controls, the bar and the list: never). */
   const onScene = (el) => !!el && (el === canvasRef.current || (typeof el.closest === "function" && !!el.closest(".ol-svg") && !el.closest(".ol-handle")));
   const onDown = (e) => {
@@ -685,8 +726,7 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     e.preventDefault();
     const r = stageRef.current.getBoundingClientRect(), v = view0();
     raw.current = Math.min(OK_MAX, Math.max(OK_MIN, raw.current * wheelFactor(e)));
-    const k = snapK(raw.current, ratio);
-    if (k !== v.k) setView(zoomTo(v, k, e.clientX - r.left, e.clientY - r.top));
+    if (raw.current !== v.k) setView(zoomOffice(v, raw.current, e.clientX - r.left, e.clientY - r.top));
   };
   const onKeyDown = (e) => {
     if (e.defaultPrevented) return;                                  // Edit layout's handles move with the arrows
@@ -807,9 +847,12 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
           : html`<span class="oo-desk" data-name=${d.node.name}>${nt.full}</span>`}</li>`;
       })}</ul>
       <div class="oc-zoom oo-zoom" role="group" aria-label=${t("orgc.view")}>
+        <output ref=${pctRef} class="oo-zoom-pct"></output>
         <button type="button" class="icon-btn oo-zoom-in" aria-label=${t("orgc.zoomIn")} title=${t("orgc.zoomIn")} onClick=${() => zoomStep(1)}><${Icon} name="plus" size=${16} /></button>
         <button type="button" class="icon-btn oo-zoom-out" aria-label=${t("orgc.zoomOut")} title=${t("orgc.zoomOut")} onClick=${() => zoomStep(-1)}><${Icon} name="minus" size=${16} /></button>
-        <button type="button" class="icon-btn oo-fit" aria-label=${to("fit")} title=${to("fit")} onClick=${fit}><${Icon} name="fitwidth" size=${16} /></button>
+        <button type="button" class="icon-btn oo-fit" aria-label=${to("fit")} title=${to("fit")} onClick=${() => fit()}><${Icon} name="fitwidth" size=${16} /></button>
+        <button type="button" class=${`icon-btn oo-fill${fitMode === "cover" ? " on" : ""}`} aria-pressed=${fitMode === "cover" ? "true" : "false"} aria-label=${to("fillTitle")}
+          title=${to("fillTitle")} onClick=${toggleFill}>${to("fill")}</button>
         <button type="button" class="icon-btn oo-fs" aria-label=${to(fs ? "exitFullscreen" : "fullscreen")} title=${to(fs ? "exitFullscreen" : "fullscreen")} onClick=${toggleFs}><${Icon} name=${fs ? "fullscreenexit" : "fullscreen"} size=${16} /></button>
       </div>
       ${fs ? html`<div class="oo-fs-bar">${officeSelect("oo-fs-office")}</div>` : null}

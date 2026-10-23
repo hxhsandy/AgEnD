@@ -2,9 +2,11 @@
  * #2540: the Office view fills the Fleet panel and pans and zooms like the org chart's canvas.
  * - The shared view (fleet-canvas-view.js, also the org canvas's): screen ↔ logical, zoom about a point, a pinch step,
  *   an overview click, the zoom keys.
- * - The Office's own (fleet-office-view.js): pixel levels (a logical unit is a whole number of device px), + / − steps,
- *   Fit (the largest pixel level that fits; the exact fit only when that would be tiny), the opening views, keeping the
- *   scene in reach, the kept view (per device, per office and style) and its restore, the layers' resolution, the matte
+ * - The Office's own (fleet-office-view.js): pixel levels (a logical unit is a whole number of device px) for the
+ *   + / − steps, Fit (contain: the exact, non-integer scale that shows the whole scene) and Fill (cover: the panel
+ *   filled, the overflow cropped), the opening views, keeping the scene on screen (clampPan), the kept view (per
+ *   device, per office and style; a kept fit is fitted again) and the fit mode, the overview's box (inside the stage,
+ *   scaled to it) and its frame (the part of the scene in view), the zoom's label, the layers' resolution, the matte
  *   from a background's edge pixels.
  * - The pack's `matte`: checked by the page's module and by the host (the same rules), lower-cased.
  * - The pack's `foreground` (a file in the pack, with stateZones) and furniture `depth: "y"` (sorted among the people);
@@ -14,7 +16,9 @@
  *   fullscreenchange; immersive (CSS) where the API is missing or refuses, left by Esc; only the stage and its floating
  *   controls show; a resize re-fits; a desk's chat leaves it; unmounting leaves it and its listeners.
  * - On the page: the canvas is the stage; + / − / 0 and the buttons zoom; a drag pans, a wheel and a pinch zoom; the
- *   overview shows the view; a click and a hover hit through the view; the view is kept and restored; Edit layout's
+ *   overview shows the view; a click and a hover hit through the view; the view is kept and restored, clamped to the
+ *   panel; the zoom's percentage beside the buttons; Fill (its words, kept per office, fitted again on a resize);
+ *   the container fills the Fleet panel (no column cap, no auto margins); Edit layout's
  *   overlay follows the view and a handle dragged under zoom lands on the logical point under the pointer, while a drag
  *   off the handles pans; reduced motion draws each change at once; the matte is the pack's, else sampled, else the
  *   skin's token.
@@ -110,33 +114,65 @@ describe("pixel levels and Fit (fleet-office-view.js)", () => {
     expect(V.stepK(V.OK_MAX, 1, 1)).toBe(V.OK_MAX);
     expect(V.stepK(V.OK_MIN, -1, 1)).toBe(V.OK_MIN);
   });
-  it("Fit: the largest pixel level that fits, centred; the exact fit only when that would be tiny (no level fits, or under two thirds of it)", () => {
-    expect(V.fitScene(1280, 720, { w: 1700, h: 900 }, 1)).toEqual({ k: 1, x: 210, y: 90 });   // exact 1.25: level 1 (80 %)
-    expect(V.fitK(1280, 720, { w: 2600, h: 1500 }, 1)).toBe(2);           // exact 2.03: level 2
-    expect(V.fitK(1280, 720, { w: 2600, h: 1500 }, 2)).toBe(2);           // dpr 2: 4 device px a unit
-    expect(V.fitK(1280, 720, { w: 1900, h: 1100 }, 2)).toBe(1);           // exact 1.48 → 2.97 device px → level 2 (1 CSS px, 67 %)
-    expect(V.fitK(1280, 720, { w: 960, h: 600 }, 1)).toBe(0.75);          // no level fits (under one device px a unit): exact
-    expect(V.fitK(1280, 720, { w: 390, h: 700 }, 3)).toBeCloseTo(390 / 1280, 9);   // a phone at dpr 3: 0.91 device px → exact
-    expect(V.fitK(1280, 720, { w: 2500, h: 1500 }, 1)).toBeCloseTo(2500 / 1280, 9);   // exact 1.95: level 1 would be 51 % — tiny
-    expect(V.fitK(1000, 1000, { w: 1500, h: 1500 }, 1)).toBe(1);          // exactly two thirds: the level
-    expect(V.fitK(1000, 1000, { w: 1510, h: 1510 }, 1)).toBeCloseTo(1.51, 9);   // just under: the exact fit
-    expect(V.fitScene(1280, 720, STAGE, 1)).toEqual({ k: 0.75, x: 0, y: 30 });
+  it("Fit (contain): the exact scale that shows the whole scene, non-integer, centred — it fills the panel's width or height", () => {
+    expect(V.fitScene(1280, 720, { w: 1700, h: 900 })).toEqual({ k: 1.25, x: 50, y: 0 });
+    // The reported desktop: a 2231 × 1018 stage. The old rule took level 1 (a 1280 × 720 box in the middle); now 1.41.
+    const big = V.fitScene(1280, 720, { w: 2231, h: 1018 });
+    expect(big.k).toBeCloseTo(1018 / 720, 9);
+    expect(big.y).toBeCloseTo(0, 9);
+    expect(big.x).toBeCloseTo((2231 - 1280 * big.k) / 2, 9);
+    expect(V.fitK(1280, 720, { w: 2600, h: 1500 })).toBeCloseTo(2600 / 1280, 9);   // 2.03: no snapping to 2
+    expect(V.fitK(1280, 720, { w: 2500, h: 1500 })).toBeCloseTo(2500 / 1280, 9);
+    expect(V.fitK(1280, 720, { w: 390, h: 700 })).toBeCloseTo(390 / 1280, 9);     // a phone
+    expect(V.fitScene(1280, 720, STAGE)).toEqual({ k: 0.75, x: 0, y: 30 });
+    expect(V.fitScene(1280, 720, STAGE, "contain")).toEqual(V.fitScene(1280, 720, STAGE));
+    expect(V.fitK(1280, 720, { w: 1e6, h: 1e6 })).toBe(V.OK_MAX);                 // in range
+    expect([V.fitModeOk("cover"), V.fitModeOk("contain"), V.fitModeOk("fill"), V.fitModeOk(null)]).toEqual(["cover", "contain", "contain", "contain"]);
   });
-  it("the opening: zones whole; the desks from the top left at the pixel level nearest one CSS px; the scene kept in reach", () => {
-    expect(V.openingView(1280, 720, STAGE, 1, true)).toEqual(V.fitScene(1280, 720, STAGE, 1));
+  it("Fill (cover): the smallest scale that fills both sides, centred; the overflow cropped on one axis only", () => {
+    expect(V.fitScene(1280, 720, STAGE, "cover")).toEqual({ k: 600 / 720, x: (960 - 1280 * (600 / 720)) / 2, y: 0 });
+    const v = V.fitScene(1280, 720, { w: 2231, h: 1018 }, "cover");
+    expect(v.k).toBeCloseTo(2231 / 1280, 9);
+    expect(v.x).toBeCloseTo(0, 9);
+    expect(v.y).toBeCloseTo((1018 - 720 * v.k) / 2, 9);                    // above and below cropped evenly
+    expect(v.y).toBeLessThan(0);
+    for (const size of [STAGE, { w: 2231, h: 1018 }, { w: 390, h: 700 }]) {
+      const c = V.fitScene(1280, 720, size, "cover"), n = V.fitScene(1280, 720, size, "contain");
+      expect(1280 * c.k).toBeGreaterThanOrEqual(size.w - 1e-9); expect(720 * c.k).toBeGreaterThanOrEqual(size.h - 1e-9);
+      expect(1280 * n.k).toBeLessThanOrEqual(size.w + 1e-9); expect(720 * n.k).toBeLessThanOrEqual(size.h + 1e-9);
+      expect(V.clampPan(c, 1280, 720, size)).toEqual(c);                 // a fit is already on the scene
+      expect(V.clampPan(n, 1280, 720, size)).toEqual(n);
+    }
+  });
+  it("the opening: zones fitted (the office's mode); the desks from the top left at the pixel level nearest one CSS px", () => {
+    expect(V.openingView(1280, 720, STAGE, 1, true)).toEqual(V.fitScene(1280, 720, STAGE));
+    expect(V.openingView(1280, 720, STAGE, 2, true, "cover")).toEqual(V.fitScene(1280, 720, STAGE, "cover"));
     expect([V.desksK(1), V.desksK(1.25), V.desksK(1.5), V.desksK(2), V.desksK(3)]).toEqual([1, 0.8, 4 / 3, 1, 1]);
     expect(V.openingView(960, 2000, STAGE, 1.5, false)).toEqual({ k: 4 / 3, x: 0, y: 0 });
-    const far = V.clampPan({ k: 1, x: 5000, y: -5000 }, 1280, 720, STAGE);
-    expect(far).toEqual({ k: 1, x: 960 - 48, y: 48 - 720 });
-    const small = V.clampPan({ k: 0.01, x: -100, y: 0 }, 1280, 720, STAGE);   // a scene smaller than `keep`: all of it stays
-    expect(small.x).toBeCloseTo(0, 9);
+  });
+  it("clampPan: the scene never goes off-screen — larger than the panel it covers it (no gap), smaller it stays wholly inside", () => {
+    expect(V.clampPan({ k: 1, x: 5000, y: -5000 }, 1280, 720, STAGE)).toEqual({ k: 1, x: 0, y: 600 - 720 });
+    expect(V.clampPan({ k: 1, x: -5000, y: 5000 }, 1280, 720, STAGE)).toEqual({ k: 1, x: 960 - 1280, y: 0 });
+    expect(V.clampPan({ k: 2, x: -300, y: -200 }, 1280, 720, STAGE)).toEqual({ k: 2, x: -300, y: -200 });   // inside: as it is
+    // Smaller than the panel (zoomed out): wholly in view, wherever it was dragged.
+    expect(V.clampPan({ k: 0.5, x: -100, y: 900 }, 1280, 720, STAGE)).toEqual({ k: 0.5, x: 0, y: 600 - 360 });
+    expect(V.clampPan({ k: 0.5, x: 200, y: 100 }, 1280, 720, STAGE)).toEqual({ k: 0.5, x: 200, y: 100 });
+    // A kept view from a bigger panel (k 1 centred on a 2231 px stage), restored on 975 × 720: the scene's left edge
+    // was cut off and its frame stuck at the overview's left; clamped, the scene covers the stage.
+    const kept = V.savedOf({ k: 1, x: (2231 - 1280) / 2, y: 149 }, { w: 2231, h: 1018 });
+    const back = V.clampPan(V.viewFromSaved(kept, { w: 975, h: 720 }), 1280, 720, { w: 975, h: 720 });
+    expect(back.x).toBeLessThanOrEqual(0); expect(back.x).toBeGreaterThanOrEqual(975 - 1280);
+    expect(back.y).toBe(0);
   });
   it("the kept view: the zoom and the logical point in the middle; restored about the same point at this screen's level; odd ones refused", () => {
     const v = { k: 2, x: -800, y: -420 };
     const s = V.savedOf(v, STAGE);
     expect(s).toEqual({ k: 2, cx: 640, cy: 360 });
-    expect(V.viewFromSaved(s, { w: 1200, h: 800 }, 1)).toEqual({ k: 2, x: 600 - 1280, y: 400 - 720 });
-    expect(V.viewFromSaved({ k: 1.333, cx: 640, cy: 360 }, STAGE, 1.5).k).toBeCloseTo(4 / 3, 9);   // rounded when kept, snapped back
+    expect(V.viewFromSaved(s, { w: 1200, h: 800 })).toEqual({ k: 2, x: 600 - 1280, y: 400 - 720 });
+    expect(V.viewFromSaved({ k: 1.333, cx: 640, cy: 360 }, STAGE).k).toBe(1.333);   // a fit's non-integer zoom: as kept
+    expect(V.savedOf(v, STAGE, true)).toEqual({ k: 2, cx: 640, cy: 360, fit: true });   // a fit: fitted again when restored
+    expect(V.savedOk({ k: 1, cx: 1, cy: 2, fit: true })).toEqual({ k: 1, cx: 1, cy: 2, fit: true });
+    expect(V.savedOk({ k: 1, cx: 1, cy: 2, fit: "yes" })).toEqual({ k: 1, cx: 1, cy: 2 });
     expect([V.savedOk({ k: "2", cx: 1, cy: 1 }), V.savedOk({ k: 0, cx: 1, cy: 1 }), V.savedOk({ k: 1, cx: NaN, cy: 1 }), V.savedOk(null), V.savedOk({ k: 1, cx: 1e9, cy: 0 })])
       .toEqual([null, null, null, null, null]);
     expect(V.savedOk({ k: 99, cx: 1, cy: 2 })).toEqual({ k: V.OK_MAX, cx: 1, cy: 2 });
@@ -154,9 +190,42 @@ describe("pixel levels and Fit (fleet-office-view.js)", () => {
     expect([kept.length, kept.at(-1), kept.includes("auto@studio")]).toEqual([32, "o39@studio", false]);
     m.set("agend_org_office_view", "{ nope");
     expect(st.view("o39@studio")).toBeNull();
+    st.saveView("fit@studio", { k: 1.4, cx: 640, cy: 360, fit: true });
+    expect(JSON.parse(m.get("agend_org_office_view")!)["fit@studio"]).toEqual([1.4, 640, 360, 1]);
+    expect(st.view("fit@studio")).toEqual({ k: 1.4, cx: 640, cy: 360, fit: true });
+    // The fit mode: per office and style, "contain" unless Fill was chosen; only Fill is written.
+    expect(st.fitMode("auto@studio")).toBe("contain");
+    st.saveFitMode("auto@studio", "cover"); st.saveFitMode("ops@studio", "cover");
+    expect([st.fitMode("auto@studio"), st.fitMode("ops@studio"), st.fitMode("auto@pixel")]).toEqual(["cover", "cover", "contain"]);
+    st.saveFitMode("auto@studio", "contain");
+    expect(JSON.parse(m.get("agend_org_office_fit")!)).toEqual({ "ops@studio": "cover" });
+    m.set("agend_org_office_fit", JSON.stringify({ "ops@studio": "sideways" }));
+    expect(st.fitMode("ops@studio")).toBe("contain");
     const blocked = SK.createOfficeStore({ storage: { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); } } });
     expect(() => blocked.saveView("a@b", { k: 1, cx: 0, cy: 0 })).not.toThrow();
     expect(blocked.view("a@b")).toBeNull();
+    expect(() => blocked.saveFitMode("a@b", "cover")).not.toThrow();
+    expect(blocked.fitMode("a@b")).toBe("contain");
+  });
+  it("the overview's box: inside the stage with a margin at the bottom right, the scene's aspect, scaled to the stage", () => {
+    for (const size of [STAGE, { w: 2231, h: 1018 }, { w: 1331, h: 1018 }, { w: 500, h: 360 }, { w: 300, h: 200 }]) {
+      const b = V.miniBox(size, 1280, 720);
+      expect(b.x).toBeGreaterThanOrEqual(12); expect(b.y).toBeGreaterThanOrEqual(12);
+      expect(b.x + b.w).toBe(size.w - 12); expect(b.y + b.h).toBe(size.h - 12);
+      expect(Math.abs(b.w / b.h - 16 / 9)).toBeLessThan(0.05);
+    }
+    expect(V.miniBox({ w: 2231, h: 1018 }, 1280, 720).w).toBe(280);         // a big panel: the largest
+    expect(V.miniBox(STAGE, 1280, 720).w).toBe(Math.round(960 / 7));        // scaled to the stage
+    expect(V.miniBox({ w: 500, h: 360 }, 1280, 720).w).toBe(120);           // a small one: the smallest
+    const tall = V.miniBox(STAGE, 960, 4000);                              // a tall desks layout: a third of the height at most
+    expect(tall.h).toBeLessThanOrEqual(200); expect(tall.y + tall.h).toBe(588);
+  });
+  it("the overview's frame: the part of the scene in view, never outside it; the zoom's label", () => {
+    expect(V.miniFrame({ k: 0.75, x: 0, y: 30 }, STAGE, 1280, 720)).toEqual({ x: 0, y: 0, width: 1280, height: 720 });
+    expect(V.miniFrame({ k: 2, x: -300, y: -200 }, STAGE, 1280, 720)).toEqual({ x: 150, y: 100, width: 480, height: 300 });
+    const f = V.miniFrame({ k: 1, x: 480, y: 0 }, STAGE, 1280, 720);
+    expect([f.x, f.width]).toEqual([0, 480]);
+    expect([V.zoomLabel(1), V.zoomLabel(0.75), V.zoomLabel(1018 / 720), V.zoomLabel(8)]).toEqual(["100%", "75%", "141%", "800%"]);
   });
   it("the layers' resolution: the view's own; over the budget, divided by a whole number (an integer, crisp scale-up)", () => {
     expect(V.layerScale(2, 1280, 720)).toBe(2);
@@ -227,13 +296,13 @@ describe("the Office canvas on the page", () => {
   const mount = async () => { await p.mount(h(fleet.FleetPanel, { route: { panel: "fleet", tab: "org" }, navKey: `fleet:org|${Math.random()}|en` })); await settle(6); };
   const office = async () => { await mount(); p.root.querySelectorAll(".oc-tools .seg-inline button")[2].click(); await settle(6); };
   const studio = () => localStorage.setItem("agend_org_office_skin", "studio");
-  /** The view, read back from the overview's frame (x, y, width, height: the stage's box in logical units). */
+  /** The view, read back from the overview's frame (its data-k/x/y: the whole view; x, y, width, height: the part in view). */
   const shown = () => {
     const r = p.root.querySelector(".oo-mini-view");
-    const [x, y, w] = ["x", "y", "width"].map((a) => Number(r.getAttribute(a)));
-    const k = STAGE.w / w;
-    return { k, x: -x * k, y: -y * k };
+    const [k, x, y] = ["data-k", "data-x", "data-y"].map((a) => Number(r.getAttribute(a)));
+    return { k, x, y };
   };
+  const clamped = (v: any, size = STAGE) => V.clampPan(v, 1280, 720, size);
   const near = (a: any, b: any) => { expect(a.k).toBeCloseTo(b.k, 6); expect(a.x).toBeCloseTo(b.x, 6); expect(a.y).toBeCloseTo(b.y, 6); };
   const key = async (k: string) => { fire(p.root.querySelector(".oo-canvas"), "keydown", { key: k }); await settle(2); };
 
@@ -242,21 +311,84 @@ describe("the Office canvas on the page", () => {
     const cv = p.root.querySelector(".oo-canvas");
     expect([cv.style.width, cv.style.height, cv.width, cv.height]).toEqual(["960px", "600px", 960, 600]);
     expect([cv.getAttribute("role"), cv.getAttribute("tabindex")]).toEqual(["application", "0"]);
-    expect(p.root.querySelectorAll(".oo-zoom button").map((b: any) => b.getAttribute("aria-label"))).toEqual(["Zoom in", "Zoom out", "Fit the office", "Fullscreen"]);
-    near(shown(), V.fitScene(1280, 720, STAGE, 1));
+    expect(p.root.querySelectorAll(".oo-zoom button").map((b: any) => b.getAttribute("aria-label")))
+      .toEqual(["Zoom in", "Zoom out", "Fit the office", "Fill the panel (the scene's overflow is cropped; drag to see it)", "Fullscreen"]);
+    near(shown(), V.fitScene(1280, 720, STAGE));
     expect(p.root.querySelector(".oo-mini").getAttribute("viewBox")).toBe("0 0 1280 720");
+    // The overview: inside the stage, bottom right, scaled to it; its frame on the scene (here: all of it).
+    const mini = p.root.querySelector(".oo-mini"), b = V.miniBox(STAGE, 1280, 720);
+    expect(["left", "top", "width", "height"].map((a) => mini.style[a])).toEqual([`${b.x}px`, `${b.y}px`, `${b.w}px`, `${b.h}px`]);
+    expect(["x", "y", "width", "height"].map((a) => Number(p.root.querySelector(".oo-mini-view").getAttribute(a)))).toEqual([0, 0, 1280, 720]);
+    // The zoom's percentage beside the buttons, first in the group.
+    const pct = p.root.querySelector(".oo-zoom .oo-zoom-pct");
+    expect([pct.textContent, pct.getAttribute("aria-label")]).toEqual(["75%", "Zoom 75%"]);
+    expect(p.root.querySelector(".oo-zoom").children[0]).toBe(pct);
     expect(p.root.querySelectorAll(".oo-mini-dot").length).toBe(3);
+  });
+  it("Fill: a toggle beside Fit — cover (the panel filled, the overflow cropped and pannable), kept per office, 0 and a resize fit by it", async () => {
+    const RO = (globalThis as any).ResizeObserver;
+    let measure: any = null;
+    (globalThis as any).ResizeObserver = class { constructor(fn: any) { measure = fn; } observe() {} disconnect() {} };
+    try { studio(); await office(); } finally { (globalThis as any).ResizeObserver = RO; }
+    const fill = () => p.root.querySelector(".oo-zoom .oo-fill");
+    const order = p.root.querySelectorAll(".oo-zoom button").map((b: any) => b.className.split(" ")[1]);
+    expect(order.indexOf("oo-fill")).toBe(order.indexOf("oo-fit") + 1);   // next to Fit
+    expect([fill().textContent, fill().getAttribute("aria-pressed")]).toEqual(["Fill", "false"]);
+    fill().click(); await settle(2);
+    const cover = V.fitScene(1280, 720, STAGE, "cover");
+    near(shown(), cover);
+    expect(fill().getAttribute("aria-pressed")).toBe("true");
+    expect(p.root.querySelector(".oo-zoom-pct").textContent).toBe("83%");
+    expect(JSON.parse(localStorage.getItem("agend_org_office_fit")!)).toEqual({ "auto@studio": "cover" });
+    // The cropped sides are a drag away, never further than the scene's edge.
+    const cv = p.root.querySelector(".oo-canvas");
+    fire(cv, "pointerdown", { pointerId: 1, pointerType: "mouse", button: 0, clientX: 100, clientY: 100 });
+    fire(cv, "pointermove", { pointerId: 1, pointerType: "mouse", clientX: 400, clientY: 100 });
+    fire(cv, "pointerup", { pointerId: 1, pointerType: "mouse" }); await settle(2);
+    near(shown(), { k: cover.k, x: 0, y: 0 });
+    await key("0");                                                        // Fit goes by the mode: cover again
+    near(shown(), cover);
+    // A resize fits it again, to the new size, in its mode.
+    Object.defineProperty(proto, "clientWidth", { configurable: true, get() { return this.className.includes("oo-stage") ? 1400 : 0; } });
+    p.root.querySelector(".oo-stage").clientHeight = 700;
+    try {
+      measure(); await settle(4);
+      near(shown(), V.fitScene(1280, 720, { w: 1400, h: 700 }, "cover"));
+      expect(p.root.querySelector(".oo-canvas").style.width).toBe("1400px");
+    } finally { delete proto.clientWidth; p.root.querySelector(".oo-stage").clientHeight = 0; }
+    // Kept for this office: it opens filled; Desks (another style) is not.
+    await p.unmount(); await office();
+    near(shown(), cover);
+    expect(fill().getAttribute("aria-pressed")).toBe("true");
+    const style = p.root.querySelectorAll(".oo-bar select")[1];
+    style.value = "pixel"; fire(style, "change"); await settle(6);
+    expect(fill().getAttribute("aria-pressed")).toBe("false");
+    // Off again: contain.
+    style.value = "studio"; fire(style, "change"); await settle(6);
+    fill().click(); await settle(2);
+    near(shown(), V.fitScene(1280, 720, STAGE));
+    expect(fill().getAttribute("aria-pressed")).toBe("false");
+    expect(JSON.parse(localStorage.getItem("agend_org_office_fit")!)).toEqual({});
+  });
+  it("Fill and the zoom label in both languages", async () => {
+    const I = await import("/assets/app-i18n.js");
+    I.setLang("zh-TW", { store: false });
+    try { expect([I.t("orgo.fill"), I.t("orgo.zoomLevel", "141%")]).toEqual(["填滿", "縮放 141%"]); expect(I.t("orgo.fillTitle")).toContain("填滿"); }
+    finally { I.setLang("en", { store: false }); }
+    expect([I.t("orgo.fill"), I.t("orgo.zoomLevel", "141%")]).toEqual(["Fill", "Zoom 141%"]);
   });
   it("+ - 0 on the canvas (and the buttons): level by level about the middle, then Fit; none in a form field or with a modifier", async () => {
     studio(); await office();
-    const v0 = V.fitScene(1280, 720, STAGE, 1);
+    const v0 = V.fitScene(1280, 720, STAGE);
     await key("+");
-    const v1 = CV.zoomTo(v0, V.stepK(0.75, 1, 1), 480, 300);
+    const v1 = clamped(CV.zoomTo(v0, V.stepK(0.75, 1, 1), 480, 300));
     near(shown(), v1);
     await key("=");
-    near(shown(), CV.zoomTo(v1, 1, 480, 300));
+    near(shown(), clamped(CV.zoomTo(v1, 1, 480, 300)));
+    expect(p.root.querySelector(".oo-zoom-pct").textContent).toBe("100%");
     p.root.querySelector(".oo-zoom-in").click(); await settle(2);
     expect(shown().k).toBe(2);
+    expect(p.root.querySelector(".oo-zoom-pct").textContent).toBe("200%");
     await key("-");
     expect(shown().k).toBe(1);
     fire(p.root.querySelector(".oo-canvas"), "keydown", { key: "+", ctrlKey: true }); await settle(2);
@@ -269,7 +401,7 @@ describe("the Office canvas on the page", () => {
     p.root.querySelector(".oo-zoom-out").click(); await settle(2);
     expect(shown().k).toBeCloseTo(0.6, 9);
   });
-  it("a drag pans (the click that ends it opens nothing); the wheel and a pinch zoom onto pixel levels about the pointer", async () => {
+  it("a drag pans (the click that ends it opens nothing, the scene kept on screen); the wheel and a pinch zoom continuously about the pointer", async () => {
     studio(); await office();
     const cv = p.root.querySelector(".oo-canvas"), v0 = shown();
     fire(cv, "pointerdown", { pointerId: 1, pointerType: "mouse", button: 0, clientX: 100, clientY: 100 });
@@ -277,30 +409,32 @@ describe("the Office canvas on the page", () => {
     near(shown(), v0);
     fire(cv, "pointermove", { pointerId: 1, pointerType: "mouse", clientX: 160, clientY: 130 });
     fire(cv, "pointerup", { pointerId: 1, pointerType: "mouse", clientX: 160, clientY: 130 });
-    near(shown(), { k: v0.k, x: v0.x + 58, y: v0.y + 29 });
+    near(shown(), clamped({ k: v0.k, x: v0.x + 58, y: v0.y + 29 }));   // as wide as the stage: only down, to the edge
+    expect(shown().y).toBeCloseTo(59, 6);
     fire(cv, "click", { clientX: 160, clientY: 130 });
     expect(location.pathname).toBe("/ui/fleet/org");
     await settle(2);
-    // The wheel: a raw zoom snapped to a level, the point under the pointer kept.
+    // The wheel: continuous (only + and − go by pixel levels), the point under the pointer kept.
     const before = shown();
     fire(cv, "wheel", { deltaY: -500, clientX: 300, clientY: 200 }); await settle(2);
     const w = shown();
-    expect(w.k).toBe(2);                                                  // 0.75 × e^0.75 = 1.59 → level 2
+    expect(w.k).toBeCloseTo(0.75 * Math.exp(0.75), 9);                   // 1.59, not snapped
     expect(CV.toWorld(w, 300, 200).x).toBeCloseTo(CV.toWorld(before, 300, 200).x, 6);
-    // A pinch: two fingers, their span doubled → 2 × 2 = 4, the point under the midpoint follows it.
+    // A pinch: two fingers, their span doubled → twice the zoom, the point under the midpoint follows it.
     fire(cv, "pointerdown", { pointerId: 7, pointerType: "touch", clientX: 400, clientY: 300 });
     fire(cv, "pointerdown", { pointerId: 8, pointerType: "touch", clientX: 500, clientY: 300 });
     const at = CV.toWorld(shown(), 450, 300);
     fire(cv, "pointermove", { pointerId: 8, pointerType: "touch", clientX: 600, clientY: 300 });
     fire(cv, "pointerup", { pointerId: 7, pointerType: "touch" }); fire(cv, "pointerup", { pointerId: 8, pointerType: "touch" });
     const pv = shown();
-    expect(pv.k).toBe(4);
+    expect(pv.k).toBeCloseTo(2 * 0.75 * Math.exp(0.75), 9);
     expect(CV.toWorld(pv, 500, 300).x).toBeCloseTo(at.x, 6);
   });
   it("hover and click hit through the view: zoomed in and panned, a person opens where they are drawn", async () => {
     studio(); await office();
     await key("+"); await key("+"); await key("+");                       // 0.9375, 1, 2
     const cv = p.root.querySelector(".oo-canvas");
+    expect(shown().k).toBe(2);
     fire(cv, "pointerdown", { pointerId: 1, pointerType: "mouse", button: 0, clientX: 500, clientY: 300 });
     fire(cv, "pointermove", { pointerId: 1, pointerType: "mouse", clientX: 400, clientY: 250 });
     fire(cv, "pointerup", { pointerId: 1, pointerType: "mouse" });
@@ -318,11 +452,11 @@ describe("the Office canvas on the page", () => {
     expect(location.pathname).toBe("/ui/chat/quill");
     nav.navigate("/ui/fleet/org"); await settle(2);
     // The same logical point at the opening view's screen position is somewhere else now: nobody there.
-    const old = CV.toScreen(V.fitScene(1280, 720, STAGE, 1), seat.x, seat.y - 20);
+    const old = CV.toScreen(V.fitScene(1280, 720, STAGE), seat.x, seat.y - 20);
     fire(cv, "pointermove", { clientX: old.x, clientY: old.y, pointerType: "mouse" }); await settle(2);
     expect(p.root.querySelector(".oo-tip strong")?.textContent ?? null).not.toBe("quill");
   });
-  it("the view is kept per office and style (a moment after it moves, and when the view goes) and restored on this device's level", async () => {
+  it("the view is kept per office and style (a moment after it moves, and when the view goes) and restored, kept on screen", async () => {
     studio(); await office();
     await key("+"); await key("+"); await key("+");
     await new Promise((r) => setTimeout(r, 450));
@@ -336,12 +470,15 @@ describe("the Office canvas on the page", () => {
     // Desks: its own kept view; Studio's untouched.
     const style = p.root.querySelectorAll(".oo-bar select")[1];
     style.value = "pixel"; fire(style, "change"); await settle(6);
-    near(shown(), { k: 3, x: 480 - 10 * 3, y: 300 - 10 * 3 });
-    // Moved, then the view goes at once: kept on the way out.
+    const d = shown();                                                   // centred on (10, 10): its corner would leave a gap
+    expect([d.k, d.x]).toEqual([3, 0]);                                  // wider than the stage: no gap at the left
+    expect(d.y).toBeGreaterThanOrEqual(0); expect(d.y).toBeLessThan(300 - 30);   // shorter: wholly inside
+    // Moved, then the view goes at once: kept on the way out (a fit: marked so, fitted again next time).
     await key("0"); await p.unmount();
     const after = JSON.parse(localStorage.getItem("agend_org_office_view")!);
     expect(after["auto@studio"]).toEqual([2, 640, 360]);
     expect(after["auto@pixel"][0]).toBeLessThan(3);
+    expect(after["auto@pixel"][3]).toBe(1);
   });
   it("Edit layout under zoom: the overlay follows the view; a handle dragged lands on the logical point under the pointer; a drag off the handles pans", async () => {
     const was = (globalThis as any).Image;
@@ -406,16 +543,22 @@ describe("the Office canvas on the page", () => {
       studio(); await office();
       const cv = p.root.querySelector(".oo-canvas");
       expect([cv.style.width, cv.style.height, cv.width, cv.height]).toEqual(["390px", "600px", 1170, 1800]);
-      const r = p.root.querySelector(".oo-mini-view");
-      expect(Number(r.getAttribute("width"))).toBeCloseTo(1280, 6);       // the whole width in view: k = 390 / 1280
-      expect(p.root.querySelectorAll(".oo-zoom button")).toHaveLength(4);
+      expect(shown().k).toBeCloseTo(390 / 1280, 9);                        // the whole width in view
+      expect(p.root.querySelectorAll(".oo-zoom button")).toHaveLength(5);
       fire(cv, "keydown", { key: "+" }); await settle(2);
-      expect(390 / Number(p.root.querySelector(".oo-mini-view").getAttribute("width")) * 3).toBeCloseTo(1, 9);   // onto 1 device px a unit
+      expect(shown().k * 3).toBeCloseTo(1, 9);                             // + goes onto 1 device px a unit
     } finally { delete proto.clientWidth; (globalThis as any).devicePixelRatio = realDpr; }
   });
-  it("the stylesheet: the Office fills the panel (no frame, no column margins), the stage pans on touch, the overview leaves a phone", () => {
+  it("the stylesheet: the Office fills the panel (no cap, no auto margins, no frame), the stage pans on touch, the overview leaves a phone", () => {
     const css = readFileSync(join(process.cwd(), "src", "ui", "shared", "app.css"), "utf8");
-    expect(css).toContain(".p-fleet .panel-body > .col:has(> .oc-office) { flex: 1 0 auto; display: flex; flex-direction: column; max-width: none; padding: 0; }");
+    // The column: no max-width and no `margin: 0 auto` (in the panel's flex column an auto margin shrank it to its
+    // toolbar's width and centred it), the whole width; the containers under it too.
+    const col = css.match(/\n\.p-fleet \.panel-body > \.col:has\(> \.oc-office\) \{[^}]*\}/)![0];
+    for (const w of ["flex: 1 0 auto", "max-width: none", "padding: 0", "margin: 0;", "width: 100%", "align-self: stretch"]) expect(col).toContain(w);
+    expect(css.match(/\n\.oc-office \{[^}]*\}/)![0]).toContain("width: 100%");
+    expect(css.match(/\n\.oo \{[^}]*\}/)![0]).toContain("width: 100%");
+    for (const sel of [/\n\.oc-office \{[^}]*\}/, /\n\.oo \{[^}]*\}/, /\n\.oo-stage \{[^}]*\}/]) expect(css.match(sel)![0]).not.toMatch(/max-width|aspect-ratio|[^-]height: \d|margin: 0 auto/);
+    expect(css.match(/\n\.oo-mini \{[^}]*\}/)![0]).toContain("right: auto; bottom: auto");   // placed by the page (miniBox)
     const stage = css.match(/\n\.oo-stage \{[^}]*\}/)![0];
     expect(stage).toContain("touch-action: none");
     expect(stage).toContain("overflow: hidden");
@@ -453,10 +596,19 @@ describe("the Office canvas on the page", () => {
       expect(Math.min(...words)).toBeGreaterThan(fg);
     } finally { (globalThis as any).matchMedia = real; (globalThis as any).Image = was; }
   });
-  it("the matte: a built-in skin's is the page's background token; a pack's own `matte`; else its background's edge, sampled", async () => {
-    const firstFill = () => { const c = p.root.querySelector(".oo-canvas")._ctx.calls; const i = c.map(([k]: any) => k).lastIndexOf("clearRect"); return c.slice(i).find(([k]: any) => k === "fillRect")[2]; };
+  it("the matte paints the whole canvas (and the stage): Studio's hall floor, Desks' background token; a pack's own `matte`; else its background's edge, sampled", async () => {
+    const lastFrame = () => { const c = p.root.querySelector(".oo-canvas")._ctx.calls; return c.slice(c.map(([k]: any) => k).lastIndexOf("clearRect")); };
+    const firstFill = () => lastFrame().find(([k]: any) => k === "fillRect")[2];
     studio(); await office();
-    expect(firstFill()).toBe(K.DEFAULT_PAL.bg);
+    expect(firstFill()).toBe("#262626");                                   // the studio's own (its hall), not the page's grey
+    expect(firstFill()).not.toBe(K.DEFAULT_PAL.bg);
+    const rect = lastFrame().find(([k]: any) => k === "fillRect")[1];
+    expect(rect).toEqual([0, 0, 960, 600]);                                // the whole canvas
+    expect(p.root.querySelector(".oo-stage").style["background-color"]).toBe("#262626");
+    await p.unmount();
+    localStorage.setItem("agend_org_office_skin", "pixel");
+    await office();
+    expect(firstFill()).toBe(K.DEFAULT_PAL.bg);                            // Desks: its floor is the page's background
     await p.unmount();
     const was = (globalThis as any).Image;
     (globalThis as any).Image = class { onload: any = null; onerror: any = null; set src(_u: string) { setTimeout(() => this.onload && this.onload(), 0); } };
@@ -601,9 +753,7 @@ describe("the Office canvas on the page", () => {
         measure(); await settle(4);
         const cv = p.root.querySelector(".oo-canvas");
         expect([cv.style.width, cv.style.height]).toEqual(["1700px", "900px"]);
-        const r = p.root.querySelector(".oo-mini-view"), v = V.fitScene(1280, 720, { w: 1700, h: 900 }, 1);
-        expect(Number(r.getAttribute("width"))).toBeCloseTo(1700 / v.k, 6);   // the opening again: k 1
-        expect(Number(r.getAttribute("x"))).toBeCloseTo(-v.x / v.k, 6);
+        near(shown(), V.fitScene(1280, 720, { w: 1700, h: 900 }));          // the opening again: fitted to the new size
         // Moved (zoomed in), then resized: the logical point in the middle stays there.
         p.root.querySelector(".oo-zoom-in").click(); await settle(2);
         const mid = () => { const f = p.root.querySelector(".oo-mini-view"), n = (a: string) => Number(f.getAttribute(a));

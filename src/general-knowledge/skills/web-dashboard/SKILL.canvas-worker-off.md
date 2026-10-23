@@ -266,12 +266,15 @@ only calls and work get bubbles (a few at most) and name tags show on hover or f
 (per browser, off by default) leaves the sleepers out. Now and then someone says a short line for their state in a
 bubble (never message content). Reduced motion: still poses, nothing in the air, bubbles shown whole.
 The Office fills the Fleet panel and moves like the Canvas (#2540): drag to pan, the wheel or a pinch to zoom,
-**+** / **−** / **Fit** at the top right or the `+ - 0` keys (with the office focused), an overview at the bottom
-right to jump (not on a phone). Zoom goes in pixel levels — each logical unit a whole number of screen pixels, drawn
-unsmoothed, so pixel art stays crisp; **Fit** takes the largest level that shows the whole scene (the exact fit only
-when that would be tiny, e.g. on a phone). The zoom and centre are kept per device for each office and style. Around
-the 16:9 scene is a matte: a pack's own `matte` (`#rrggbb`), else its background's edge colour, else the
-dashboard's background. Hover, click, name tags and Edit layout all work at any zoom: a drag on a handle moves it,
+**+** / **−** / **Fit** / **Fill** at the top right (the zoom shown as a percentage above them) or the `+ - 0` keys
+(with the office focused), an overview at the bottom right to jump (not on a phone). It takes the whole panel: the
+Fleet area's full width, down to the window's foot. **Fit** shows the whole scene as large as the panel allows
+(any scale, so it fills the panel's width or height); **Fill** (a toggle, kept per office) fills the panel instead,
+cropping what overflows — drag to see it. **+** / **−** step in pixel levels (each logical unit a whole number of
+screen pixels); drawing is always unsmoothed. A resize fits a fitted view again; the scene can never be dragged off
+the panel. The zoom, centre and Fit/Fill are kept per device for each office and style. Around the 16:9 scene the
+whole panel is a matte: a pack's own `matte` (`#rrggbb`), else its background's edge colour, else the skin's own
+(Studio's hall floor; Desks: the dashboard's background). Hover, click, name tags and Edit layout all work at any zoom: a drag on a handle moves it,
 anywhere else pans; zoom and pan are never animated.
 **Fullscreen** (the button under **Fit**, or `f`; Esc leaves) shows the office alone: the dashboard's header, tabs
 and bars go, and the zoom buttons, the overview (not on a phone), a small office switcher and Exit float over it. It

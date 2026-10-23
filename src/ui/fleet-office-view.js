@@ -1,25 +1,24 @@
 // #2540: the Office view's canvas controls — the pure part (fleet-office.js applies it). The office fills the Fleet
 // panel; its scene (the zones' 1280×720 logical canvas, or the desks layout) is panned and zoomed like the org chart's
-// canvas (fleet-canvas-view.js: the same view { k, x, y }, gestures, wheel and keys), with two things of its own:
+// canvas (fleet-canvas-view.js: the same view { k, x, y }, gestures, wheel and keys), with these of its own:
 //
-// - Pixel levels. Zoom snaps so that one logical unit is a whole number of device pixels (k·dpr = 1, 2, 3, …), and the
-//   canvas draws unsmoothed, so pixel art stays crisp; below one device pixel a unit (zoomed far out) zoom is continuous.
-//   + and − step to the next level; the wheel and a pinch move a raw zoom that is snapped as it passes a level.
-// - Fit is the largest pixel level at which the whole scene fits. Only when that would be tiny is the exact, non-integer
-//   fit used instead: when no level fits at all (under one device pixel a unit: a phone, a panel narrower than the
-//   scene), or when the level is under two thirds of the scale that fits exactly (a 2560 px monitor would show the
-//   1280×720 scene at 1:1 in the middle of a mostly empty panel) — a crisp scene in under half the panel's area is
-//   worse than a slightly uneven one that fills it. At two thirds or more the crisp level wins.
+// - Pixel levels for the steps. + and − step to the next pixel level (one logical unit a whole number of device px:
+//   k·dpr = 1, 2, 3, …; below one device px a unit by 1.25); the canvas always draws unsmoothed (nearest neighbour).
+//   The wheel and a pinch zoom continuously, and Fit takes whatever scale fills the panel.
+// - Fit: two modes, kept per office (fleet-office-store.js). "contain" (the default): the largest scale at which the
+//   whole scene shows — non-integer, so the scene fills the panel's width or height. "cover" (Fill): the smallest
+//   scale that fills both; what overflows is cropped and stays a pan away. Either is centred.
+// - The view never loses the scene (clampPan): along an axis where the scene is larger than the panel it covers the
+//   panel (no gap at an edge); where it is smaller it stays wholly inside.
 //
 // Around the scene is a matte: the pack's `matte` (fleet-office-pack.js), else the colour of the background's edge
-// pixels (sampled once per style: edgeMatte), else the skin's own (a built-in skin's, from the dashboard's tokens).
+// pixels (sampled once per style: edgeMatte), else the skin's own (Studio's hall floor; Desks': the dashboard's
+// background). It paints the whole canvas outside the scene (and the stage behind it), never the page's grey.
 import { clampK, pinchTo, zoomTo } from "./fleet-canvas-view.js";
 import { CANVAS_MAX } from "./fleet-office-model.js";
 
 /** The zoom's range, in CSS px per logical unit. */
 export const OK_MIN = 0.1, OK_MAX = 8;
-/** Fit takes a pixel level unless it is under this share of the exact fit (see the header). */
-export const TINY = 2 / 3;
 const EPS = 1e-6;
 const clampO = (k) => clampK(k, OK_MIN, OK_MAX);
 /** The highest pixel level within the range at this ratio (at least 1). */
@@ -43,20 +42,22 @@ export function stepK(k, dir, dpr = 1) {
   if (n > 1 + EPS) return Math.max(1, Math.ceil(n - EPS) - 1) / dpr;
   return clampO(k * 0.8);
 }
-/** The view at scale `k` (snapped) about the viewport point (cx, cy). */
-export const zoomOffice = (v, k, cx, cy, dpr = 1) => zoomTo(v, snapK(k, dpr), cx, cy);
-/** A pinch step: `raw` the unsnapped zoom the pinch has reached; the world point under the old midpoint follows. */
-export const pinchOffice = (v, from, to, raw, dpr = 1) => pinchTo(v, from, to, snapK(raw, dpr));
+/** The view at scale `k` (in range, continuous: the wheel's) about the viewport point (cx, cy). */
+export const zoomOffice = (v, k, cx, cy) => zoomTo(v, clampO(k), cx, cy);
+/** A pinch step: `raw` the zoom the pinch has reached (continuous); the world point under the old midpoint follows. */
+export const pinchOffice = (v, from, to, raw) => pinchTo(v, from, to, clampO(raw));
 
-/** The scale at which a `w`×`h` scene fits a `size` viewport: the largest pixel level, unless tiny (the header). */
-export function fitK(w, h, size, dpr = 1, margin = 0) {
-  const exact = clampO(Math.min((size.w - 2 * margin) / Math.max(1, w), (size.h - 2 * margin) / Math.max(1, h)));
-  const n = Math.min(topLevel(dpr), Math.floor(exact * dpr + EPS)), level = n / dpr;
-  return n >= 1 && level >= exact * TINY - EPS ? level : exact;     // else tiny: the exact fit (the header says why)
+/** The fit modes: "contain" (the whole scene shows) and "cover" (the panel is filled, the overflow cropped). */
+export const FIT_MODES = ["contain", "cover"];
+export const fitModeOk = (m) => (m === "cover" ? "cover" : "contain");
+/** The scale at which a `w`×`h` scene fits a `size` viewport: contain (the whole scene) or cover (the whole panel). */
+export function fitK(w, h, size, mode = "contain", margin = 0) {
+  const sx = (size.w - 2 * margin) / Math.max(1, w), sy = (size.h - 2 * margin) / Math.max(1, h);
+  return clampO(fitModeOk(mode) === "cover" ? Math.max(sx, sy) : Math.min(sx, sy));
 }
-/** The whole scene, centred, at fitK. */
-export function fitScene(w, h, size, dpr = 1, margin = 0) {
-  const k = fitK(w, h, size, dpr, margin);
+/** The scene at fitK, centred. */
+export function fitScene(w, h, size, mode = "contain", margin = 0) {
+  const k = fitK(w, h, size, mode, margin);
   return { k, x: (size.w - w * k) / 2, y: (size.h - h * k) / 2 };
 }
 /**
@@ -64,29 +65,53 @@ export function fitScene(w, h, size, dpr = 1, margin = 0) {
  * 4/3 at 150 %, 0.8 at 125 %); the layout wraps at the panel's width over it, so it opens as wide as the panel.
  */
 export const desksK = (dpr = 1) => Math.max(1, Math.round(dpr)) / dpr;
-/** The view a scene opens on with nothing kept: zones whole (Fit), desks from the top left at desksK. */
-export const openingView = (w, h, size, dpr, zones) => (zones ? fitScene(w, h, size, dpr) : { k: desksK(dpr), x: 0, y: 0 });
-/** The view kept from leaving the scene: at least `keep` px of it (or all of it, when smaller) stays in the viewport. */
-export function clampPan(v, w, h, size, keep = 48) {
-  const sw = w * v.k, sh = h * v.k, kx = Math.min(keep, sw, size.w), ky = Math.min(keep, sh, size.h);
-  return { k: v.k, x: Math.min(size.w - kx, Math.max(kx - sw, v.x)), y: Math.min(size.h - ky, Math.max(ky - sh, v.y)) };
+/** The view a scene opens on with nothing kept: zones fitted (the office's mode), desks from the top left at desksK. */
+export const openingView = (w, h, size, dpr, zones, mode = "contain") => (zones ? fitScene(w, h, size, mode) : { k: desksK(dpr), x: 0, y: 0 });
+/** One axis of clampPan: offset `o` of a scene `s` long in a viewport `n` long. */
+const clampAxis = (o, s, n) => (s >= n ? Math.min(0, Math.max(n - s, o)) : Math.min(n - s, Math.max(0, o)));
+/**
+ * The view kept on the scene: along an axis where the scene is at least the viewport it covers the viewport (no gap at
+ * either edge); where it is smaller it stays wholly inside. Nothing can be scrolled off-screen.
+ */
+export function clampPan(v, w, h, size) {
+  return { k: v.k, x: clampAxis(v.x, w * v.k, size.w), y: clampAxis(v.y, h * v.k, size.h) };
+}
+/** The zoom as a person reads it: "150%". */
+export const zoomLabel = (k) => `${Math.round(k * 100)}%`;
+/**
+ * The overview's box in a `size` stage: the scene's aspect, about a seventh of the stage's width (120–280 px, at most
+ * a third of its height), `margin` px in from the bottom right corner — always inside the stage.
+ */
+export function miniBox(size, w, h, margin = 12) {
+  const ar = Math.max(1, w) / Math.max(1, h), roomW = Math.max(0, size.w - 2 * margin), roomH = Math.max(0, size.h - 2 * margin);
+  let bw = Math.min(280, Math.max(120, Math.round(size.w / 7)), roomW), bh = bw / ar;
+  const maxH = Math.min(roomH, Math.max(60, size.h / 3));
+  if (bh > maxH) { bh = maxH; bw = bh * ar; }
+  bw = Math.floor(bw); bh = Math.floor(bh);
+  return { x: size.w - margin - bw, y: size.h - margin - bh, w: bw, h: bh };
+}
+/** The view's frame on the overview (logical units): the part of the scene in view (never outside it). */
+export function miniFrame(v, size, w, h) {
+  const x0 = Math.max(0, -v.x / v.k), y0 = Math.max(0, -v.y / v.k);
+  const x1 = Math.min(w, (size.w - v.x) / v.k), y1 = Math.min(h, (size.h - v.y) / v.k);
+  return { x: x0, y: y0, width: Math.max(0, x1 - x0), height: Math.max(0, y1 - y0) };
 }
 
 // ── Kept per device, per office: the zoom and the logical point in the middle (the viewport's size may differ) ──
 
-/** What is kept of a view: { k, cx, cy }. */
-export const savedOf = (v, size) => ({ k: v.k, cx: (size.w / 2 - v.x) / v.k, cy: (size.h / 2 - v.y) / v.k });
+/** What is kept of a view: { k, cx, cy }, and `fit: true` when it is a fit (it is fitted again, to the size then). */
+export const savedOf = (v, size, fit = false) => ({ k: v.k, cx: (size.w / 2 - v.x) / v.k, cy: (size.h / 2 - v.y) / v.k, ...(fit ? { fit: true } : {}) });
 /** A kept view, checked: { k, cx, cy } with finite numbers (k in range), else null. */
 export function savedOk(x) {
   if (!x || typeof x !== "object") return null;
   const { k, cx, cy } = x;
   if (![k, cx, cy].every((n) => typeof n === "number" && Number.isFinite(n)) || k <= 0) return null;
   if (Math.abs(cx) > 1e6 || Math.abs(cy) > 1e6) return null;
-  return { k: clampO(k), cx, cy };
+  return { k: clampO(k), cx, cy, ...(x.fit === true ? { fit: true } : {}) };
 }
-/** The view a kept one gives in a `size` viewport on this device (its zoom snapped to this screen's levels). */
-export function viewFromSaved(s, size, dpr = 1) {
-  const k = snapK(s.k, dpr);
+/** The view a kept one gives in a `size` viewport: the same zoom, the same logical point in the middle. */
+export function viewFromSaved(s, size) {
+  const k = clampO(s.k);
   return { k, x: size.w / 2 - s.cx * k, y: size.h / 2 - s.cy * k };
 }
 

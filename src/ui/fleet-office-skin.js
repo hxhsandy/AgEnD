@@ -329,7 +329,7 @@ function drawCrowd(ctx, area, n, env) {
 
 /** The built-in character in zones covers this box around its feet (as zonesLayout's desk box). */
 const charBox = (look, at) => ({ x: at.x - 24, y: at.y - 52, w: 48, h: 66 });
-/** #2540: the built-in skins' matte (around the scene): the page's background token, which the desks' floor is too. */
+/** #2540: Desks' matte (around the scene): the page's background token, which the desks' floor is too (Studio has its own). */
 const matte = (env) => env.pal.bg;
 /** @type {OfficeSkin} */
 export const pixelSkin = { id: "pixel", drawFloor, drawRoom, drawDeskBack, drawCharacter, drawDeskFront, drawProp, drawBubble, drawTag, drawCrowd, charBox, matte };
@@ -441,7 +441,9 @@ function drawFurniture(ctx, f, active, ms, env) {
   }
 }
 /** @type {OfficeSkin} */
-export const studioSkin = { ...pixelSkin, id: "studio", pack: STUDIO_PACK, drawBackground, drawFurniture };
+/** #2540: the studio's matte is its hall floor (the scene's edge), so the panel around the scene reads as more of it. */
+const studioMatte = (env) => (ZONE_FLOOR[env.mode] || ZONE_FLOOR.dark).hall;
+export const studioSkin = { ...pixelSkin, id: "studio", pack: STUDIO_PACK, drawBackground, drawFurniture, matte: studioMatte };
 
 // ── Skin packs ──
 

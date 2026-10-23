@@ -809,7 +809,7 @@ describe("the Office view on the page", () => {
     try {
       localStorage.setItem("agend_org_office_skin", "studio");
       await office(); await settle(4);
-      const pack = K.skinFor("studio").pack, v = (await import("/ui/js/fleet-office-view.js")).fitScene(1280, 720, { w: 960, h: 600 }, 1);   // #2540: the opening view
+      const pack = K.skinFor("studio").pack, v = (await import("/ui/js/fleet-office-view.js")).fitScene(1280, 720, { w: 960, h: 600 });   // #2540: the opening view
       const nodes = (v: any) => [...new Map(M.officeRooms(v).flatMap((r: any) => r.nodes).map((n: any) => [n.name, n])).values()];
       const before = Z.zonesLayout(pack, nodes(view()));
       app.appStore.set({ ...STORE, exec: { ...STORE.exec, atlas: "working" } }); await settle(2);   // atlas: idle → working, walks
