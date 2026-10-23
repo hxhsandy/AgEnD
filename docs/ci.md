@@ -81,6 +81,18 @@ A rehearsal of a change to the upgrade path runs these legs. Each one starts fro
 
 Each leg records the fleet's pid and program before and after the update.
 
+## npm registry signatures (#2528)
+
+`npm-audit-signatures.yml` runs `npm audit signatures --json` on the root tree
+and on `website/` after `npm ci --ignore-scripts`. Invalid signatures, invalid
+attestations, mixed findings, and command or parse failures fail the job.
+Missing-only findings are printed and do not fail (npm 10 itself exits 1 for
+missing as well as invalid; the wrapper applies that report-only policy).
+The job does not run package
+lifecycle scripts: `esbuild` / `lightningcss` postinstall and any native
+`install` (for example `better-sqlite3` in the test jobs) stay in `ci.yml` and
+`deploy-website.yml`, which still run a full `npm ci`.
+
 ## Dependency review on PRs (#2528)
 
 `dependency-review.yml` runs `actions/dependency-review-action` on pull
