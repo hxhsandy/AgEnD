@@ -23,8 +23,10 @@ export interface WorkingStateObservation {
   backgroundWork: boolean | null;
   turn: WorkingStateTurn | null;
   /** No generic getSessionId discovery is allowed on this observation path. */
-  sessionId: null;
+  sessionId: string | null;
   backendTurnId: null;
+  /** A confirmed local continuation starts a demonstrably resumed work interval. */
+  recoveryDeliveryId?: string;
 }
 export type WorkingStateReference =
   | { kind: "task"; id: string; version: number; status: "claimed" | "blocked" | "review" }
@@ -72,7 +74,8 @@ function bounded(input: WorkingStateSnapshot): WorkingStateSnapshot {
       turn: turn && integer(turn.generation) ? { generation: turn.generation,
         deliveryId: id(turn.deliveryId) ? turn.deliveryId : null, correlationId: id(turn.correlationId) ? turn.correlationId : null,
         messageId: id(turn.messageId) ? turn.messageId : null, cancelled: turn.cancelled === true, completionDelivered: turn.completionDelivered === true } : null,
-      sessionId: null, backendTurnId: null,
+      sessionId: id(o.sessionId) ? o.sessionId : null, backendTurnId: null,
+      ...(id(o.recoveryDeliveryId) ? { recoveryDeliveryId: o.recoveryDeliveryId } : {}),
     },
     references: refs, totalReferences: Math.max(integer(input.totalReferences) ? input.totalReferences : 0, input.references.length),
     unavailable: ["tasks", "obligations"].filter(x => input.unavailable.includes(x as "tasks" | "obligations")) as Array<"tasks" | "obligations">,
