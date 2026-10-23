@@ -124,6 +124,10 @@ Daemon 透過 `~/.agend/instances/<name>/channel.sock` 與 AgEnD MCP bridge 通�
 
 ## CI 供應鏈（#2528）
 
+這個儲存庫使用的 GitHub Actions 都釘在完整 commit SHA，移動 tag 不會改到
+CI 或 npm 發布 workflow 實際執行的程式。任何遠端 `uses:` 仍是 tag 時，CI
+會讓 merge gate 失敗。見[CI 覆蓋 — GitHub Actions 釘選](ci.zh-TW.md#github-actions-釘選2528)。
+
 CI 會驗證根目錄與 `website/` 安裝樹的 npm registry 簽章（`npm audit
 signatures --json`）。簽章無效會讓 job 失敗；只有缺少簽章時會被報告。見[CI 覆蓋](ci.zh-TW.md#npm-registry-簽章2528)。
 
