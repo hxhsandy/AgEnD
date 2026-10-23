@@ -10,6 +10,9 @@
  * - The pack's `foreground` (a file in the pack, with stateZones) and furniture `depth: "y"` (sorted among the people);
  *   on the page a "y" item is drawn between the people by base y, and the foreground after people, furniture and
  *   props but before the name tags and bubbles.
+ * - Fullscreen: the button and `f` (never while typing), the Fullscreen API on the container (webkit's too), synced by
+ *   fullscreenchange; immersive (CSS) where the API is missing or refuses, left by Esc; only the stage and its floating
+ *   controls show; a resize re-fits; a desk's chat leaves it; unmounting leaves it and its listeners.
  * - On the page: the canvas is the stage; + / − / 0 and the buttons zoom; a drag pans, a wheel and a pinch zoom; the
  *   overview shows the view; a click and a hover hit through the view; the view is kept and restored; Edit layout's
  *   overlay follows the view and a handle dragged under zoom lands on the logical point under the pointer, while a drag
@@ -239,7 +242,7 @@ describe("the Office canvas on the page", () => {
     const cv = p.root.querySelector(".oo-canvas");
     expect([cv.style.width, cv.style.height, cv.width, cv.height]).toEqual(["960px", "600px", 960, 600]);
     expect([cv.getAttribute("role"), cv.getAttribute("tabindex")]).toEqual(["application", "0"]);
-    expect(p.root.querySelectorAll(".oo-zoom button").map((b: any) => b.getAttribute("aria-label"))).toEqual(["Zoom in", "Zoom out", "Fit the office"]);
+    expect(p.root.querySelectorAll(".oo-zoom button").map((b: any) => b.getAttribute("aria-label"))).toEqual(["Zoom in", "Zoom out", "Fit the office", "Fullscreen"]);
     near(shown(), V.fitScene(1280, 720, STAGE, 1));
     expect(p.root.querySelector(".oo-mini").getAttribute("viewBox")).toBe("0 0 1280 720");
     expect(p.root.querySelectorAll(".oo-mini-dot").length).toBe(3);
@@ -405,7 +408,7 @@ describe("the Office canvas on the page", () => {
       expect([cv.style.width, cv.style.height, cv.width, cv.height]).toEqual(["390px", "600px", 1170, 1800]);
       const r = p.root.querySelector(".oo-mini-view");
       expect(Number(r.getAttribute("width"))).toBeCloseTo(1280, 6);       // the whole width in view: k = 390 / 1280
-      expect(p.root.querySelectorAll(".oo-zoom button")).toHaveLength(3);
+      expect(p.root.querySelectorAll(".oo-zoom button")).toHaveLength(4);
       fire(cv, "keydown", { key: "+" }); await settle(2);
       expect(390 / Number(p.root.querySelector(".oo-mini-view").getAttribute("width")) * 3).toBeCloseTo(1, 9);   // onto 1 device px a unit
     } finally { delete proto.clientWidth; (globalThis as any).devicePixelRatio = realDpr; }
@@ -469,5 +472,190 @@ describe("the Office canvas on the page", () => {
       await office(); await settle(6);
       expect(firstFill()).toBe("#102030");
     } finally { (globalThis as any).Image = was; }
+  });
+
+  describe("fullscreen", () => {
+    const D = () => p.document as any;
+    let calls: string[] = [];
+    afterEach(() => {
+      const d = D();
+      for (const k of ["fullscreenElement", "webkitFullscreenElement", "exitFullscreen", "webkitExitFullscreen", "fullscreenEnabled"]) delete d[k];
+      d.documentElement.classList.remove("oo-immersive");
+    });
+    const oo = () => p.root.querySelector(".oo");
+    const cls = () => String(oo().className);
+    const fsBtn = () => p.root.querySelector(".oo-fs");
+    /** The Fullscreen API on the container: `how` "ok" (it goes fullscreen, then the change event), "reject", "throw". */
+    const native = (how = "ok", prefix = "") => {
+      calls = [];
+      const d = D(), el = oo(), elKey = prefix ? "webkitFullscreenElement" : "fullscreenElement";
+      const change = () => fire(d, prefix ? "webkitfullscreenchange" : "fullscreenchange");
+      el[prefix ? "webkitRequestFullscreen" : "requestFullscreen"] = function () {
+        calls.push("request");
+        if (how === "throw") throw new Error("no");
+        if (how === "reject") return prefix ? (fire(d, "webkitfullscreenerror"), undefined) : Promise.reject(new Error("refused"));
+        d[elKey] = this; change();
+        return prefix ? undefined : Promise.resolve();
+      };
+      d[prefix ? "webkitExitFullscreen" : "exitFullscreen"] = () => { calls.push("exit"); d[elKey] = null; change(); return prefix ? undefined : Promise.resolve(); };
+    };
+
+    it("the button (labelled, a tooltip): the Fullscreen API on the container; only the stage and its floating controls show; again: out", async () => {
+      studio(); await office();
+      expect([fsBtn().getAttribute("aria-label"), fsBtn().getAttribute("title")]).toEqual(["Fullscreen", "Fullscreen"]);
+      expect(p.root.querySelector(".oo-fs-bar")).toBeNull();
+      native();
+      fsBtn().click(); await settle(4);
+      expect(calls).toEqual(["request"]);
+      expect(cls().split(" ")).toEqual(["oo", "fs", "native"]);
+      expect([fsBtn().getAttribute("aria-label"), fsBtn().getAttribute("title")]).toEqual(["Exit fullscreen", "Exit fullscreen"]);
+      // The floating cluster: zoom, Fit, Exit, the overview and a compact office switcher (all inside the stage).
+      const stage = p.root.querySelector(".oo-stage");
+      for (const sel of [".oo-zoom", ".oo-mini", ".oo-fs-bar"]) expect(stage.contains(p.root.querySelector(sel)), sel).toBe(true);
+      const sw = p.root.querySelector(".oo-fs-office");
+      expect([sw.tagName.toLowerCase(), sw.getAttribute("aria-label")]).toEqual(["select", "Office"]);
+      expect(D().documentElement.classList.contains("oo-immersive")).toBe(false);   // the API's top layer needs no lift
+      fsBtn().click(); await settle(4);
+      expect(calls).toEqual(["request", "exit"]);
+      expect(cls()).toBe("oo");
+      expect(p.root.querySelector(".oo-fs-bar")).toBeNull();
+    });
+    it("`f` toggles it from the view or with nothing focused; never while typing, with a modifier, or over Edit offices", async () => {
+      studio(); await office();
+      native();
+      fire(p.root.querySelector(".oo-canvas"), "keydown", { key: "f" }); await settle(4);
+      expect(cls()).toContain("native");
+      fire(p.root.querySelector(".oo-canvas"), "keydown", { key: "F" }); await settle(4);
+      expect(cls()).toBe("oo");
+      fire(D().body, "keydown", { key: "f" }); await settle(4);
+      expect(cls()).toContain("native");
+      fire(D().body, "keydown", { key: "f" }); await settle(4);
+      calls = [];
+      fire(p.root.querySelector(".oo-office"), "keydown", { key: "f" });
+      fire(p.root.querySelector(".oo-canvas"), "keydown", { key: "f", ctrlKey: true });
+      fire(p.root.querySelector(".oo-canvas"), "keydown", { key: "f", metaKey: true });
+      const input = D().createElement("input");
+      D().body.appendChild(input);
+      fire(input, "keydown", { key: "f" });
+      const elsewhere = D().createElement("button");                     // a control outside the view (another panel)
+      D().body.appendChild(elsewhere);
+      fire(elsewhere, "keydown", { key: "f" });
+      input.remove(); elsewhere.remove();
+      await settle(4);
+      expect(calls).toEqual([]);
+      expect(cls()).toBe("oo");
+    });
+    it("the browser's own way out (fullscreenchange, and webkit's) is followed; webkit's request is used when it is the only one", async () => {
+      studio(); await office();
+      native();
+      fsBtn().click(); await settle(4);
+      expect(cls()).toContain("native");
+      D().fullscreenElement = null; fire(D(), "fullscreenchange"); await settle(4);   // the person pressed Esc
+      expect(cls()).toBe("oo");
+      expect(fsBtn().getAttribute("aria-label")).toBe("Fullscreen");
+      // Another element going fullscreen is not this view's.
+      D().fullscreenElement = D().body; fire(D(), "fullscreenchange"); await settle(4);
+      expect(cls()).toBe("oo");
+      D().fullscreenElement = null;
+      delete oo().requestFullscreen; delete D().exitFullscreen;
+      native("ok", "webkit");
+      fsBtn().click(); await settle(4);
+      expect([calls, cls()]).toEqual([["request"], "oo fs native"]);
+      D().webkitFullscreenElement = null; fire(D(), "webkitfullscreenchange"); await settle(4);
+      expect(cls()).toBe("oo");
+    });
+    it("immersive where the API is missing (an iPhone), disabled, rejected or throws: the container covers the window; Esc leaves", async () => {
+      studio(); await office();
+      const root = D().documentElement;
+      fsBtn().click(); await settle(4);                                  // no requestFullscreen at all
+      expect(cls()).toBe("oo fs immersive");
+      expect(root.classList.contains("oo-immersive")).toBe(true);
+      expect(fsBtn().getAttribute("aria-label")).toBe("Exit fullscreen");
+      fire(p.root.querySelector(".oo-canvas"), "keydown", { key: "Escape" }); await settle(4);
+      expect(cls()).toBe("oo");
+      expect(root.classList.contains("oo-immersive")).toBe(false);
+      for (const how of ["reject", "throw", "disabled", "webkit-error"]) {
+        if (how === "webkit-error") { delete oo().requestFullscreen; native("reject", "webkit"); } else native(how === "disabled" ? "ok" : how);
+        if (how === "disabled") D().fullscreenEnabled = false;
+        fsBtn().click(); await settle(4);
+        expect(cls(), how).toBe("oo fs immersive");
+        expect(calls, how).toEqual(how === "disabled" ? [] : ["request"]);
+        if (how === "disabled") delete D().fullscreenEnabled;
+        fire(D().body, "keydown", { key: "f" }); await settle(4);       // `f` leaves it too
+        expect(cls(), how).toBe("oo");
+        expect(root.classList.contains("oo-immersive")).toBe(false);
+      }
+      fire(D().body, "keydown", { key: "Escape" }); await settle(4);    // Esc out of fullscreen: nothing to do
+      expect(cls()).toBe("oo");
+    });
+    it("in fullscreen the stage re-fits to its new size (untouched), and keeps the same point in the middle once moved; live updates go on", async () => {
+      const RO = (globalThis as any).ResizeObserver;
+      let measure: any = null;
+      (globalThis as any).ResizeObserver = class { constructor(fn: any) { measure = fn; } observe() {} disconnect() {} };
+      try { studio(); await office(); } finally { (globalThis as any).ResizeObserver = RO; }
+      fsBtn().click(); await settle(4);
+      let W = 1700;
+      Object.defineProperty(proto, "clientWidth", { configurable: true, get() { return this.className.includes("oo-stage") ? W : 0; } });
+      p.root.querySelector(".oo-stage").clientHeight = 900;               // a plain field in the test page
+      try {
+        measure(); await settle(4);
+        const cv = p.root.querySelector(".oo-canvas");
+        expect([cv.style.width, cv.style.height]).toEqual(["1700px", "900px"]);
+        const r = p.root.querySelector(".oo-mini-view"), v = V.fitScene(1280, 720, { w: 1700, h: 900 }, 1);
+        expect(Number(r.getAttribute("width"))).toBeCloseTo(1700 / v.k, 6);   // the opening again: k 1
+        expect(Number(r.getAttribute("x"))).toBeCloseTo(-v.x / v.k, 6);
+        // Moved (zoomed in), then resized: the logical point in the middle stays there.
+        p.root.querySelector(".oo-zoom-in").click(); await settle(2);
+        const mid = () => { const f = p.root.querySelector(".oo-mini-view"), n = (a: string) => Number(f.getAttribute(a));
+          return [n("x") + n("width") / 2, n("y") + n("height") / 2]; };
+        const m0 = mid();
+        W = 1500; measure(); await settle(4);
+        expect(p.root.querySelector(".oo-canvas").style.width).toBe("1500px");
+        expect(mid()[0]).toBeCloseTo(m0[0], 6);
+        expect(mid()[1]).toBeCloseTo(m0[1], 6);
+        expect(p.root.querySelectorAll(".oo-mini-dot.st-working")).toHaveLength(1);
+        app.appStore.set({ ...STORE, exec: { quill: "working", atlas: "working" } }); await settle(6);
+        expect(p.root.querySelectorAll(".oo-mini-dot.st-working")).toHaveLength(2);
+        expect(cls()).toBe("oo fs immersive");
+      } finally { delete proto.clientWidth; p.root.querySelector(".oo-stage").clientHeight = 0; }
+    });
+    it("a desk's chat leaves fullscreen first", async () => {
+      studio(); await office();
+      fsBtn().click(); await settle(4);
+      p.root.querySelector('.oo-desk[data-name="atlas"]').click(); await settle(4);
+      expect(location.pathname).toContain("atlas");
+      expect(cls()).toBe("oo");
+      expect(D().documentElement.classList.contains("oo-immersive")).toBe(false);
+    });
+    it("unmounting leaves it: the API's fullscreen is exited, immersive's lift removed, the listeners gone", async () => {
+      const d = D(), before = ["fullscreenchange", "webkitfullscreenchange", "fullscreenerror", "keydown"].map((k) => d.listenerCount(k));
+      studio(); await office();
+      native();
+      fsBtn().click(); await settle(4);
+      expect(cls()).toContain("native");
+      await p.unmount();
+      expect(calls).toEqual(["request", "exit"]);
+      expect(["fullscreenchange", "webkitfullscreenchange", "fullscreenerror", "keydown"].map((k) => d.listenerCount(k))).toEqual(before);
+      await office();
+      fsBtn().click(); await settle(4);                                  // no API this time: immersive
+      expect(cls()).toBe("oo fs immersive");
+      expect(d.documentElement.classList.contains("oo-immersive")).toBe(true);
+      await p.unmount();
+      expect(d.documentElement.classList.contains("oo-immersive")).toBe(false);
+    });
+    it("its words in both languages; the stylesheet: only the stage shows, immersive covers the window (safe areas kept) above the chrome", async () => {
+      const I = await import("/assets/app-i18n.js");
+      I.setLang("zh-TW", { store: false });
+      try { expect([I.t("orgo.fullscreen"), I.t("orgo.exitFullscreen")]).toEqual(["全螢幕", "結束全螢幕"]); } finally { I.setLang("en", { store: false }); }
+      expect([I.t("orgo.fullscreen"), I.t("orgo.exitFullscreen")]).toEqual(["Fullscreen", "Exit fullscreen"]);
+      const css = readFileSync(join(process.cwd(), "src", "ui", "shared", "app.css"), "utf8");
+      expect(css).toContain(".oo.fs > :not(.oo-stage) { display: none; }");
+      expect(css).toContain(".oo.fs > .oo-stage { flex: 1 1 auto; min-height: 0; }");
+      expect(css).toContain("padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);");
+      const imm = css.match(/\n\.oo\.fs\.immersive \{[^}]*\}/)![0];
+      for (const w of ["position: fixed", "inset: 0", "width: 100dvw", "height: 100dvh", "z-index: 50"]) expect(imm).toContain(w);
+      expect(css).toContain("html.oo-immersive .p-fleet > .panel-body { z-index: 50; }");
+      expect(css).toContain("html.oo-immersive, html.oo-immersive body { overflow: hidden; }");
+    });
   });
 });

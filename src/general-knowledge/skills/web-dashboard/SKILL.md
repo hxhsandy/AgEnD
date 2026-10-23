@@ -283,6 +283,10 @@ when that would be tiny, e.g. on a phone). The zoom and centre are kept per devi
 the 16:9 scene is a matte: a pack's own `matte` (`#rrggbb`), else its background's edge colour, else the
 dashboard's background. Hover, click, name tags and Edit layout all work at any zoom: a drag on a handle moves it,
 anywhere else pans; zoom and pan are never animated.
+**Fullscreen** (the button under **Fit**, or `f`; Esc leaves) shows the office alone: the dashboard's header, tabs
+and bars go, and the zoom buttons, the overview (not on a phone), a small office switcher and Exit float over it. It
+uses the browser's fullscreen; where a page cannot have it (an iPhone) or the browser refuses, the office covers the
+window instead. Opening a chat leaves it, and it is never remembered.
 A pack may add a `foreground` (a 16:9 PNG over the whole scene, zones packs only): drawn above the people, furniture
 and items in the air, below name tags, bubbles and "+N" — door frames, pillars, table fronts that hide whoever walks
 behind them. A furniture item's `depth` may be `"y"`: drawn among the people by base y (whoever stands lower is in

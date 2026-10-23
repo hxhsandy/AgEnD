@@ -38,6 +38,10 @@
 //   so Save sends that rev and a change made meanwhile is a 409 (the session then takes the list read again, and Save
 //   again is the person's decision). While it is open the office picker and Edit offices wait; if the office goes or its
 //   style changes underneath it, the editor says so and only Cancel is left.
+// - Fullscreen (#2540): a button by the zoom controls, or `f`; Esc leaves. The Fullscreen API on the view's container
+//   (webkit's prefix too); where a page cannot take an element fullscreen (an iPhone) or the browser refuses, "immersive":
+//   the container covers the window (CSS). Either way only the stage shows, with its floating controls (zoom, Fit, the
+//   overview, a compact office switcher, Exit); the stage's resize handling re-fits it. Nothing about it is kept.
 import { html, useEffect, useLayoutEffect, useMemo, useRef, useState } from "/assets/app-html.js";
 import { appStore } from "/assets/app-store.js";
 import { t, lang, register } from "/assets/app-i18n.js";
@@ -58,7 +62,7 @@ import { OK_MAX, OK_MIN, clampPan, desksK, edgeMatte, edgeStrips, fitScene, laye
 
 register("orgo", {
   en: {
-    label: "Office: each team is a room and each instance a desk; General and the instances in no team are in the lobby. Drag to pan; the wheel, a pinch, + and − zoom, 0 fits.",
+    label: "Office: each team is a room and each instance a desk; General and the instances in no team are in the lobby. Drag to pan; the wheel, a pinch, + and − zoom, 0 fits, F is fullscreen.",
     office: "Office", allOffice: "Whole fleet", show: "Show", allTeams: "All teams", lobby: "Lobby (General, no team)", lobbyRoom: "Lobby",
     people: "People", peopleN: "People ({0})", findPerson: "Find a person", everyone: "Show everyone", nobody: "No one here matches this filter.",
     unseated: "{0} without a seat", skinUnknown: "Its style “{0}” is not available here: drawn as Desks.", closed: "Closed", desks: "Desks", tapAgain: "Tap again to open the chat",
@@ -68,10 +72,10 @@ register("orgo", {
     b_paused: "Zzz…|Back later", b_stopped: "Off duty|Zzz…", b_needs: "Need you!|A question for you|Over here!",
     b_crashed: "Ouch, crashed|Help!", b_stuck: "Hmm, stuck?|Still thinking…",
     hideAsleep: "Hide paused and stopped", layoutIgnored: "Its saved layout does not fit this style: drawn as the style's own.",
-    fit: "Fit the office", overview: "Overview: click to move there",
+    fit: "Fit the office", overview: "Overview: click to move there", fullscreen: "Fullscreen", exitFullscreen: "Exit fullscreen",
   },
   "zh-TW": {
-    label: "辦公室：每個 team 是一間房間，每個 instance 一張桌子；General 和未加入 team 的 instance 在大廳。拖曳平移；滾輪、雙指、+ 和 − 縮放，0 顯示整個場景。",
+    label: "辦公室：每個 team 是一間房間，每個 instance 一張桌子；General 和未加入 team 的 instance 在大廳。拖曳平移；滾輪、雙指、+ 和 − 縮放，0 顯示整個場景，F 切換全螢幕。",
     office: "辦公室", allOffice: "整個 fleet", show: "顯示", allTeams: "所有 team", lobby: "大廳（General、未加入 team）", lobbyRoom: "大廳",
     people: "成員", peopleN: "成員（{0}）", findPerson: "尋找成員", everyone: "顯示全部", nobody: "沒有符合這個篩選的成員。",
     unseated: "{0} 位沒有座位", skinUnknown: "這裡沒有它的風格「{0}」：以辦公桌顯示。", closed: "休息中", desks: "桌子", tapAgain: "再點一下開啟聊天",
@@ -81,7 +85,7 @@ register("orgo", {
     b_paused: "Zzz…|晚點回來", b_stopped: "下班了|Zzz…", b_needs: "需要你！|有個問題|在這裡！",
     b_crashed: "糟糕，當掉了|救命！", b_stuck: "嗯，卡住了？|還在想…",
     hideAsleep: "隱藏暫停與停止的成員", layoutIgnored: "它儲存的配置不適用這個風格：以風格本身的配置顯示。",
-    fit: "顯示整個辦公室", overview: "總覽：點一下移到那裡",
+    fit: "顯示整個辦公室", overview: "總覽：點一下移到那裡", fullscreen: "全螢幕", exitFullscreen: "結束全螢幕",
   },
 });
 const to = (k, ...v) => t(`orgo.${k}`, ...v);
@@ -97,6 +101,10 @@ const deviceRatio = () => Math.max(0.5, Math.min(4, Number(globalThis.devicePixe
 /** The stage's size before it is measured (a test's page has none). */
 const SIZE0 = { w: 960, h: 600 };
 const PAN_KEYS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+/** Typing: no single-key shortcut (the `f` of fullscreen) there. */
+const typing = (el) => !!el && (el.tagName === "INPUT" || el.tagName === "SELECT" || el.tagName === "TEXTAREA" || el.isContentEditable === true);
+/** The element the page has fullscreen (standard, else webkit's), or null. */
+const fullscreenEl = () => { const d = globalThis.document; return (d && (d.fullscreenElement || d.webkitFullscreenElement)) || null; };
 /** A pack's background, sampled once for its matte (fleet-office-view.js edgeMatte): picture → #rrggbb or null. */
 const MATTES = new WeakMap();
 function sampledMatte(img) {
@@ -197,6 +205,9 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   const [pal, setPal] = useState(DEFAULT_PAL);                      // the tokens in force (read once the stage is there)
   const [tip, setTip] = useState(null);                               // the desk key the tooltip is for
   const stageRef = useRef(null), canvasRef = useRef(null), tipRef = useRef(null), lastType = useRef("mouse");
+  // Fullscreen: null, "native" (the Fullscreen API) or "immersive" (the CSS cover); per visit, never kept.
+  const ooRef = useRef(null), [fs, setFs] = useState(null), fsRef = useRef(null), fsAsked = useRef(false), fsTarget = useRef(null);
+  fsRef.current = fs;
   const flights = useMemo(() => createFlights(), []);
   const walkers = useMemo(() => createWalkers(), []);
   const seatsRef = useRef(new Map());                                 // the zones layout's last seats: kept where they can be
@@ -415,6 +426,75 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     setView(centreOn(v, size, b.x + b.w / 2, b.y + b.h / 2));
   };
 
+  // ── Fullscreen: the API on the container where the page may (its promise, or webkit's events, say how it went), else
+  // immersive; leaving undoes whichever it was ──
+  const enterFs = () => {
+    const el = ooRef.current, d = globalThis.document;
+    if (!el || fsRef.current) return;
+    const req = el.requestFullscreen || el.webkitRequestFullscreen;
+    const enabled = d ? (d.fullscreenEnabled ?? d.webkitFullscreenEnabled) : false;
+    if (typeof req !== "function" || enabled === false) { setFs("immersive"); return; }
+    fsAsked.current = true; fsTarget.current = el;
+    let r;
+    try { r = req.call(el); } catch { fsAsked.current = false; setFs("immersive"); return; }
+    if (r && typeof r.then === "function") {
+      r.then(() => { if (ooRef.current === el && fullscreenEl() === el) setFs("native"); },
+        () => { if (fsAsked.current && ooRef.current === el) { fsAsked.current = false; setFs("immersive"); } });
+    }
+  };
+  const exitFs = () => {
+    fsAsked.current = false;
+    const el = ooRef.current, d = globalThis.document;
+    if (el && d && fullscreenEl() === el) {
+      const ex = d.exitFullscreen || d.webkitExitFullscreen;
+      try { const r = typeof ex === "function" ? ex.call(d) : null; if (r && typeof r.catch === "function") r.catch(() => {}); } catch { /* already out */ }
+    }
+    setFs(null);
+  };
+  const toggleFs = () => { if (fsRef.current) exitFs(); else enterFs(); };
+  const editingRef = useRef(false);
+  editingRef.current = editing;
+  // The browser's own way out (its Esc, its UI) and its refusals; `f` and Esc; leaving the page leaves fullscreen.
+  useEffect(() => {
+    const d = globalThis.document;
+    if (!d || typeof d.addEventListener !== "function") return undefined;
+    const change = () => {
+      const on = !!ooRef.current && fullscreenEl() === ooRef.current;
+      if (on) fsAsked.current = false;
+      setFs((cur) => (on ? "native" : cur === "native" ? null : cur));
+    };
+    const refused = () => { if (!fsAsked.current) return; fsAsked.current = false; setFs("immersive"); };
+    const key = (e) => {
+      if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+      if (e.key === "Escape") { if (fsRef.current === "immersive") { e.preventDefault(); exitFs(); } return; }
+      if (e.key !== "f" && e.key !== "F") return;
+      const el = ooRef.current, tg = e.target;
+      // Only here: from inside the view, or with nothing focused (never while typing, nor over Edit offices' dialog).
+      if (!el || typing(tg) || editingRef.current || !(tg === d.body || tg === d.documentElement || tg === d || (tg && el.contains(tg)))) return;
+      e.preventDefault();
+      toggleFs();
+    };
+    const evs = [["fullscreenchange", change], ["webkitfullscreenchange", change], ["fullscreenerror", refused], ["webkitfullscreenerror", refused], ["keydown", key]];
+    for (const [n, fn] of evs) d.addEventListener(n, fn);
+    return () => {
+      for (const [n, fn] of evs) d.removeEventListener(n, fn);
+      fsAsked.current = false;
+      const el = fullscreenEl(), ex = d.exitFullscreen || d.webkitExitFullscreen;
+      if (el && (el === ooRef.current || el === fsTarget.current) && typeof ex === "function") {
+        try { const r = ex.call(d); if (r && typeof r.catch === "function") r.catch(() => {}); } catch { /* already out */ }
+      }
+    };
+  }, []);
+  // Immersive: the dashboard's band the view sits in is lifted over the header, the tabs and the nav (app.css).
+  useEffect(() => {
+    const root = fs === "immersive" ? globalThis.document?.documentElement : null;
+    if (!root || !root.classList) return undefined;
+    root.classList.add("oo-immersive");
+    return () => root.classList.remove("oo-immersive");
+  }, [fs]);
+  /** A desk opens its chat: out of fullscreen first (the chat is beside the view, or instead of it). */
+  const open = (name) => { if (fsRef.current) exitFs(); onOpen(name); };
+
   // ── Drawing: the back and front layers are pictures of the scene at the view's resolution (remade when the office
   // or the zoom changes, never on a pan); each frame draws the matte, the layers, the people and the items in the air ──
   const scene = useRef(null);
@@ -632,7 +712,7 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     const d = deskOf(e);
     if (!d || !d.node.i) { setTip(null); return; }
     if (lastType.current === "touch" && tip !== d.key) { setTip(d.key); return; }   // a first tap shows; a second opens
-    onOpen(d.node.name);
+    open(d.node.name);
   };
   const onMini = (e) => {
     const w = miniPoint(miniRef.current ? miniRef.current.getBoundingClientRect() : null, { x: 0, y: 0, w: L.width, h: L.height }, e.clientX, e.clientY);
@@ -680,13 +760,14 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   // The overview: the scene's rooms (or areas) and a dot for each person (a call in its colour), the view's frame on it.
   const miniRects = zones ? Object.values(L.areas || {}).map((a) => ({ key: a.name, ...a.rect })) : L.rooms.map((r) => ({ key: r.key, x: r.x, y: r.y, w: r.w, h: r.h }));
   const dotR = Math.max(L.width, L.height) / 90;
-  return html`<div class="oo">
+  const officeSelect = (cls) => html`<select class=${`tb-select ${cls}`} value=${layout ? layout.officeId : custom ? custom.id : AUTO_ID} disabled=${!!layout}
+    aria-label=${to("office")} onChange=${(e) => pick(e.target.value)}>
+      <option value=${AUTO_ID}>${to("allOffice")}</option>
+      ${stored.map((o) => html`<option key=${o.id} value=${o.id}>${o.name}</option>`)}
+    </select>`;
+  return html`<div class=${`oo${fs ? ` fs ${fs}` : ""}`} ref=${ooRef}>
     <div class="oo-bar">
-      <label class="oo-pick"><span class="oo-pick-label">${to("office")}</span>
-        <select class="tb-select oo-office" value=${layout ? layout.officeId : custom ? custom.id : AUTO_ID} disabled=${!!layout} onChange=${(e) => pick(e.target.value)}>
-          <option value=${AUTO_ID}>${to("allOffice")}</option>
-          ${stored.map((o) => html`<option key=${o.id} value=${o.id}>${o.name}</option>`)}
-        </select></label>
+      <label class="oo-pick"><span class="oo-pick-label">${to("office")}</span>${officeSelect("oo-office")}</label>
       ${auto ? html`<label class="oo-pick"><span class="oo-pick-label">${to("styleLabel")}</span>
         <select class="tb-select" value=${STYLES.includes(style) || packs.some((pk) => pk.id === style) ? style : skin.id} onChange=${(e) => { store.saveSkin(e.target.value); setStyle(e.target.value); setTip(null); }}>
           ${STYLES.map((id) => html`<option key=${id} value=${id}>${to(`style_${id}`)}</option>`)}
@@ -722,14 +803,16 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
         const nt = nodeText(d.node), cap = caption(officePose(d.node.state), d.node.state);
         return html`<li key=${d.key}>${d.node.i
           ? html`<button type="button" class="oo-desk" data-name=${d.node.name} aria-label=${`${nt.full} · ${cap}. ${t("orgc.openChat")}`}
-              onFocus=${() => setTip(d.key)} onBlur=${() => setTip(null)} onClick=${() => onOpen(d.node.name)}>${nt.primary}</button>`
+              onFocus=${() => setTip(d.key)} onBlur=${() => setTip(null)} onClick=${() => open(d.node.name)}>${nt.primary}</button>`
           : html`<span class="oo-desk" data-name=${d.node.name}>${nt.full}</span>`}</li>`;
       })}</ul>
       <div class="oc-zoom oo-zoom" role="group" aria-label=${t("orgc.view")}>
         <button type="button" class="icon-btn oo-zoom-in" aria-label=${t("orgc.zoomIn")} title=${t("orgc.zoomIn")} onClick=${() => zoomStep(1)}><${Icon} name="plus" size=${16} /></button>
         <button type="button" class="icon-btn oo-zoom-out" aria-label=${t("orgc.zoomOut")} title=${t("orgc.zoomOut")} onClick=${() => zoomStep(-1)}><${Icon} name="minus" size=${16} /></button>
         <button type="button" class="icon-btn oo-fit" aria-label=${to("fit")} title=${to("fit")} onClick=${fit}><${Icon} name="fitwidth" size=${16} /></button>
+        <button type="button" class="icon-btn oo-fs" aria-label=${to(fs ? "exitFullscreen" : "fullscreen")} title=${to(fs ? "exitFullscreen" : "fullscreen")} onClick=${toggleFs}><${Icon} name=${fs ? "fullscreenexit" : "fullscreen"} size=${16} /></button>
       </div>
+      ${fs ? html`<div class="oo-fs-bar">${officeSelect("oo-fs-office")}</div>` : null}
       <svg ref=${miniRef} class="oc-mini oo-mini" viewBox=${`0 0 ${Math.max(1, L.width)} ${Math.max(1, L.height)}`} aria-hidden="true" onClick=${onMini}>
         <title>${to("overview")}</title>
         <rect class="oo-mini-matte" x=${-L.width} y=${-L.height} width=${L.width * 3} height=${L.height * 3} fill=${matte} />
