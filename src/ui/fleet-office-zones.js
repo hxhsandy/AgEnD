@@ -11,17 +11,29 @@ export function zoneOf(pack, state) {
   return z[state] || z.default || Object.keys(pack.areas)[0];
 }
 
-/** How far apart overflow spots are, and how far they stay from the area's seats (logical units). */
-export const OVERFLOW = { STEP: 56, CLEAR: 40, EDGE: 24 };
-/** An area's overflow spots, for when its seats are taken: a grid inside its rect, clear of its seats, in reading order. */
-export function overflowSpots(area) {
-  const out = [], { x, y, w, h } = area.rect;
-  for (let sy = y + OVERFLOW.EDGE + 30; sy <= y + h - OVERFLOW.EDGE; sy += OVERFLOW.STEP) {
-    for (let sx = x + OVERFLOW.EDGE; sx <= x + w - OVERFLOW.EDGE; sx += OVERFLOW.STEP) {
-      if (area.seats.every((s) => Math.hypot(s.x - sx, s.y - sy) >= OVERFLOW.CLEAR)) out.push({ x: sx, y: sy });
+/**
+ * How far apart overflow spots are, and how far they stay from the area's seats (logical units); TITLE: the band at
+ * the top of an area its name is written in, kept clear. A crowded area packs tighter (STEPS, #2513: 70 instances, 42
+ * idle, piled up in the lounge) before anyone is left to the "+N" count.
+ */
+export const OVERFLOW = { STEP: 56, CLEAR: 40, EDGE: 24, TITLE: 30, STEPS: [56, 46, 38, 32] };
+function spotsAt(area, step) {
+  const out = [], { x, y, w, h } = area.rect, clear = step === OVERFLOW.STEP ? OVERFLOW.CLEAR : Math.round(step * 0.72);
+  for (let sy = y + OVERFLOW.EDGE + OVERFLOW.TITLE; sy <= y + h - OVERFLOW.EDGE; sy += step) {
+    for (let sx = x + OVERFLOW.EDGE; sx <= x + w - OVERFLOW.EDGE; sx += step) {
+      if (area.seats.every((s) => Math.hypot(s.x - sx, s.y - sy) >= clear)) out.push({ x: sx, y: sy });
     }
   }
   return out;
+}
+/**
+ * An area's overflow spots, for when its seats are taken: a tidy grid inside its rect, clear of its seats and its
+ * title, in reading order. `need`: how many are wanted — the widest spacing that fits them all, else the tightest.
+ */
+export function overflowSpots(area, need = 0) {
+  let spots = [];
+  for (const step of OVERFLOW.STEPS) { spots = spotsAt(area, step); if (spots.length >= need) return spots; }
+  return spots;
 }
 
 /**
@@ -31,8 +43,12 @@ export function overflowSpots(area) {
  * Returns { seats: Map name → { area, slot, x, y }, crowd: Map }.
  */
 export function assignSeats(pack, wants, prev = new Map()) {
-  const seats = new Map(), crowd = new Map(), taken = new Map(), spill = new Map();
-  const spotsOf = (area) => { if (!spill.has(area)) spill.set(area, overflowSpots(pack.areas[area])); return spill.get(area); };
+  const seats = new Map(), crowd = new Map(), taken = new Map(), spill = new Map(), demand = new Map();
+  for (const w of wants) demand.set(w.area, (demand.get(w.area) || 0) + 1);
+  const spotsOf = (area) => {
+    if (!spill.has(area)) spill.set(area, overflowSpots(pack.areas[area], Math.max(0, (demand.get(area) || 0) - pack.areas[area].seats.length)));
+    return spill.get(area);
+  };
   const pos = (area, slot) => (slot >= 0 ? pack.areas[area].seats[slot] : spotsOf(area)[-slot - 1]);
   const usedIn = (area) => { if (!taken.has(area)) taken.set(area, new Set()); return taken.get(area); };
   const give = (name, area, slot) => { const p = pos(area, slot); usedIn(area).add(slot); seats.set(name, { area, slot, x: p.x, y: p.y }); };
@@ -49,23 +65,25 @@ export function assignSeats(pack, wants, prev = new Map()) {
     if (slot === null) crowd.set(w.area, (crowd.get(w.area) || 0) + 1);
     else give(w.name, w.area, slot);
   }
-  return { seats, crowd };
+  // Over capacity: more people want the area than it has seats (their bubbles and tags are thinned, fleet-office.js).
+  const over = new Set([...demand].filter(([a, n]) => pack.areas[a] && n > pack.areas[a].seats.length).map(([a]) => a));
+  return { seats, crowd, over };
 }
 
 /**
  * The zones layout for `nodes` (buildOrgView's) on a pack: everyone but the missing at their seat. The same shape as
  * the desks layout (rooms → desks with a seat), in logical units, plus `mode: "zones"`, the pack's areas and graph, the
- * seats given (`seats`, the next call's `prev`) and `crowd`.
+ * seats given (`seats`, the next call's `prev`), `crowd` and `over` (the areas over capacity).
  */
 export function zonesLayout(pack, nodes, prev = new Map()) {
   const wants = nodes.filter((n) => n.state !== "missing").map((n) => ({ name: n.name, area: zoneOf(pack, n.state) }));
-  const { seats, crowd } = assignSeats(pack, wants, prev);
+  const { seats, crowd, over } = assignSeats(pack, wants, prev);
   const desks = nodes.filter((n) => seats.has(n.name)).map((n) => {
     const s = seats.get(n.name);
     return { key: `zone/${n.name}`, node: n, x: s.x - 24, y: s.y - 52, w: 48, h: 66, seat: { x: s.x, y: s.y }, wp: null, area: s.area, slot: s.slot };
   });
   return { mode: "zones", rooms: [{ key: "\u0000zones", name: null, lobby: false, x: 0, y: 0, w: LOGICAL.w, h: LOGICAL.h, desks }], areas: pack.areas,
-    waypoints: pack.waypoints || [], edges: pack.edges || [], door: pack.door, width: LOGICAL.w, height: LOGICAL.h, seats, crowd };
+    waypoints: pack.waypoints || [], edges: pack.edges || [], door: pack.door, width: LOGICAL.w, height: LOGICAL.h, seats, crowd, over };
 }
 
 // ── Walking ──
@@ -143,11 +161,13 @@ export function bubbleAt(name, state, ms, lines) {
  * { key, calling, shown, box, tail? } with `box` the bubble's whole box ({ x, y, w, h }, for its whole line, so it never
  * moves while typing out) and `tail` the point its tail reaches: the strip from the box down to it is kept clear too. The ones calling for the person go first (they always show), then the one that started earliest
  * (the most typed out) — one already showing keeps its place. Each takes its spot, or one row up (`lift`) when that is
- * free; else it waits for another round. Returns the placed ones, each with its `dy` (0 or -lift).
+ * free; else it waits for another round. Returns the placed ones, each with its `dy` (0 or -lift). `rank` (optional,
+ * bubbleRank): a lower one goes first (else: calling 0, the rest 2); `blocked`: boxes no bubble may cover (name tags).
  */
-export function placeBubbles(items, lift = 22) {
-  const order = [...items].sort((a, b) => (Number(b.calling) - Number(a.calling)) || (b.shown - a.shown) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  const taken = [], out = [];
+export function placeBubbles(items, lift = 22, blocked = []) {
+  const rank = (it) => (it.rank ?? (it.calling ? 0 : 2));
+  const order = [...items].sort((a, b) => (rank(a) - rank(b)) || (b.shown - a.shown) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  const taken = [...blocked], out = [];
   const hits = (r) => taken.some((t) => r.x < t.x + t.w && t.x < r.x + r.w && r.y < t.y + t.h && t.y < r.y + r.h);
   for (const it of order) {
     for (const dy of [0, -lift]) {
@@ -157,6 +177,31 @@ export function placeBubbles(items, lift = 22) {
       taken.push(r); if (t) taken.push(t); out.push({ ...it, dy });
       break;
     }
+  }
+  return out;
+}
+
+/** Who speaks first when bubbles compete: calling for the person, then working, then everyone else. */
+export const bubbleRank = (state) => (CALLING.has(state) ? 0 : state === "working" ? 1 : 2);
+/** At most this many bubbles in an area over capacity (#2513). */
+export const CROWD_BUBBLES = 3;
+/** States whose bubbles are left out in an area over capacity (the chatter; a call or work still speaks). */
+const QUIET_IN_CROWD = new Set(["idle", "paused", "stopped", "starting", "queued"]);
+/**
+ * The bubbles a frame may show (#2513): in an area over capacity (`over`), none for idle or asleep people and at most
+ * CROWD_BUBBLES, the highest ranked first (bubbleRank); elsewhere all of them. `items`: { area, state, shown, key, … }.
+ */
+export function thinBubbles(items, over) {
+  const byArea = new Map(), out = [];
+  for (const it of items) {
+    if (!over || !over.has(it.area)) { out.push(it); continue; }
+    if (QUIET_IN_CROWD.has(it.state)) continue;
+    if (!byArea.has(it.area)) byArea.set(it.area, []);
+    byArea.get(it.area).push(it);
+  }
+  for (const list of byArea.values()) {
+    list.sort((a, b) => (bubbleRank(a.state) - bubbleRank(b.state)) || (b.shown - a.shown) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    out.push(...list.slice(0, CROWD_BUBBLES));
   }
   return out;
 }

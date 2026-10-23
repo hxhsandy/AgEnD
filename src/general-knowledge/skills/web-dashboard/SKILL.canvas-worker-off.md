@@ -248,11 +248,21 @@ blinking light (needs you, crashed, looks stuck). With **Live** on, each message
 desk to desk along the corridors in the Key's colours; a delegation in progress is a purple folder on the worker's
 desk. Hover (or tap once) a desk for its name, state and backend; click (or tap again) opens the chat. **Find** dims
 the rest. **Show** picks a team or the Lobby and **People** pins chosen instances (both kept per browser); the
-**Office** switcher lists offices kept on the host (`web-offices.json`, `GET`/`PUT /ui/offices`; changing them takes
-an admin session, never the public link — v1 has no editor). **Style** (per browser): **Desks** (the default) or
-**Studio** — one scene (Work, Lounge, Help desk, Nap corner) where each instance walks to the area for its state.
-Now and then someone says a short line for their state in a bubble (never message content). Reduced motion: still
-poses, nothing in the air, bubbles shown whole.
+**Office** switcher lists offices kept on the host (`web-offices.json`, `GET`/`PUT /ui/offices`). An admin session
+(never a read-only one, a guest or the public link) gets **Edit offices**: add, rename and delete offices, pick who is
+in each (whole teams or single instances; none = everyone) and its style, and upload or delete **skin packs** (an
+artist's pictures: `manifest.json` plus PNGs, format v1, kept in `web-office-skins/` in the AgEnD home; the host
+checks every rule — PNG only, each strip exactly frames·w × h, a 16:9 background, size caps — and never changes a
+pack). **Style** (per browser for the whole fleet, per office for a stored one): **Desks** (the default),
+**Studio** — one scene (Work, Lounge, Help desk, Nap corner) where each instance walks to the area for its state —
+or an uploaded pack; one the page cannot load is drawn as Desks with a note. On a stored office in Studio or a pack,
+**Edit layout** (admin only) shows a 1280×720 coordinate grid and lets you drag seats, furniture, the door and
+waypoints (or Tab to one and use the arrow keys, Shift for 10), add or remove waypoints and join or unjoin
+corridors; **Save layout** keeps the moves as that office's overrides (the pack stays as uploaded), **Reset** goes
+back to the pack's own. A crowded area packs extra people into a tighter grid, then shows "+N" in its corner; there
+only calls and work get bubbles (a few at most) and name tags show on hover or focus. **Hide paused and stopped**
+(per browser, off by default) leaves the sleepers out. Now and then someone says a short line for their state in a
+bubble (never message content). Reduced motion: still poses, nothing in the air, bubbles shown whole.
 
 **Live traffic** (**Live** switch, on by default; **Key** in the toolbar explains it, as a strip above the canvas): a line for each message between instances.
 Colour by kind — task (delegate_task) purple, send/query/update teal, report pink, broadcast orange; between teams

@@ -1,4 +1,6 @@
-// The Office view's skin-pack format, v1 (fleet-office-skin.js draws a checked pack; nothing loads one from outside yet).
+// The Office view's skin-pack format, v1 (fleet-office-skin.js draws a checked pack; an admin uploads one — Fleet → Org
+// chart → Office → Edit offices → Upload a skin pack — and the host keeps it, src/web-office-skins.ts, checking it with
+// this same module: the page and the host agree on every rule).
 // Its shape follows Star-Office-UI's scene (MIT; github.com/ringhyacinth/Star-Office-UI): one background on a 16:9
 // logical canvas, named areas with ordered seat slots, furniture with a depth, and a state → area map. No code or art of
 // it is used here — the idea of the format only.
@@ -44,8 +46,24 @@
 // "..". The check is strict: an unknown key, a value out of range or a name that refers to nothing refuses the pack,
 // with where it broke.
 //
-// TODO(office editor): the planned editor follows the reference's approach — a "show coordinates" overlay on the
-// canvas and dragging furniture and seats, the positions saved into the office (PUT /ui/offices) — out of v1.
+// The host keeps an uploaded pack whole and never changes it: every PNG starts with its signature, a STRIP's image is
+// exactly frames·w × h, the background is 16:9, and each file and the pack have a size cap (web-office-skins.ts).
+//
+// ── Layout overrides (the Office view's "Edit layout": a stored office's own positions on a zones pack) ──
+//
+// An office may keep `overrides` beside its skin — the pack stays as it was uploaded; the office moves things on it:
+//
+//   { "pack": "cozy",                                 the pack they were made on (on another pack they are ignored)
+//     "seats": { "desks": [[120, 220], …] },          an area's seats: as many as the pack's, each inside the area's rect
+//     "furniture": { "rack": [1000, 150] },           an item's (x, y)
+//     "door": [640, 700],
+//     "waypoints": [{ "id": "hall", "x": 640, "y": 600 }, …], "edges": [["hall", "east"], …] }
+//                                                     the walkable graph, replaced whole (edges need waypoints)
+//
+// Every coordinate is on the same 1280×720 logical canvas, in the same ranges as the pack's. checkLayoutOverrides is
+// the shape (the host checks it on every PUT /ui/offices); applyOverrides puts them on a checked pack, refusing a
+// seat outside its area, an area or furniture the pack does not have, or a seat count that differs (the host checks
+// that too, for a pack it keeps).
 
 export const LOGICAL = { w: 1280, h: 720 };
 /** The people's depth: furniture below it is drawn under them, the rest over them. */
@@ -197,3 +215,122 @@ export const skinPackOk = (x) => { const r = checkSkinPack(x); return r.ok ? r.p
 export const packImages = (pack) => [...new Set([pack.background, pack.room.floor, pack.room.wall, pack.desk.back, pack.desk.front, pack.desk.lit,
   ...pack.furniture.flatMap((f) => [f.sprite.src, f.activeSprite && f.activeSprite.src]),
   ...Object.values(pack.characters).flatMap((s) => Object.values(s).map((st) => st.src)), ...Object.values(pack.props).map((st) => st.src)].filter(Boolean))];
+
+/** Every frame strip a checked pack names, with where (the host checks each image is frames·w × h). */
+export function packStrips(pack) {
+  const out = [];
+  for (const f of pack.furniture) { out.push({ at: `furniture.${f.id}.sprite`, strip: f.sprite }); if (f.activeSprite) out.push({ at: `furniture.${f.id}.activeSprite`, strip: f.activeSprite }); }
+  for (const [k, set] of Object.entries(pack.characters)) for (const [pose, st] of Object.entries(set)) out.push({ at: `characters.${k}.${pose}`, strip: st });
+  for (const [k, st] of Object.entries(pack.props)) out.push({ at: `props.${k}`, strip: st });
+  return out;
+}
+
+// ── Layout overrides ──
+
+const OV_LIMIT = { areas: LIMIT.areas, seats: LIMIT.seats, furniture: LIMIT.furniture, waypoints: LIMIT.waypoints, edges: LIMIT.edges };
+/** An office's layout overrides, strictly (their shape and ranges): { ok: true, overrides } or { ok: false, error }. */
+export function checkLayoutOverrides(x) {
+  try {
+    obj(x, "overrides");
+    keys(x, ["pack", "seats", "furniture", "door", "waypoints", "edges"], "overrides");
+    if (typeof x.pack !== "string" || !ID.test(x.pack)) throw new Refused("overrides.pack", "1–40 letters, digits, _ or -");
+    const out = { pack: x.pack };
+    if (x.seats !== undefined) {
+      obj(x.seats, "overrides.seats");
+      if (Object.keys(x.seats).length > OV_LIMIT.areas) throw new Refused("overrides.seats", `at most ${OV_LIMIT.areas} areas`);
+      out.seats = {};
+      for (const [area, list0] of Object.entries(x.seats)) {
+        const at = `overrides.seats.${area}`;
+        if (!ID.test(area)) throw new Refused(at, "an area's name");
+        const pts = list(list0, OV_LIMIT.seats, at).map((p, i) => { const q = point(p, `${at}[${i}]`); return [q.x, q.y]; });
+        if (!pts.length) throw new Refused(at, "at least one seat");
+        out.seats[area] = pts;
+      }
+    }
+    if (x.furniture !== undefined) {
+      obj(x.furniture, "overrides.furniture");
+      if (Object.keys(x.furniture).length > OV_LIMIT.furniture) throw new Refused("overrides.furniture", `at most ${OV_LIMIT.furniture}`);
+      out.furniture = {};
+      for (const [id, p] of Object.entries(x.furniture)) {
+        if (!ID.test(id)) throw new Refused(`overrides.furniture.${id}`, "an item's id");
+        const q = point(p, `overrides.furniture.${id}`);
+        out.furniture[id] = [q.x, q.y];
+      }
+    }
+    if (x.door !== undefined) { const q = point(x.door, "overrides.door"); out.door = [q.x, q.y]; }
+    if (x.edges !== undefined && x.waypoints === undefined) throw new Refused("overrides.edges", "only with waypoints");
+    if (x.waypoints !== undefined) {
+      const ids = new Set();
+      out.waypoints = list(x.waypoints, OV_LIMIT.waypoints, "overrides.waypoints").map((w, i) => {
+        const at = `overrides.waypoints[${i}]`;
+        obj(w, at); keys(w, ["id", "x", "y"], at);
+        if (typeof w.id !== "string" || !ID.test(w.id) || ids.has(w.id)) throw new Refused(`${at}.id`, "a new name of letters, digits, _ or -");
+        ids.add(w.id);
+        return { id: w.id, x: num(w.x, 0, LOGICAL.w, `${at}.x`), y: num(w.y, 0, LOGICAL.h, `${at}.y`) };
+      });
+      const seen = new Set();
+      out.edges = list(x.edges ?? [], OV_LIMIT.edges, "overrides.edges").map((e, i) => {
+        if (!Array.isArray(e) || e.length !== 2 || !ids.has(e[0]) || !ids.has(e[1]) || e[0] === e[1]) throw new Refused(`overrides.edges[${i}]`, "two different waypoint ids");
+        const k = e[0] < e[1] ? `${e[0]}\u0000${e[1]}` : `${e[1]}\u0000${e[0]}`;
+        if (seen.has(k)) throw new Refused(`overrides.edges[${i}]`, "joined twice");
+        seen.add(k);
+        return [e[0], e[1]];
+      });
+    }
+    return { ok: true, overrides: out };
+  } catch (err) {
+    if (err instanceof Refused) return { ok: false, error: err.message };
+    throw err;
+  }
+}
+
+/**
+ * A checked pack with an office's checked overrides on it: { ok: true, pack } (a new object; the pack is untouched) or
+ * { ok: false, error }. Overrides made on another pack change nothing (ok, the pack as it is).
+ */
+export function applyOverrides(pack, ov) {
+  try {
+    if (!ov || ov.pack !== pack.id) return { ok: true, pack };
+    const areas = { ...pack.areas };
+    for (const [name, pts] of Object.entries(ov.seats || {})) {
+      const a = pack.areas[name], at = `overrides.seats.${name}`;
+      if (!a) throw new Refused(at, "an area the pack defines");
+      if (pts.length !== a.seats.length) throw new Refused(at, `${a.seats.length} seats, as the pack has`);
+      const r = a.rect;
+      areas[name] = { ...a, seats: pts.map(([x, y], i) => {
+        if (x < r.x || x > r.x + r.w || y < r.y || y > r.y + r.h) throw new Refused(`${at}[${i}]`, "outside its area's rect");
+        return { x, y };
+      }) };
+    }
+    const fids = new Set(pack.furniture.map((f) => f.id));
+    for (const id of Object.keys(ov.furniture || {})) if (!fids.has(id)) throw new Refused(`overrides.furniture.${id}`, "an item the pack has");
+    const furniture = pack.furniture.map((f) => (ov.furniture && ov.furniture[f.id] ? { ...f, x: ov.furniture[f.id][0], y: ov.furniture[f.id][1] } : f));
+    const door = ov.door ? { x: ov.door[0], y: ov.door[1] } : pack.door;
+    const graph = ov.waypoints ? { waypoints: ov.waypoints.map((w) => ({ ...w })), edges: (ov.edges || []).map((e) => [e[0], e[1]]) } : { waypoints: pack.waypoints, edges: pack.edges };
+    return { ok: true, pack: { ...pack, areas, furniture, door, ...graph } };
+  } catch (err) {
+    if (err instanceof Refused) return { ok: false, error: err.message };
+    throw err;
+  }
+}
+
+/**
+ * What an edited layout keeps as overrides: only the parts that differ from the pack's own (`edited` is a pack with
+ * the same areas and furniture, positions moved); null when nothing does (the office goes back to the pack's).
+ */
+export function overridesBetween(pack, edited) {
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const ov = { pack: pack.id };
+  for (const [name, a] of Object.entries(pack.areas)) {
+    const e = edited.areas[name];
+    if (e && !same(a.seats, e.seats)) (ov.seats ||= {})[name] = e.seats.map((s) => [s.x, s.y]);
+  }
+  const at = new Map(pack.furniture.map((f) => [f.id, f]));
+  for (const f of edited.furniture) { const o = at.get(f.id); if (o && (o.x !== f.x || o.y !== f.y)) (ov.furniture ||= {})[f.id] = [f.x, f.y]; }
+  if (pack.door.x !== edited.door.x || pack.door.y !== edited.door.y) ov.door = [edited.door.x, edited.door.y];
+  if (!same(pack.waypoints, edited.waypoints) || !same(pack.edges, edited.edges)) {
+    ov.waypoints = edited.waypoints.map((w) => ({ id: w.id, x: w.x, y: w.y }));
+    ov.edges = edited.edges.map((e) => [e[0], e[1]]);
+  }
+  return Object.keys(ov).length > 1 ? ov : null;
+}

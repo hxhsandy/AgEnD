@@ -210,6 +210,7 @@ import { agendVersion } from "./agent-whats-new.js";
 import { OwnerCssStore } from "./web-owner-css-store.js";
 import { ThemeStore } from "./web-theme-store.js";
 import { OfficeStore, OfficeWriteLimiter } from "./web-office-store.js";
+import { OfficeSkinStore } from "./web-office-skins.js";
 import { WebAppearance } from "./web-appearance.js";
 import { WebEffectLibrary } from "./web-effect-library.js";
 import { WebEffectTrials } from "./web-effect-trials.js";
@@ -1475,7 +1476,12 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
   }
   private officeStoreInstance?: OfficeStore;
   /** Fleet → Org chart → Office: the offices people made (web-offices.json, beside web-themes.json). */
-  get officeStore(): OfficeStore { return (this.officeStoreInstance ??= new OfficeStore(this.dataDir)); }
+  get officeStore(): OfficeStore { return (this.officeStoreInstance ??= new OfficeStore(this.dataDir, id => this.officeSkins.pack(id))); }
+  private officeSkinsInstance?: OfficeSkinStore;
+  /** #2513: the Office view's uploaded skin packs (<AGEND_HOME>/web-office-skins/). */
+  get officeSkins(): OfficeSkinStore { return (this.officeSkinsInstance ??= new OfficeSkinStore(this.dataDir)); }
+  /** How often a person may upload or delete a skin pack; memory only, as the offices' limiter. */
+  readonly officeSkinWrites = new OfficeWriteLimiter(undefined, { perWindow: 10, windowMs: 60_000 });
   /** How often a person may save the offices (PUT /ui/offices); memory only, as the appearance limiter. */
   readonly officeWrites = new OfficeWriteLimiter();
   /** #1629: the theme tools, a person's reset and lock, and the one appearance rate limiter (shared with effects). */
