@@ -272,6 +272,7 @@ import { KNOWN_BACKENDS, validateFleetConfig } from "./config-validator.js";
 import { isRemovedBackend, removedBackendMessage } from "./backend/removed.js";
 import { presentationState, interactionSummary, sameInteractionOwner } from "./interaction-observation.js";
 import type { WorkingStateObservation, WorkingStateReason, WorkingStateReference } from "./working-state-journal.js";
+import { describeSelfOom } from "./session-oom.js";
 import { assertNoSessionOomStop, readSessionOomStop, captureSessionOomRetry, clearSessionOomStopForRetry, SessionOomStoppedError, sessionOomStopHint, type SessionOomRetry } from "./session-oom-stop.js";
 import type { InstanceState, InstanceStateSnapshot, InteractionOwner, InteractionSnapshot } from "./backend/types.js";
 import { idleGateTimeoutLog } from "./idle-gate-log.js";
@@ -521,6 +522,10 @@ const CARRY_LARGE_BYTES = 256 * 1024 * 1024;
 export interface RestartOpts {
   freshStart?: boolean;
   explicit?: boolean;
+  /** Internal receipt captured when an OOM action was offered. */
+  sessionOomRetry?: SessionOomRetry;
+  /** Internal pre-invalidation owner fence for an unclear-OOM action. */
+  recoveryCurrent?: () => boolean;
   carry?: { backend: string; from: string | null; to: string | null; result?: CarryResult | null };
 }
 /** #1742: how long after a Telegram /web that could not reach an admin privately a bare /start counts as /start web. */
@@ -695,6 +700,7 @@ export interface ModelCatalog {
  */
 interface NonceButtonEntry {
   pendingChangeId?: string;
+  sessionOomRetry?: SessionOomRetry;
   confirmationCurrent?: () => boolean;
   confirmationAdmin?: (userId: string) => boolean;
   requesterUserId?: string;
@@ -867,6 +873,7 @@ interface PendingBackendSelect extends BackendMenuPlace {
 }
 const INTERACTIVE_ASSIST_CALLBACK_PREFIX = "interactive-assist:";
 const EXIT_RESTART_CALLBACK_PREFIX = "exit-restart:";
+const OOM_RETRY_CALLBACK_PREFIX = "oom-retry:";
 /** #1386: how long a paused instance's marker reason is reused before it is read again (transitions drop it at once). */
 const NEEDS_PAUSE_TTL_MS = 10_000;
 const HANG_CALLBACK_PREFIX = "hang:";
@@ -878,7 +885,7 @@ const CLEAR_CONFIRM_CALLBACK_PREFIX = "clear-confirm:";
  * group's approval, tips, and the per-user /model and /effort menus (which are not nonce entries at all).
  */
 const WEB_MIRRORED_PROMPT_PREFIXES: ReadonlySet<string> = new Set([
-  HANG_CALLBACK_PREFIX, EXIT_RESTART_CALLBACK_PREFIX, INTERACTIVE_ASSIST_CALLBACK_PREFIX,
+  HANG_CALLBACK_PREFIX, EXIT_RESTART_CALLBACK_PREFIX, OOM_RETRY_CALLBACK_PREFIX, INTERACTIVE_ASSIST_CALLBACK_PREFIX,
 ]);
 /**
  * Where a reply goes on a fleet with no chat platform (web track C4): it is "sent" by being shown in the
@@ -5572,6 +5579,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       // Superseded by a stop/restart (Phase 2a): that transition owns the
       // outcome. Retrying would start an instance the operator just stopped.
       if (err instanceof SupersededStartError) return false;
+      if (err instanceof SessionOomStoppedError) await this.notifySessionOomStop(name);
       if (this.stopOnUnsupportedCli(name, err, what)) return false;
       this.logger.error({ err, name }, `Failed to start ${what}`);
       this.scheduleStartupRetry(name, 0);
@@ -6043,7 +6051,15 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
 
   /** Restart a single instance, reloading fleet.yaml first to pick up config changes. */
   async restartSingleInstance(name: string, opts?: RestartOpts): Promise<void> {
-    const retry = opts?.explicit ? captureSessionOomRetry(this.getInstanceDir(name)) : undefined;
+    if (opts?.recoveryCurrent && !opts.recoveryCurrent()) throw new Error(t("exit.expired", name));
+    const retry = opts?.explicit ? opts.sessionOomRetry ?? captureSessionOomRetry(this.getInstanceDir(name)) : undefined;
+    if (opts?.sessionOomRetry) {
+      const current = captureSessionOomRetry(this.getInstanceDir(name));
+      // An unclear-cause stop intentionally has no tombstone. Only its live
+      // launch fence can authorize an absent-marker receipt; positive stops
+      // still require the offered durable revision.
+      if ((!retry?.revision && !opts.recoveryCurrent) || current.revision !== retry?.revision || current.legacyRevision !== retry?.legacyRevision) throw new SessionOomStoppedError(true);
+    }
     if (!opts?.explicit && this.sessionOomStopped(name)) throw new SessionOomStoppedError(false, readSessionOomStop(this.getInstanceDir(name)));
     // One restart at a time per instance. Multiple sources can ask concurrently
     // (MCP revival, /restart, pty_error, model failover); a second stop/start
@@ -13693,7 +13709,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     choices: Array<{ action: string; label: string }>;
     expiredText: string;
     deliver?: (choices: Choice[]) => Promise<PrivateSentMessage>;
-    extra?: Pick<NonceButtonEntry, "loginProfile" | "pendingChangeId" | "confirmationCurrent" | "confirmationAdmin" | "requesterUserId" | "publicExposureId" | "dashboardOwner" | "generalName" | "promptKind" | "authChannelId" | "allowAnyUser" | "tipId" | "classicGroupId" | "classicUserId" | "classicScope" | "classicReplyTo" | "assistFor">;
+    extra?: Pick<NonceButtonEntry, "sessionOomRetry" | "loginProfile" | "pendingChangeId" | "confirmationCurrent" | "confirmationAdmin" | "requesterUserId" | "publicExposureId" | "dashboardOwner" | "generalName" | "promptKind" | "authChannelId" | "allowAnyUser" | "tipId" | "classicGroupId" | "classicUserId" | "classicScope" | "classicReplyTo" | "assistFor">;
     timeoutMs?: number;
   }): Promise<string> {
     // 16 bytes = the 128-bit capability the design claims. Telegram's 64-byte
@@ -15274,15 +15290,40 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
   /** A clean exit is intentional from the CLI's perspective, but often not from
    * the operator's. Keep the instance notice passive and put the action in the
    * same-world General topic where an administrator can make the choice. */
-  async notifyNormalExit(instanceName: string): Promise<void> {
-    this.notifyInstanceTopic(instanceName, t("exit.instance_notice", instanceName) + placeSuffix({ kind: "general" }, "General"));
+  async notifySessionOomStop(instanceName: string, unclear = false): Promise<void> {
+    await this.notifyNormalExit(instanceName, unclear ? "unclear" : true);
+  }
+
+  async notifyNormalExit(instanceName: string, oom: boolean | "unclear" = false): Promise<void> {
+    const daemon = oom === "unclear" ? this.daemons.get(instanceName) : undefined;
+    const owner = daemon ? { ...daemon.getInteractionSnapshot().owner } : undefined;
+    const current = daemon && owner ? () => this.daemons.get(instanceName) === daemon
+      && daemon.isUnclearOomStopped() && sameInteractionOwner(owner, daemon.getInteractionSnapshot().owner) : undefined;
+    if (oom === "unclear" && !current?.()) return;
+    const state = oom ? readSessionOomStop(this.getInstanceDir(instanceName)) : null;
+    if (oom === "unclear" && state?.blocked) return;
+    const proof = state?.blocked ? state.record?.evidence ?? state.evidence : undefined;
+    if (oom === true && !proof) return;
+    const sessionOomRetry = oom ? captureSessionOomRetry(this.getInstanceDir(instanceName)) : undefined;
+    if (oom && [...this.pendingNonceButtons.values()].some(p => p.prefix === OOM_RETRY_CALLBACK_PREFIX
+      && p.instanceName === instanceName && p.sessionOomRetry?.revision === sessionOomRetry?.revision
+      && (oom !== "unclear" || p.confirmationCurrent?.() === true))) return;
+    const prefix = oom ? OOM_RETRY_CALLBACK_PREFIX : EXIT_RESTART_CALLBACK_PREFIX;
+    const message = oom === "unclear" ? t("inst.oom_unclear_choice", instanceName) : oom && proof
+      ? t("inst.session_oom_choice", instanceName, describeSelfOom(proof))
+      : t("exit.general_notice", placeRef({ kind: "instance", name: instanceName }, instanceName));
+    const choices = oom
+      ? [{ action: "resume", label: t("inst.session_oom_resume") }, { action: "fresh", label: t("inst.session_oom_fresh") }]
+      : [{ action: "restart", label: t("exit.restart") }, { action: "ignore", label: t("exit.ignore") }];
+    const extra = sessionOomRetry ? { sessionOomRetry, ...(current ? { confirmationCurrent: current } : {}) } : undefined;
+    this.notifyInstanceTopic(instanceName, (oom ? message : t("exit.instance_notice", instanceName)) + placeSuffix({ kind: "general" }, "General"));
 
     const web = this.webOnlyPromptPlace();
     if (web) {
       await this.postNonceButtonPrompt({
-        prefix: EXIT_RESTART_CALLBACK_PREFIX, alertType: "exit_restart", instanceName, ...web,
-        message: t("exit.general_notice", placeRef({ kind: "instance", name: instanceName }, instanceName)),
-        choices: [{ action: "restart", label: t("exit.restart") }, { action: "ignore", label: t("exit.ignore") }],
+        prefix, alertType: "exit_restart", instanceName, ...web,
+        message, extra,
+        choices,
         expiredText: t("exit.expired", instanceName),
       });
       return;
@@ -15305,18 +15346,15 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     }
 
     await this.postNonceButtonPrompt({
-      prefix: EXIT_RESTART_CALLBACK_PREFIX,
+      prefix,
       alertType: "exit_restart",
       instanceName,
       adapter,
       adapterId,
       chatId,
       threadId,
-      message: t("exit.general_notice", placeRef({ kind: "instance", name: instanceName }, instanceName)),
-      choices: [
-        { action: "restart", label: t("exit.restart") },
-        { action: "ignore", label: t("exit.ignore") },
-      ],
+      message, extra,
+      choices,
       expiredText: t("exit.expired", instanceName),
     });
   }
@@ -15327,9 +15365,10 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     callbackAdapterId: string,
     receivingAdapter?: ChannelAdapter,
   ): Promise<boolean> {
+    const oom = data.callbackData.startsWith(OOM_RETRY_CALLBACK_PREFIX);
     const claimed = this.consumeNonceCallback(
-      EXIT_RESTART_CALLBACK_PREFIX,
-      /^exit-restart:([0-9a-f]+):(restart|ignore)$/,
+      oom ? OOM_RETRY_CALLBACK_PREFIX : EXIT_RESTART_CALLBACK_PREFIX,
+      oom ? /^oom-retry:([0-9a-f]+):(resume|fresh)$/ : /^exit-restart:([0-9a-f]+):(restart|ignore)$/,
       data,
       callbackAdapterId,
       receivingAdapter,
@@ -15338,7 +15377,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     if (claimed === "consumed") return true;
     const { entry: pending, action } = claimed;
 
-    this.eventLog?.insert(pending.instanceName, "normal_exit_action", { action, userId: data.userId });
+    this.eventLog?.insert(pending.instanceName, oom ? "session_oom_action" : "normal_exit_action", { action, userId: data.userId });
     if (action === "ignore") {
       await this.retireNonceButtons(
         pending,
@@ -15354,7 +15393,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       t("exit.restarting", pending.instanceName),
     );
     try {
-      await this.restartSingleInstance(pending.instanceName, { explicit: true });
+      await this.restartSingleInstance(pending.instanceName, { explicit: true, ...(oom ? { freshStart: action === "fresh", sessionOomRetry: pending.sessionOomRetry,
+        ...(pending.confirmationCurrent ? { recoveryCurrent: pending.confirmationCurrent } : {}) } : {}) });
       await pending.adapter.editMessage(
         pending.chatId,
         pending.messageId ?? data.messageId,

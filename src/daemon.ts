@@ -14,7 +14,7 @@ import { EventEmitter } from "node:events";
 import type { InstanceConfig, RotationSnapshot, RotationSnapshotEvent } from "./types.js";
 import { rotateLogIfNeededAsync, type Logger } from "./logger.js";
 import { coredumpFilterLaunchPrefix } from "./coredump-filter.js";
-import { observeCliOomIdentity, confirmedCliOom, consecutiveSessionOoms, type CliOomIdentity, type SessionOomCount } from "./session-oom.js";
+import { observeCliOomIdentity, confirmedCliOom, consecutiveSessionOoms, describeSelfOom, type SelfOomEvidence, type CliOomIdentity, type SessionOomCount } from "./session-oom.js";
 import { assertNoSessionOomStop, readSessionOomStop, writeSessionOomStop, SessionOomStoppedError, sessionOomStopHint } from "./session-oom-stop.js";
 import { mcpServerState } from "./mcp-liveness.js";
 import { clearPausedMarker, writePausedMarker, type PauseReason } from "./pause-marker.js";
@@ -1407,6 +1407,8 @@ export class Daemon extends EventEmitter {
   private crashCount = 0;
   private cliOomObservation: { identity: CliOomIdentity; key: string; owner: InteractionOwner; tmux: TmuxManager } | null = null;
   private consecutiveOoms: SessionOomCount | null = null;
+  private collateralOomRecovery = false;
+  private unclearOomStopped = false;
   private sessionOomStopUnpersisted = false;
 
   private assertSessionOomAdmission(): void {
@@ -1417,6 +1419,16 @@ export class Daemon extends EventEmitter {
 
   isSessionOomStopped(): boolean {
     return this.sessionOomStopUnpersisted || readSessionOomStop(this.instanceDir).blocked;
+  }
+
+  isUnclearOomStopped(): boolean {
+    return this.unclearOomStopped && this.healthCheckPaused && this.processStatus === "crashed";
+  }
+
+  private stopUnclearOom(exitCode?: number): void {
+    this.unclearOomStopped = true;
+    this.healthCheckPaused = true;
+    this.emitSupervisionEnded(t("inst.oom_unclear_stopped"), t("inst.session_oom_remedy"), exitCode, "oom_unclear");
   }
 
   private oomSessionKey(): string | null {
@@ -3361,7 +3373,9 @@ export class Daemon extends EventEmitter {
           this.cliOomObservation = null;
           const decisionKey = this.oomSessionKey();
           this.consecutiveOoms = consecutiveSessionOoms(this.consecutiveOoms, decisionKey,
-            decisionKey === key && oom !== null);
+            decisionKey === key && oom?.attribution === "self");
+          const collateralOom = oom?.attribution === "collateral";
+          if (collateralOom) this.logger.warn({ attribution: oom.attribution, pid: oom.pid }, "OOM victim without self-caused proof — preserving session; waiting for memory recovery");
           if (this.consecutiveOoms && this.consecutiveOoms.count >= 2) {
             // Stop supervision, not an idle pause: queued work must not auto-wake
             // the same session. An explicit restart is the person's retry choice.
@@ -3370,7 +3384,7 @@ export class Daemon extends EventEmitter {
             try {
               writeSessionOomStop(this.instanceDir, { owner: healthOwner, sessionKey: decisionKey!,
                 configuration: this.getWorkingStateObservation().configuration, stoppedAt: Date.now(),
-                count: this.consecutiveOoms.count, victim: { pid: oom!.pid, at: oom!.at } });
+                count: this.consecutiveOoms.count, victim: { pid: oom!.pid, at: oom!.at }, evidence: oom!.evidence! });
             } catch {
               // Storage failure cannot revive this CLI in the current process.
               // Say explicitly that a fleet restart cannot yet rely on durability.
@@ -3378,10 +3392,10 @@ export class Daemon extends EventEmitter {
               this.logger.error("Could not persist session OOM stop; fix storage before restarting the fleet");
             }
             this.healthCheckPaused = true;
-            try { this.appendCrashHistory({ exitCode, lastOutput, crashType, reason: "session_oom" }); }
+            try { this.appendCrashHistory({ exitCode, lastOutput, crashType, reason: "session_oom", oomEvidence: oom!.evidence! }); }
             catch (error) { this.logger.warn({ error }, "Could not append session OOM history"); }
             this.logger.error({ pid: oom!.pid, count: this.consecutiveOoms.count }, "Repeated confirmed CLI OOM — automatic resume stopped; session preserved");
-            this.emitSupervisionEnded(t("inst.session_oom_stopped"), t("inst.session_oom_remedy")
+            this.emitSupervisionEnded(`${t("inst.session_oom_stopped")} (${describeSelfOom(oom!.evidence!)})`, t("inst.session_oom_remedy")
               + (this.sessionOomStopUnpersisted ? ` ${t("inst.session_oom_save_failed")}` : ""), exitCode, "session_oom");
             return;
           }
@@ -3393,7 +3407,7 @@ export class Daemon extends EventEmitter {
           }
 
           // Detect claude-code background session conflict — recover without counting as crash
-          if (lastOutput && (lastOutput.includes("background agent") || lastOutput.includes("Session is currently running"))) {
+          if (!oom && lastOutput && (lastOutput.includes("background agent") || lastOutput.includes("Session is currently running"))) {
             if (!this.backgroundSessionRecoveryAttempted) {
               this.backgroundSessionRecoveryAttempted = true;
               this.logger.warn("Detected lingering background agent session — starting fresh (no resume)");
@@ -3430,7 +3444,7 @@ export class Daemon extends EventEmitter {
           // --continue again and crash in the same way → loop. Clear the session id
           // and skip resume so the next spawn starts fresh. (skipResume also stops
           // saveSessionId below from resurrecting the id from statusline.json.)
-          if (this.paneSaysNoConversation(lastOutput)) {
+          if (!oom && this.paneSaysNoConversation(lastOutput)) {
             this.setSessionAside("cli_reported_no_conversation");
             this.skipResume = true;
           }
@@ -3458,7 +3472,8 @@ export class Daemon extends EventEmitter {
           }
 
           // Detect rapid crash: sliding window — 3+ crashes in 5 minutes
-          this.crashTimestamps.push(Date.now());
+          if (!collateralOom) this.crashTimestamps.push(Date.now());
+          else this.crashTimestamps = [];
           const crashWindowMs = 5 * 60_000;
           this.crashTimestamps = this.crashTimestamps.filter(t => t > Date.now() - crashWindowMs);
 
@@ -3468,6 +3483,9 @@ export class Daemon extends EventEmitter {
               { crashesInWindow: this.crashTimestamps.length, lastExitCode: exitCode ?? null, lastOutput: paneTail(lastOutput) ?? null },
               "3+ crashes in 5 minutes — pausing respawn",
             );
+            // Unknown cause is bounded like an ordinary crash, never a
+            // self-OOM verdict. Preserve the session for the person's choice.
+            if (oom?.attribution === "unknown") { this.stopUnclearOom(exitCode); return; }
             // P1: Persist crash state so next process restart skips resume
             try {
               writeFileSync(join(this.instanceDir, "crash-state.json"), JSON.stringify({
@@ -3485,15 +3503,16 @@ export class Daemon extends EventEmitter {
             this.crashCount = 0;
           }
 
-          this.crashCount++;
+          if (!collateralOom) this.crashCount++;
           this.lastCrashAt = Date.now();
 
-          if (this.crashCount > max_retries) {
+          if (!collateralOom && this.crashCount > max_retries) {
             this.logger.error(
               { crashCount: this.crashCount, maxRetries: max_retries, lastExitCode: exitCode ?? null, lastOutput: paneTail(lastOutput) ?? null },
               "Max crash retries exceeded — not respawning",
             );
             this.healthCheckPaused = true;
+            if (oom?.attribution === "unknown") { this.stopUnclearOom(exitCode); return; }
             this.emitSupervisionEnded(
               `it crashed ${this.crashCount} times, exceeding restart_policy.max_retries (${max_retries})`,
               "Check the logs for the cause, then restart it.",
@@ -3503,8 +3522,8 @@ export class Daemon extends EventEmitter {
 
           // Calculate backoff delay
           const delay = backoff === "exponential"
-            ? Math.min(1000 * Math.pow(2, this.crashCount - 1), 60_000)
-            : 1000 * this.crashCount;
+            ? Math.min(1000 * Math.pow(2, Math.max(1, this.crashCount) - 1), 60_000)
+            : 1000 * Math.max(1, this.crashCount);
 
           this.logger.warn({ crashCount: this.crashCount, delay }, `${cliLabel} window died — respawning after backoff`);
 
@@ -3546,7 +3565,10 @@ export class Daemon extends EventEmitter {
             // Write snapshot before spawn — consumed only if resume fails
             this.writeRotationSnapshot("crash");
             // Try --resume first; spawnClaudeWindow falls back to fresh session if resume fails
-            const resumed = await this.spawnClaudeWindow();
+            this.collateralOomRecovery = collateralOom;
+            let resumed: boolean;
+            try { resumed = await this.spawnClaudeWindow(); }
+            finally { this.collateralOomRecovery = false; }
             if (!resumed) {
               // Resume failed → fresh session → inject snapshot for context
               await this.injectSnapshotMessage();
@@ -3635,7 +3657,7 @@ export class Daemon extends EventEmitter {
    * `crash_loop` already had this treatment; this is the same bridge for the other
    * four, carrying a human-readable cause and the operator's next step.
    */
-  private emitSupervisionEnded(reason: string, remedy: string, exitCode?: number, cause?: "cli_unsupported" | "session_oom"): void {
+  private emitSupervisionEnded(reason: string, remedy: string, exitCode?: number, cause?: "cli_unsupported" | "session_oom" | "oom_unclear"): void {
     this.publishWorkingState("supervision_ended");
     this.emit("supervision_ended", {
       name: this.name,
@@ -10799,6 +10821,7 @@ export class Daemon extends EventEmitter {
    * into exactly the window this exists to close.
    */
   private beginSpawn(): void {
+    this.unclearOomStopped = false;
     this.publishWorkingState("before_spawn");
     this.workingBackgroundObservation = null;
     this.dialogAnswers = null;
@@ -11347,11 +11370,20 @@ export class Daemon extends EventEmitter {
    * Returns true if CLI is ready, false if it failed or got stuck.
    */
   private async trySpawn(reuseWindow = false, startupTimeoutMs?: number): Promise<boolean> {
-    const ready = !this.spawnGate ? await this.trySpawnInsideGate(reuseWindow, startupTimeoutMs) : await this.spawnGate.run({
+    const recoveryOwner = this.collateralOomRecovery ? this.interactionOwner() : null;
+    const enter = () => {
+      if (recoveryOwner && (!sameInteractionOwner(recoveryOwner, this.interactionOwner())
+        || this.startupAborted || this.deliveryWritesStopping || this.runtimeMonitorsFrozen || this.healthCheckPaused)) {
+        throw new Error("OOM recovery cancelled: the instance was stopped, paused or replaced while memory was unavailable");
+      }
+      return this.trySpawnInsideGate(reuseWindow, startupTimeoutMs);
+    };
+    const ready = !this.spawnGate ? await enter() : await this.spawnGate.run({
       instanceName: this.name,
       workingDirectory: this.config.working_directory,
       reason: reuseWindow ? "wake" : this.lastSpawnAt > 0 ? "recovery" : "startup",
-    }, () => this.trySpawnInsideGate(reuseWindow, startupTimeoutMs));
+      requireNormalMemory: this.collateralOomRecovery,
+    }, enter);
     // #906: a resumed kiro conversation comes back as the agent it was saved under. Every launch path that reaches a
     // ready CLI (start, recovery, wake) switches it to this instance's own agent here, while the spawn still holds
     // deliveries — and outside the spawn gate, which it does not need.
@@ -12335,7 +12367,7 @@ export class Daemon extends EventEmitter {
     return lines.join("\n").slice(0, 4000);
   }
 
-  private appendCrashHistory(data: { exitCode?: number; lastOutput?: string; crashType: "server" | "window"; reason?: string }): void {
+  private appendCrashHistory(data: { exitCode?: number; lastOutput?: string; crashType: "server" | "window"; reason?: string; oomEvidence?: SelfOomEvidence }): void {
     try {
       const historyPath = join(this.instanceDir, "crash-history.jsonl");
       const entry = {
@@ -12344,6 +12376,7 @@ export class Daemon extends EventEmitter {
         crashType: data.crashType,
         exitCode: data.exitCode,
         reason: data.reason,
+        ...(data.oomEvidence ? { oomEvidence: data.oomEvidence } : {}),
         lastOutput: data.lastOutput,
         crashCount: this.crashCount + 1,
         crashesInWindow: this.crashTimestamps.length,
