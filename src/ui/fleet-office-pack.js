@@ -6,13 +6,16 @@
 // it is used here — the idea of the format only.
 //
 // A pack is a JSON manifest plus images. Every coordinate is in logical units on a 1280×720 canvas (LOGICAL), which
-// the page scales to fit its width. Images are pixel art, drawn unsmoothed at `scale` logical units per image pixel.
+// the page shows whole, then pans and zooms (fleet-office-view.js). Images are pixel art, drawn unsmoothed at `scale` logical units per image pixel.
 //
 //   {
 //     "format": 1,                                    required
 //     "id": "cozy",                                   letters, digits, - and _ (≤ 40); not a built-in skin's id
 //     "scale": 2,                                     1–8 (default 2)
 //     "background": "office.png",                     drawn over the whole 1280×720 canvas (16:9)
+//     "matte": "#1b1d24",                             optional (#2540): the colour around the scene where the Office
+//                                                     view's panel is not 16:9 (or is zoomed out), "#rrggbb"; without it
+//                                                     the page samples the background's edge pixels
 //     "areas": {                                      named zones: a rect [x, y, w, h] and its seats, in the order
 //       "desks":  { "rect": [40, 120, 620, 440], "seats": [[120, 220], [260, 220], …] },    they fill up
 //       "lounge": { "rect": [700, 120, 540, 260], "seats": [[760, 260], …] } },
@@ -88,6 +91,7 @@ const POSES = ["working", "idle", "paused", "needs", "walk", "walkDown", "walkUp
 const BUILT_IN = new Set(["pixel", "studio"]);
 const ID = /^[A-Za-z0-9_-]{1,40}$/;
 const SRC = /^[A-Za-z0-9._/-]{1,200}$/;
+const HEX = /^#[0-9a-f]{6}$/i;
 const LIMIT = { areas: 32, seats: 64, furniture: 128, waypoints: 512, edges: 2048, sets: 64, byInstance: 500, lines: 12, line: 40 };
 
 class Refused extends Error { constructor(at, why) { super(`${at}: ${why}`); } }
@@ -108,6 +112,9 @@ function point(v, at) {
   return { x: num(v[0], 0, LOGICAL.w, `${at}[0]`), y: num(v[1], 0, LOGICAL.h, `${at}[1]`) };
 }
 function list(v, max, at) { if (!Array.isArray(v)) throw new Refused(at, "a list"); if (v.length > max) throw new Refused(at, `at most ${max}`); return v; }
+
+/** Whether `v` is a pack's `matte`: a colour as #rrggbb (six hex digits, either case). */
+export const matteOk = (v) => typeof v === "string" && HEX.test(v);
 
 /** A frame strip, strictly; `scale` the pack's (its displayed size, dw × dh, is resolved here). */
 export function checkStrip(v, at = "strip", scale = 2) {
@@ -133,11 +140,12 @@ function states(v, at) {
 export function checkSkinPack(x) {
   try {
     obj(x, "pack");
-    keys(x, ["format", "id", "scale", "background", "areas", "stateZones", "door", "waypoints", "edges", "furniture", "characters", "byInstance", "props", "bubbles", "room", "desk"], "pack");
+    keys(x, ["format", "id", "scale", "background", "matte", "areas", "stateZones", "door", "waypoints", "edges", "furniture", "characters", "byInstance", "props", "bubbles", "room", "desk"], "pack");
     if (x.format !== 1) throw new Refused("format", "1");
     if (typeof x.id !== "string" || !ID.test(x.id)) throw new Refused("id", "1–40 letters, digits, _ or -");
     if (BUILT_IN.has(x.id)) throw new Refused("id", "a built-in skin's id");
     const scale = x.scale === undefined ? 2 : int(x.scale, 1, 8, "scale");
+    if (x.matte !== undefined && !matteOk(x.matte)) throw new Refused("matte", "a colour as #rrggbb");
     const areas = {};
     const rawAreas = x.areas === undefined ? {} : obj(x.areas, "areas");
     if (Object.keys(rawAreas).length > LIMIT.areas) throw new Refused("areas", `at most ${LIMIT.areas}`);
@@ -226,7 +234,7 @@ export function checkSkinPack(x) {
     keys(room, ["floor", "wall"], "room"); keys(desk, ["back", "front", "lit"], "desk");
     const opt = (v, at) => (v === undefined ? undefined : src(v, at));
     return { ok: true, pack: {
-      format: 1, id: x.id, scale, background: opt(x.background, "background"), areas, stateZones,
+      format: 1, id: x.id, scale, background: opt(x.background, "background"), matte: x.matte === undefined ? undefined : x.matte.toLowerCase(), areas, stateZones,
       door: x.door === undefined ? { x: LOGICAL.w / 2, y: LOGICAL.h - 10 } : point(x.door, "door"), waypoints, edges, furniture, characters, byInstance,
       props: x.props === undefined ? {} : strips(x.props, PROPS, "props", scale), bubbles,
       room: { floor: opt(room.floor, "room.floor"), wall: opt(room.wall, "room.wall") }, desk: { back: opt(desk.back, "desk.back"), front: opt(desk.front, "desk.front"), lit: opt(desk.lit, "desk.lit") },

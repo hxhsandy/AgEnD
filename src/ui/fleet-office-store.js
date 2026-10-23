@@ -2,13 +2,16 @@
 // - the offices people made: the host's (GET / PUT /ui/offices, src/web-office-store.ts — one list for every viewer);
 //   what comes back is checked again here (fleet-office-model.js officesOk), never trusted;
 // - this browser's own choices (localStorage; blocked storage: this page only, as the canvas's Canvas/List): which
-//   office is shown, the auto office's member filter, and its style (skin).
+//   office is shown, the auto office's member filter, and its style (skin); #2540: the view (zoom and centre) per office.
 // - the skin packs an admin uploaded (#2513: GET /ui/office-skins, POST to upload one, DELETE to remove one;
 //   src/web-office-skins.ts). The office editor and the layout editor call saveOffices() with the whole list and the rev
 //   they read (a change in between answers 409).
 import { AUTO_ID, filterOk, officesOk } from "./fleet-office-model.js";
+import { savedOk } from "./fleet-office-view.js";
 
 const CHOICE_KEY = "agend_org_office", FILTER_KEY = "agend_org_office_filter", SKIN_KEY = "agend_org_office_skin", ASLEEP_KEY = "agend_org_office_hide_asleep";
+/** #2540: { "<office>@<style>": [k, cx, cy] } — the last VIEWS_MAX views, the most recent last. */
+const VIEW_KEY = "agend_org_office_view", VIEWS_MAX = 32;
 const PACK_ID = /^[A-Za-z0-9_-]{1,40}$/;
 /** The host's list of skin packs, checked: [{ id, name, sha }] (anything odd dropped). */
 export function skinListOk(d) {
@@ -85,5 +88,19 @@ export function createOfficeStore({ fetch: get = globalThis.fetch, storage } = {
     /** Whether paused and stopped people are left out of the Office here (default: shown). */
     hideAsleep: () => read(ASLEEP_KEY) === "1",
     saveHideAsleep: (v) => write(ASLEEP_KEY, v ? "1" : "0"),
+    /** The view kept for `key` (an office and its style): { k, cx, cy } (fleet-office-view.js savedOf), or null. */
+    view: (key) => {
+      try { const m = JSON.parse(read(VIEW_KEY) || "{}"); const a = m && Object.prototype.hasOwnProperty.call(m, key) ? m[key] : null;
+        return Array.isArray(a) ? savedOk({ k: a[0], cx: a[1], cy: a[2] }) : null; } catch { return null; }
+    },
+    saveView: (key, v) => {
+      const ok = savedOk(v);
+      if (!ok || typeof key !== "string" || key.length > 100) return;
+      let m = {};
+      try { const o = JSON.parse(read(VIEW_KEY) || "{}"); if (o && typeof o === "object" && !Array.isArray(o)) m = o; } catch { m = {}; }
+      const r = (n) => Math.round(n * 1000) / 1000;
+      const next = Object.entries(m).filter(([k2, a]) => k2 !== key && Array.isArray(a)).slice(-(VIEWS_MAX - 1));
+      write(VIEW_KEY, JSON.stringify(Object.fromEntries([...next, [key, [r(ok.k), r(ok.cx), r(ok.cy)]]])));
+    },
   };
 }

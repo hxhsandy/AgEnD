@@ -1,0 +1,4 @@
+---
+section: Changed
+---
+- The Office view fills the Fleet panel and pans and zooms like the org chart's Canvas: drag to pan, the wheel or a pinch to zoom, **+**/**−**/**Fit** buttons or the `+ - 0` keys, and an overview to jump (not on a phone). Zoom snaps to pixel levels (each logical unit a whole number of screen pixels, drawn unsmoothed) so pixel art stays crisp; Fit takes the largest level that shows the whole scene, the exact fit only when that would be tiny. The view is kept per device for each office and style. Around the 16:9 scene is a matte — a skin pack's new optional `matte` field (`#rrggbb`, checked by the page and the host), else the background's edge colour, else the dashboard's background. Hover, click, name tags, bubbles, crowd counts and **Edit layout** work at any zoom (a drag on a handle moves it, anywhere else pans).

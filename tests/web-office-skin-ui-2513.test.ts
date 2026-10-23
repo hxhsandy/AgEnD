@@ -383,8 +383,9 @@ describe("the Office view with packs", () => {
     try {
       withPack(); offices = { rev: 3, offices: [A()] }; localStorage.setItem("agend_org_office", "clinic");
       await office(); await settle(6);
-      const cv = p.root.querySelector(".oo-canvas"), k = (960 - 2) / 1280;                // the scene fitted to the stage
-      const hover = async (x: number, y: number) => { fire(cv, "pointermove", { clientX: x * k, clientY: y * k, pointerType: "mouse" }); await settle(3); return p.root.querySelector(".oo-tip strong")?.textContent ?? null; };
+      const V = await import("/ui/js/fleet-office-view.js");
+      const cv = p.root.querySelector(".oo-canvas"), v = V.fitScene(1280, 720, { w: 960, h: 600 }, 1);   // the scene fitted to the stage (#2540: through the view)
+      const hover = async (x: number, y: number) => { fire(cv, "pointermove", { clientX: v.x + x * v.k, clientY: v.y + y * v.k, pointerType: "mouse" }); await settle(3); return p.root.querySelector(".oo-tip strong")?.textContent ?? null; };
       // quill works at desks seat 0 (212, 240): the fox (32×48 at scale 2, anchor 16, 44) is drawn 64×96 from (180, 152).
       expect(await hover(212 - 16, 240 - 72)).toBe("quill");                                // its head: the old 48×66 box began at y 188
       expect(await hover(0, 0)).toBeNull();

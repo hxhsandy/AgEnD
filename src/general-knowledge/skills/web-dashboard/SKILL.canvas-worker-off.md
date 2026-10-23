@@ -265,6 +265,14 @@ saved the offices meanwhile, Save says so and keeps your layout — Save again p
 only calls and work get bubbles (a few at most) and name tags show on hover or focus. **Hide paused and stopped**
 (per browser, off by default) leaves the sleepers out. Now and then someone says a short line for their state in a
 bubble (never message content). Reduced motion: still poses, nothing in the air, bubbles shown whole.
+The Office fills the Fleet panel and moves like the Canvas (#2540): drag to pan, the wheel or a pinch to zoom,
+**+** / **−** / **Fit** at the top right or the `+ - 0` keys (with the office focused), an overview at the bottom
+right to jump (not on a phone). Zoom goes in pixel levels — each logical unit a whole number of screen pixels, drawn
+unsmoothed, so pixel art stays crisp; **Fit** takes the largest level that shows the whole scene (the exact fit only
+when that would be tiny, e.g. on a phone). The zoom and centre are kept per device for each office and style. Around
+the 16:9 scene is a matte: a pack's own `matte` (`#rrggbb`), else its background's edge colour, else the
+dashboard's background. Hover, click, name tags and Edit layout all work at any zoom: a drag on a handle moves it,
+anywhere else pans; zoom and pan are never animated.
 
 **Live traffic** (**Live** switch, on by default; **Key** in the toolbar explains it, as a strip above the canvas): a line for each message between instances.
 Colour by kind — task (delegate_task) purple, send/query/update teal, report pink, broadcast orange; between teams

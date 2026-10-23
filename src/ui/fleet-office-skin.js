@@ -32,8 +32,10 @@
 //   ({ x, y, walking, heading }): what hover and click hit (fleet-office-zones.js personAt)
 // @property {(ctx, prop, ms, env) => void} drawProp      a traffic item in the air: { kind, hue, x, y, t }
 // @property {(ctx, x, y, text, env, lift?) => void} drawBubble  a speech bubble whose tail points at (x, y), its box `lift` px higher
-// The desks layout's back and front layers change only when the fleet does: the renderer keeps them as pictures and
-// draws the characters, props and bubbles each frame. In zones the background is kept; furniture, people (walking
+// @property {(env) => string} matte   #2540: the colour around the scene (the Office fills the panel; the scene is 16:9)
+// @property {object|null} [backdrop]  a pack's loaded background picture (the page samples its edges for the matte)
+// The desks layout's back and front layers change only when the fleet (or the zoom) does: the renderer keeps them as
+// pictures and draws the characters, props and bubbles each frame. In zones the background is kept; furniture, people (walking
 // along the pack's waypoints), tags, props and bubbles are drawn each frame, furniture by depth around the people.
 import { frameAt, nameHash } from "./fleet-office-model.js";
 import { CHAR_DEPTH, LOGICAL, checkSkinPack, own, packImages, poseStrip, stripBox } from "./fleet-office-pack.js";
@@ -322,10 +324,12 @@ function drawCrowd(ctx, area, n, env) {
   ctx.restore();
 }
 
-/** @type {OfficeSkin} */
 /** The built-in character in zones covers this box around its feet (as zonesLayout's desk box). */
 const charBox = (look, at) => ({ x: at.x - 24, y: at.y - 52, w: 48, h: 66 });
-export const pixelSkin = { id: "pixel", drawFloor, drawRoom, drawDeskBack, drawCharacter, drawDeskFront, drawProp, drawBubble, drawTag, drawCrowd, charBox };
+/** #2540: the built-in skins' matte (around the scene): the page's background token, which the desks' floor is too. */
+const matte = (env) => env.pal.bg;
+/** @type {OfficeSkin} */
+export const pixelSkin = { id: "pixel", drawFloor, drawRoom, drawDeskBack, drawCharacter, drawDeskFront, drawProp, drawBubble, drawTag, drawCrowd, charBox, matte };
 
 // ── The built-in studio: the zones layout, drawn procedurally ──
 
@@ -466,6 +470,7 @@ export function spriteSkin(pack, images, base = pixelSkin) {
     ...base,
     id: pack.id,
     pack,
+    backdrop: img(pack.background),
     drawRoom(ctx, room, env) {
       const floor = img(pack.room.floor), wall = img(pack.room.wall);
       if (!floor) { base.drawRoom(ctx, room, env); return; }

@@ -113,6 +113,16 @@ describe("checkSkinUpload: the manifest by the page's rules, then the pictures",
     u.manifest.characters.default.walkSide.dw = 2000;
     expect(refused(u)).toEqual([400, "skin_manifest_invalid", "characters.default.walkSide.dw: a number from 1 to 1280"]);
   });
+  it("#2540: a pack's `matte` (the colour around the scene) passes as #rrggbb and is kept as uploaded; anything else is refused by the page's rule", () => {
+    const u: any = UPLOAD(); u.manifest.matte = "#1B1D24";
+    const r = checkSkinUpload(u, "me", 1);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect([r.pack.matte, r.record.manifest.matte]).toEqual(["#1b1d24", "#1B1D24"]);
+    for (const bad of ["#fff", "red", "#1b1d24ff", 12, "", "#12345g"]) {
+      const b: any = UPLOAD(); b.manifest.matte = bad;
+      expect(refused(b), String(bad)).toEqual([400, "skin_manifest_invalid", "matte: a colour as #rrggbb"]);
+    }
+  });
   it("a picture that is not a PNG (a JPEG, a GIF, text named .png) or one cut short is refused, naming the file", () => {
     const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0xff, 0xd9]);
     for (const bad of [jpeg, Buffer.from("GIF89a......"), Buffer.from("<svg xmlns='http://www.w3.org/2000/svg'/>")]) {

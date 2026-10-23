@@ -1,0 +1,418 @@
+/**
+ * #2540: the Office view fills the Fleet panel and pans and zooms like the org chart's canvas.
+ * - The shared view (fleet-canvas-view.js, also the org canvas's): screen ↔ logical, zoom about a point, a pinch step,
+ *   an overview click, the zoom keys.
+ * - The Office's own (fleet-office-view.js): pixel levels (a logical unit is a whole number of device px), + / − steps,
+ *   Fit (the largest pixel level that fits; the exact fit only when that would be tiny), the opening views, keeping the
+ *   scene in reach, the kept view (per device, per office and style) and its restore, the layers' resolution, the matte
+ *   from a background's edge pixels.
+ * - The pack's `matte`: checked by the page's module and by the host (the same rules), lower-cased.
+ * - On the page: the canvas is the stage; + / − / 0 and the buttons zoom; a drag pans, a wheel and a pinch zoom; the
+ *   overview shows the view; a click and a hover hit through the view; the view is kept and restored; Edit layout's
+ *   overlay follows the view and a handle dragged under zoom lands on the logical point under the pointer, while a drag
+ *   off the handles pans; reduced motion draws each change at once; the matte is the pack's, else sampled, else the
+ *   skin's token.
+ */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { page, settle, h, type AppPage } from "./helpers/app-harness.js";
+import { fire, MiniElement } from "./helpers/mini-dom.js";
+
+const FIXTURE = join(process.cwd(), "tests", "fixtures", "office-skin-clinic");
+const MANIFEST = () => JSON.parse(readFileSync(join(FIXTURE, "manifest.json"), "utf8"));
+const FILES = { "office_bg.png": "a".repeat(32), "fox_idle.png": "b".repeat(32) };
+const INSTANCES = [
+  { name: "atlas", display_name: "Atlas", status: "running", backend: "claude-code" },
+  { name: "quill", status: "running", backend: "kiro-cli" },
+  { name: "sage", status: "paused", backend: "grok" },
+];
+const ORG = { general: ["atlas"], teams: [{ name: "Web", members: ["quill", "sage"] }], instances: {} };
+const STORE = { ready: true, instances: INSTANCES, exec: { quill: "working" }, awaiting: {}, needs: [] };
+const STAGE = { w: 960, h: 600 };                                    // the stage before it is measured (a test page has none)
+
+let p: AppPage;
+let V: any, CV: any, PK: any, Z: any, K: any, app: any, nav: any, fleet: any, SK: any;
+let offices: any = { rev: 0, offices: [] }, skins: any = { rev: "", packs: [] }, manifestAnswer: any = null;
+beforeAll(async () => {
+  p = page({ url: "http://127.0.0.1:19280/ui/fleet/org" });
+  (globalThis as any).fetch = async (url: string, o: any = {}) => {
+    if (url === "/ui/offices" && o.method === "PUT") return { ok: true, status: 200, json: async () => offices };
+    if (url.startsWith("/ui/office-skins/")) return manifestAnswer ? { ok: true, status: 200, json: async () => manifestAnswer } : { ok: false, status: 404, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => (url === "/ui/org" ? ORG : url === "/ui/offices" ? offices : url === "/ui/office-skins" ? skins : {}) };
+  };
+  app = await import("/assets/app-store.js");
+  nav = await import("/assets/app-nav.js");
+  nav.startRouter(p.window);
+  fleet = await import("/ui/js/panel-fleet.js");
+  V = await import("/ui/js/fleet-office-view.js");
+  CV = await import("/ui/js/fleet-canvas-view.js");
+  PK = await import("/ui/js/fleet-office-pack.js");
+  Z = await import("/ui/js/fleet-office-zones.js");
+  K = await import("/ui/js/fleet-office-skin.js");
+  SK = await import("/ui/js/fleet-office-store.js");
+});
+afterAll(() => { p.restore(); delete (globalThis as any).fetch; });
+beforeEach(async () => {
+  await p.unmount();
+  p.storage.clear();
+  offices = { rev: 0, offices: [] }; skins = { rev: "", packs: [] }; manifestAnswer = null;
+  nav.navigate("/ui/fleet/org");
+  app.appStore.set(STORE);
+});
+
+describe("the shared view (fleet-canvas-view.js)", () => {
+  it("screen ↔ logical round-trips; zoom about a point keeps that point; a pinch keeps the point under its midpoint", () => {
+    const v = { k: 2, x: -100, y: 40 };
+    expect(CV.toWorld(v, 300, 240)).toEqual({ x: 200, y: 100 });
+    expect(CV.toScreen(v, 200, 100)).toEqual({ x: 300, y: 240 });
+    const z = CV.zoomTo(v, 3, 300, 240);
+    expect(CV.toWorld(z, 300, 240)).toEqual({ x: 200, y: 100 });
+    const from = { mid: { x: 300, y: 240 }, dist: 100 }, to = { mid: { x: 350, y: 260 }, dist: 200 };
+    const pv = CV.pinchTo(v, from, to, 4);
+    expect([pv.k, CV.toWorld(pv, 350, 260)]).toEqual([4, { x: 200, y: 100 }]);
+    expect(CV.pinchView(v, from, to).k).toBe(CV.K_MAX);                 // the org canvas's: 2 × 2, clamped to its range
+    expect(CV.centreOn(v, { w: 800, h: 600 }, 10, 20)).toEqual({ k: 2, x: 380, y: 260 });
+  });
+  it("an overview click: the world point at the click, the overview drawn whole and centred; keys: + = in, - _ out, 0 fit, none with a modifier", () => {
+    const rect = { left: 10, top: 20, width: 180, height: 120 }, box = { x: 0, y: 0, w: 1280, h: 720 };
+    // 1280×720 in 180×120: scale 180/1280, the height 101.25 centred (9.375 above).
+    expect(CV.miniPoint(rect, box, 10 + 90, 20 + 60)).toEqual({ x: 640, y: 360 });
+    expect(CV.miniPoint(rect, box, 10, 20 + 9.375)).toEqual({ x: 0, y: 0 });
+    expect(CV.miniPoint({ left: 0, top: 0, width: 0, height: 0 }, box, 1, 1)).toBeNull();
+    const k = (key: string, mod: any = {}) => CV.zoomKey({ key, ...mod });
+    expect([k("+"), k("="), k("-"), k("_"), k("0"), k("a"), k("+", { ctrlKey: true }), k("0", { metaKey: true }), k("-", { altKey: true })])
+      .toEqual(["in", "in", "out", "out", "fit", null, null, null, null]);
+  });
+});
+
+describe("pixel levels and Fit (fleet-office-view.js)", () => {
+  it("snapK: a logical unit is a whole number of device px from one up; below one it is continuous; in range", () => {
+    expect([V.snapK(1.4, 1), V.snapK(1.6, 1), V.snapK(0.7, 1), V.snapK(0.3, 2), V.snapK(0.8, 2), V.snapK(1.1, 1.5)]).toEqual([1, 2, 0.7, 0.3, 1, 4 / 3]);
+    expect(V.snapK(100, 1)).toBe(V.OK_MAX);
+    expect(V.snapK(0.001, 1)).toBe(V.OK_MIN);
+    for (const dpr of [1, 1.25, 1.5, 2, 3]) for (const k of [0.6, 0.9, 1.3, 2.2, 5]) {
+      const s = V.snapK(k, dpr);
+      if (s * dpr >= 1) expect(V.isPixelK(s, dpr), `${k}@${dpr}`).toBe(true);
+    }
+  });
+  it("stepK: + and − go level by level; below one device px a unit by 1.25, and back up onto level 1", () => {
+    expect([V.stepK(1, 1, 1), V.stepK(2, 1, 1), V.stepK(2, -1, 1), V.stepK(1, -1, 1)]).toEqual([2, 3, 1, 0.8]);
+    expect([V.stepK(0.5, 1, 2), V.stepK(1, 1, 2), V.stepK(1.5, -1, 2)]).toEqual([1, 1.5, 1]);   // dpr 2: 1, 2, 3 device px
+    expect(V.stepK(0.9, 1, 1)).toBe(1);                                   // 0.9 × 1.25 passes level 1: onto it
+    expect(V.stepK(0.5, 1, 1)).toBe(0.625);
+    expect(V.stepK(V.OK_MAX, 1, 1)).toBe(V.OK_MAX);
+    expect(V.stepK(V.OK_MIN, -1, 1)).toBe(V.OK_MIN);
+  });
+  it("Fit: the largest pixel level that fits, centred; the exact fit only when that would be tiny (no level fits, or under two thirds of it)", () => {
+    expect(V.fitScene(1280, 720, { w: 1700, h: 900 }, 1)).toEqual({ k: 1, x: 210, y: 90 });   // exact 1.25: level 1 (80 %)
+    expect(V.fitK(1280, 720, { w: 2600, h: 1500 }, 1)).toBe(2);           // exact 2.03: level 2
+    expect(V.fitK(1280, 720, { w: 2600, h: 1500 }, 2)).toBe(2);           // dpr 2: 4 device px a unit
+    expect(V.fitK(1280, 720, { w: 1900, h: 1100 }, 2)).toBe(1);           // exact 1.48 → 2.97 device px → level 2 (1 CSS px, 67 %)
+    expect(V.fitK(1280, 720, { w: 960, h: 600 }, 1)).toBe(0.75);          // no level fits (under one device px a unit): exact
+    expect(V.fitK(1280, 720, { w: 390, h: 700 }, 3)).toBeCloseTo(390 / 1280, 9);   // a phone at dpr 3: 0.91 device px → exact
+    expect(V.fitK(1280, 720, { w: 2500, h: 1500 }, 1)).toBeCloseTo(2500 / 1280, 9);   // exact 1.95: level 1 would be 51 % — tiny
+    expect(V.fitK(1000, 1000, { w: 1500, h: 1500 }, 1)).toBe(1);          // exactly two thirds: the level
+    expect(V.fitK(1000, 1000, { w: 1510, h: 1510 }, 1)).toBeCloseTo(1.51, 9);   // just under: the exact fit
+    expect(V.fitScene(1280, 720, STAGE, 1)).toEqual({ k: 0.75, x: 0, y: 30 });
+  });
+  it("the opening: zones whole; the desks from the top left at the pixel level nearest one CSS px; the scene kept in reach", () => {
+    expect(V.openingView(1280, 720, STAGE, 1, true)).toEqual(V.fitScene(1280, 720, STAGE, 1));
+    expect([V.desksK(1), V.desksK(1.25), V.desksK(1.5), V.desksK(2), V.desksK(3)]).toEqual([1, 0.8, 4 / 3, 1, 1]);
+    expect(V.openingView(960, 2000, STAGE, 1.5, false)).toEqual({ k: 4 / 3, x: 0, y: 0 });
+    const far = V.clampPan({ k: 1, x: 5000, y: -5000 }, 1280, 720, STAGE);
+    expect(far).toEqual({ k: 1, x: 960 - 48, y: 48 - 720 });
+    const small = V.clampPan({ k: 0.01, x: -100, y: 0 }, 1280, 720, STAGE);   // a scene smaller than `keep`: all of it stays
+    expect(small.x).toBeCloseTo(0, 9);
+  });
+  it("the kept view: the zoom and the logical point in the middle; restored about the same point at this screen's level; odd ones refused", () => {
+    const v = { k: 2, x: -800, y: -420 };
+    const s = V.savedOf(v, STAGE);
+    expect(s).toEqual({ k: 2, cx: 640, cy: 360 });
+    expect(V.viewFromSaved(s, { w: 1200, h: 800 }, 1)).toEqual({ k: 2, x: 600 - 1280, y: 400 - 720 });
+    expect(V.viewFromSaved({ k: 1.333, cx: 640, cy: 360 }, STAGE, 1.5).k).toBeCloseTo(4 / 3, 9);   // rounded when kept, snapped back
+    expect([V.savedOk({ k: "2", cx: 1, cy: 1 }), V.savedOk({ k: 0, cx: 1, cy: 1 }), V.savedOk({ k: 1, cx: NaN, cy: 1 }), V.savedOk(null), V.savedOk({ k: 1, cx: 1e9, cy: 0 })])
+      .toEqual([null, null, null, null, null]);
+    expect(V.savedOk({ k: 99, cx: 1, cy: 2 })).toEqual({ k: V.OK_MAX, cx: 1, cy: 2 });
+  });
+  it("the store keeps a view per office and style, the most recent few; blocked storage keeps nothing and throws nothing", () => {
+    const m = new Map<string, string>();
+    const storage = { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => { m.set(k, v); } };
+    const st = SK.createOfficeStore({ storage });
+    st.saveView("auto@studio", { k: 2, cx: 640.12345, cy: 360 });
+    expect(st.view("auto@studio")).toEqual({ k: 2, cx: 640.123, cy: 360 });
+    expect(st.view("auto@pixel")).toBeNull();
+    expect(JSON.parse(m.get("agend_org_office_view")!)).toEqual({ "auto@studio": [2, 640.123, 360] });
+    for (let i = 0; i < 40; i++) st.saveView(`o${i}@studio`, { k: 1, cx: i, cy: 0 });
+    const kept = Object.keys(JSON.parse(m.get("agend_org_office_view")!));
+    expect([kept.length, kept.at(-1), kept.includes("auto@studio")]).toEqual([32, "o39@studio", false]);
+    m.set("agend_org_office_view", "{ nope");
+    expect(st.view("o39@studio")).toBeNull();
+    const blocked = SK.createOfficeStore({ storage: { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); } } });
+    expect(() => blocked.saveView("a@b", { k: 1, cx: 0, cy: 0 })).not.toThrow();
+    expect(blocked.view("a@b")).toBeNull();
+  });
+  it("the layers' resolution: the view's own; over the budget, divided by a whole number (an integer, crisp scale-up)", () => {
+    expect(V.layerScale(2, 1280, 720)).toBe(2);
+    const a = 6, ls = V.layerScale(a, 1280, 720);
+    expect(Number.isInteger(a / ls)).toBe(true);
+    expect(Math.ceil(1280 * ls) * Math.ceil(720 * ls)).toBeLessThanOrEqual(V.LAYER_MAX.area * 1.01);
+    expect(V.layerScale(0.4, 20000, 20000)).toBeLessThanOrEqual(0.4);
+  });
+  it("edgeMatte: the mean of the opaque edge pixels as #rrggbb; none opaque: null", () => {
+    const px = (...rgba: number[][]) => new Uint8ClampedArray(rgba.flat());
+    expect(V.edgeMatte([px([10, 20, 30, 255], [30, 40, 50, 255]), px([20, 30, 40, 255], [0, 0, 0, 0])])).toBe("#141e28");
+    expect(V.edgeMatte([px([255, 255, 255, 0])])).toBeNull();
+    expect(V.edgeMatte([])).toBeNull();
+  });
+});
+
+describe("the pack's matte: the page's check and the host's are the same", () => {
+  it("#rrggbb only, lower-cased; anything else refused with where it broke; absent: none", () => {
+    const m = MANIFEST();
+    expect(PK.checkSkinPack({ ...m, matte: "#1B1D24" })).toMatchObject({ ok: true, pack: { matte: "#1b1d24" } });
+    expect(PK.skinPackOk(m).matte).toBeUndefined();
+    for (const bad of ["#fff", "1b1d24", "#1b1d2", "#1b1d24ff", "red", "rgb(1,2,3)", 0x1b1d24, null, "#gggggg"]) {
+      expect(PK.checkSkinPack({ ...m, matte: bad }), String(bad)).toEqual({ ok: false, error: "matte: a colour as #rrggbb" });
+    }
+    expect([PK.matteOk("#abcdef"), PK.matteOk("#ABCDEF"), PK.matteOk(" #abcdef")]).toEqual([true, true, false]);
+  });
+});
+
+// ── On the page ──
+
+function fakeCtx(px: number[] = [0, 0, 0, 0]) {
+  const calls: Array<[string, any[], any?]> = [];
+  const t: any = { calls, measureText: (s: string) => ({ width: [...String(s)].length * 6 }), createPattern: () => ({ pattern: true }),
+    getImageData: (_x: number, _y: number, w: number, hh: number) => ({ data: new Uint8ClampedArray(Array.from({ length: w * hh }, () => px).flat()) }) };
+  return new Proxy(t, { get(o, k) { if (k in o) return o[k]; return (...a: unknown[]) => { calls.push([String(k), a, k === "fillRect" ? o.fillStyle : undefined]); }; }, set(o, k, v) { o[k] = v; return true; } });
+}
+
+describe("the Office canvas on the page", () => {
+  const proto = MiniElement.prototype as any;
+  let edge: number[] = [0, 0, 0, 0];
+  beforeEach(() => { edge = [0, 0, 0, 0]; proto.getContext = function () { return (this._ctx ??= fakeCtx(edge)); }; });
+  afterEach(() => {
+    delete proto.getContext;
+    delete (globalThis as any).AgendAuth; delete (p.window as any).AgendAuth;
+  });
+  const mount = async () => { await p.mount(h(fleet.FleetPanel, { route: { panel: "fleet", tab: "org" }, navKey: `fleet:org|${Math.random()}|en` })); await settle(6); };
+  const office = async () => { await mount(); p.root.querySelectorAll(".oc-tools .seg-inline button")[2].click(); await settle(6); };
+  const studio = () => localStorage.setItem("agend_org_office_skin", "studio");
+  /** The view, read back from the overview's frame (x, y, width, height: the stage's box in logical units). */
+  const shown = () => {
+    const r = p.root.querySelector(".oo-mini-view");
+    const [x, y, w] = ["x", "y", "width"].map((a) => Number(r.getAttribute(a)));
+    const k = STAGE.w / w;
+    return { k, x: -x * k, y: -y * k };
+  };
+  const near = (a: any, b: any) => { expect(a.k).toBeCloseTo(b.k, 6); expect(a.x).toBeCloseTo(b.x, 6); expect(a.y).toBeCloseTo(b.y, 6); };
+  const key = async (k: string) => { fire(p.root.querySelector(".oo-canvas"), "keydown", { key: k }); await settle(2); };
+
+  it("full-bleed: the canvas is the stage (its bitmap too), the zones scene opens whole; the controls and the overview are there", async () => {
+    studio(); await office();
+    const cv = p.root.querySelector(".oo-canvas");
+    expect([cv.style.width, cv.style.height, cv.width, cv.height]).toEqual(["960px", "600px", 960, 600]);
+    expect([cv.getAttribute("role"), cv.getAttribute("tabindex")]).toEqual(["application", "0"]);
+    expect(p.root.querySelectorAll(".oo-zoom button").map((b: any) => b.getAttribute("aria-label"))).toEqual(["Zoom in", "Zoom out", "Fit the office"]);
+    near(shown(), V.fitScene(1280, 720, STAGE, 1));
+    expect(p.root.querySelector(".oo-mini").getAttribute("viewBox")).toBe("0 0 1280 720");
+    expect(p.root.querySelectorAll(".oo-mini-dot").length).toBe(3);
+  });
+  it("+ - 0 on the canvas (and the buttons): level by level about the middle, then Fit; none in a form field or with a modifier", async () => {
+    studio(); await office();
+    const v0 = V.fitScene(1280, 720, STAGE, 1);
+    await key("+");
+    const v1 = CV.zoomTo(v0, V.stepK(0.75, 1, 1), 480, 300);
+    near(shown(), v1);
+    await key("=");
+    near(shown(), CV.zoomTo(v1, 1, 480, 300));
+    p.root.querySelector(".oo-zoom-in").click(); await settle(2);
+    expect(shown().k).toBe(2);
+    await key("-");
+    expect(shown().k).toBe(1);
+    fire(p.root.querySelector(".oo-canvas"), "keydown", { key: "+", ctrlKey: true }); await settle(2);
+    expect(shown().k).toBe(1);                                          // the browser's own zoom
+    await key("0");
+    near(shown(), v0);
+    p.root.querySelector(".oo-zoom-in").click(); await settle(2);
+    p.root.querySelector(".oo-fit").click(); await settle(2);
+    near(shown(), v0);
+    p.root.querySelector(".oo-zoom-out").click(); await settle(2);
+    expect(shown().k).toBeCloseTo(0.6, 9);
+  });
+  it("a drag pans (the click that ends it opens nothing); the wheel and a pinch zoom onto pixel levels about the pointer", async () => {
+    studio(); await office();
+    const cv = p.root.querySelector(".oo-canvas"), v0 = shown();
+    fire(cv, "pointerdown", { pointerId: 1, pointerType: "mouse", button: 0, clientX: 100, clientY: 100 });
+    fire(cv, "pointermove", { pointerId: 1, pointerType: "mouse", clientX: 102, clientY: 101 });   // under the slop: not yet
+    near(shown(), v0);
+    fire(cv, "pointermove", { pointerId: 1, pointerType: "mouse", clientX: 160, clientY: 130 });
+    fire(cv, "pointerup", { pointerId: 1, pointerType: "mouse", clientX: 160, clientY: 130 });
+    near(shown(), { k: v0.k, x: v0.x + 58, y: v0.y + 29 });
+    fire(cv, "click", { clientX: 160, clientY: 130 });
+    expect(location.pathname).toBe("/ui/fleet/org");
+    await settle(2);
+    // The wheel: a raw zoom snapped to a level, the point under the pointer kept.
+    const before = shown();
+    fire(cv, "wheel", { deltaY: -500, clientX: 300, clientY: 200 }); await settle(2);
+    const w = shown();
+    expect(w.k).toBe(2);                                                  // 0.75 × e^0.75 = 1.59 → level 2
+    expect(CV.toWorld(w, 300, 200).x).toBeCloseTo(CV.toWorld(before, 300, 200).x, 6);
+    // A pinch: two fingers, their span doubled → 2 × 2 = 4, the point under the midpoint follows it.
+    fire(cv, "pointerdown", { pointerId: 7, pointerType: "touch", clientX: 400, clientY: 300 });
+    fire(cv, "pointerdown", { pointerId: 8, pointerType: "touch", clientX: 500, clientY: 300 });
+    const at = CV.toWorld(shown(), 450, 300);
+    fire(cv, "pointermove", { pointerId: 8, pointerType: "touch", clientX: 600, clientY: 300 });
+    fire(cv, "pointerup", { pointerId: 7, pointerType: "touch" }); fire(cv, "pointerup", { pointerId: 8, pointerType: "touch" });
+    const pv = shown();
+    expect(pv.k).toBe(4);
+    expect(CV.toWorld(pv, 500, 300).x).toBeCloseTo(at.x, 6);
+  });
+  it("hover and click hit through the view: zoomed in and panned, a person opens where they are drawn", async () => {
+    studio(); await office();
+    await key("+"); await key("+"); await key("+");                       // 0.9375, 1, 2
+    const cv = p.root.querySelector(".oo-canvas");
+    fire(cv, "pointerdown", { pointerId: 1, pointerType: "mouse", button: 0, clientX: 500, clientY: 300 });
+    fire(cv, "pointermove", { pointerId: 1, pointerType: "mouse", clientX: 400, clientY: 250 });
+    fire(cv, "pointerup", { pointerId: 1, pointerType: "mouse" });
+    await settle(2);
+    const v = shown();
+    expect(v.k).toBe(2);
+    const nodes = [{ name: "atlas", state: "idle" }, { name: "quill", state: "working" }, { name: "sage", state: "paused" }].map((n) => ({ ...n, i: { name: n.name } }));
+    const seat = Z.zonesLayout(K.STUDIO_PACK, nodes).seats.get("quill");
+    const s = CV.toScreen(v, seat.x, seat.y - 20);
+    fire(cv, "pointermove", { clientX: s.x, clientY: s.y, pointerType: "mouse" }); await settle(2);
+    expect(p.root.querySelector(".oo-tip strong")?.textContent).toBe("quill");
+    fire(cv, "pointerdown", { pointerId: 2, pointerType: "mouse", button: 0, clientX: s.x, clientY: s.y });
+    fire(cv, "pointerup", { pointerId: 2, pointerType: "mouse" });
+    fire(cv, "click", { clientX: s.x, clientY: s.y }); await settle(2);
+    expect(location.pathname).toBe("/ui/chat/quill");
+    nav.navigate("/ui/fleet/org"); await settle(2);
+    // The same logical point at the opening view's screen position is somewhere else now: nobody there.
+    const old = CV.toScreen(V.fitScene(1280, 720, STAGE, 1), seat.x, seat.y - 20);
+    fire(cv, "pointermove", { clientX: old.x, clientY: old.y, pointerType: "mouse" }); await settle(2);
+    expect(p.root.querySelector(".oo-tip strong")?.textContent ?? null).not.toBe("quill");
+  });
+  it("the view is kept per office and style (a moment after it moves, and when the view goes) and restored on this device's level", async () => {
+    studio(); await office();
+    await key("+"); await key("+"); await key("+");
+    await new Promise((r) => setTimeout(r, 450));
+    const kept = JSON.parse(localStorage.getItem("agend_org_office_view")!);
+    expect(Object.keys(kept)).toEqual(["auto@studio"]);
+    expect(kept["auto@studio"][0]).toBe(2);
+    await p.unmount();
+    localStorage.setItem("agend_org_office_view", JSON.stringify({ "auto@studio": [2, 640, 360], "auto@pixel": [3, 10, 10] }));
+    await office();
+    near(shown(), { k: 2, x: 480 - 640 * 2, y: 300 - 360 * 2 });
+    // Desks: its own kept view; Studio's untouched.
+    const style = p.root.querySelectorAll(".oo-bar select")[1];
+    style.value = "pixel"; fire(style, "change"); await settle(6);
+    near(shown(), { k: 3, x: 480 - 10 * 3, y: 300 - 10 * 3 });
+    // Moved, then the view goes at once: kept on the way out.
+    await key("0"); await p.unmount();
+    const after = JSON.parse(localStorage.getItem("agend_org_office_view")!);
+    expect(after["auto@studio"]).toEqual([2, 640, 360]);
+    expect(after["auto@pixel"][0]).toBeLessThan(3);
+  });
+  it("Edit layout under zoom: the overlay follows the view; a handle dragged lands on the logical point under the pointer; a drag off the handles pans", async () => {
+    const was = (globalThis as any).Image;
+    (globalThis as any).Image = class { onload: any = null; onerror: any = null; set src(_u: string) { setTimeout(() => this.onload && this.onload(), 0); } };
+    try {
+      skins = { rev: "r", packs: [{ id: "clinic-sample", name: "Clinic", sha: "e".repeat(32) }] }; manifestAnswer = { manifest: MANIFEST(), files: FILES };
+      offices = { rev: 3, offices: [{ id: "clinic", name: "Clinic", skin: "clinic-sample", members: ["quill"] }] };
+      localStorage.setItem("agend_org_office", "clinic");
+      const auth = { canWrite: async () => true }; (globalThis as any).AgendAuth = auth; (p.window as any).AgendAuth = auth;
+      await office(); await settle(6);
+      p.root.querySelector(".oo-layout").click(); await settle(4);
+      await key("+"); await key("+"); await key("+");
+      const v = shown();
+      expect(v.k).toBe(2);
+      const ov = p.root.querySelector(".ol-overlay");
+      const box = ["left", "top", "width", "height"].map((a) => parseFloat(ov.style[a]));
+      expect(box[0]).toBeCloseTo(v.x, 6); expect(box[1]).toBeCloseTo(v.y, 6);
+      expect([box[2], box[3]]).toEqual([1280 * 2, 720 * 2]);
+      const svg = p.root.querySelector(".ol-svg");
+      svg.getBoundingClientRect = () => ({ left: box[0], top: box[1], width: box[2], height: box[3], right: box[0] + box[2], bottom: box[1] + box[3] });
+      // A handle: it moves, the view does not.
+      const seat = p.root.querySelector('[data-handle="seat:desks:0"]');
+      const to = CV.toScreen(v, 300, 300);
+      fire(seat, "pointerdown", { pointerId: 3, pointerType: "mouse", button: 0, clientX: CV.toScreen(v, 212, 240).x, clientY: CV.toScreen(v, 212, 240).y });
+      fire(svg, "pointermove", { pointerId: 3, pointerType: "mouse", clientX: to.x, clientY: to.y });
+      fire(svg, "pointerup", { pointerId: 3, pointerType: "mouse" }); await settle(3);
+      expect(p.root.querySelector('[data-handle="seat:desks:0"]').getAttribute("aria-label")).toBe("Seat 1 in desks at 300, 300");
+      near(shown(), v);
+      // Off the handles, on the overlay: it pans; the overlay goes with it.
+      fire(svg, "pointerdown", { pointerId: 4, pointerType: "mouse", button: 0, clientX: 200, clientY: 200 });
+      fire(svg, "pointermove", { pointerId: 4, pointerType: "mouse", clientX: 240, clientY: 210 });
+      fire(svg, "pointerup", { pointerId: 4, pointerType: "mouse" }); await settle(2);
+      near(shown(), { k: 2, x: v.x + 40, y: v.y + 10 });
+      expect(parseFloat(p.root.querySelector(".ol-overlay").style.left)).toBeCloseTo(v.x + 40, 6);
+      // The keyboard path: the arrows move a handle (never the view); + still zooms with a handle focused.
+      fire(p.root.querySelector('[data-handle="seat:desks:0"]'), "keydown", { key: "ArrowRight" }); await settle(2);
+      expect(p.root.querySelector('[data-handle="seat:desks:0"]').getAttribute("aria-label")).toBe("Seat 1 in desks at 301, 300");
+      near(shown(), { k: 2, x: v.x + 40, y: v.y + 10 });
+      fire(p.root.querySelector('[data-handle="seat:desks:0"]'), "keydown", { key: "+" }); await settle(2);
+      expect(shown().k).toBe(3);
+    } finally { (globalThis as any).Image = was; }
+  });
+  it("reduced motion: a zoom is drawn at once (never animated)", async () => {
+    const real = (globalThis as any).matchMedia;
+    (globalThis as any).matchMedia = (q: string) => ({ matches: /reduce/.test(q), addEventListener() {}, removeEventListener() {} });
+    try {
+      studio(); await office();
+      const ctx = p.root.querySelector(".oo-canvas")._ctx;
+      const clears = () => ctx.calls.filter(([k]: any) => k === "clearRect").length;
+      const n = clears();
+      fire(p.root.querySelector(".oo-canvas"), "keydown", { key: "+" });
+      expect(clears()).toBe(n + 1);                                       // drawn in the same turn, once
+      const last = ctx.calls.filter(([k]: any) => k === "setTransform").at(-1)[1];
+      expect(last[0]).toBeCloseTo(V.stepK(0.75, 1, 1), 9);
+    } finally { (globalThis as any).matchMedia = real; }
+  });
+  it("a phone (390 CSS px wide at DPR 3): the canvas is the stage at the device's ratio, the scene opens whole (the exact fit: no level fits), the controls are there", async () => {
+    const realDpr = (globalThis as any).devicePixelRatio;
+    Object.defineProperty(proto, "clientWidth", { configurable: true, get() { return this.className.includes("oo-stage") ? 390 : 0; } });
+    (globalThis as any).devicePixelRatio = 3;
+    try {
+      studio(); await office();
+      const cv = p.root.querySelector(".oo-canvas");
+      expect([cv.style.width, cv.style.height, cv.width, cv.height]).toEqual(["390px", "600px", 1170, 1800]);
+      const r = p.root.querySelector(".oo-mini-view");
+      expect(Number(r.getAttribute("width"))).toBeCloseTo(1280, 6);       // the whole width in view: k = 390 / 1280
+      expect(p.root.querySelectorAll(".oo-zoom button")).toHaveLength(3);
+      fire(cv, "keydown", { key: "+" }); await settle(2);
+      expect(390 / Number(p.root.querySelector(".oo-mini-view").getAttribute("width")) * 3).toBeCloseTo(1, 9);   // onto 1 device px a unit
+    } finally { delete proto.clientWidth; (globalThis as any).devicePixelRatio = realDpr; }
+  });
+  it("the stylesheet: the Office fills the panel (no frame, no column margins), the stage pans on touch, the overview leaves a phone", () => {
+    const css = readFileSync(join(process.cwd(), "src", "ui", "shared", "app.css"), "utf8");
+    expect(css).toContain(".p-fleet .panel-body > .col:has(> .oc-office) { flex: 1 0 auto; display: flex; flex-direction: column; max-width: none; padding: 0; }");
+    const stage = css.match(/\n\.oo-stage \{[^}]*\}/)![0];
+    expect(stage).toContain("touch-action: none");
+    expect(stage).toContain("overflow: hidden");
+    expect(stage).not.toMatch(/border|border-radius|height: clamp/);
+    const phone = css.slice(css.indexOf(".oc-office > .oc-bar { padding: var(--s-2) var(--s-3); }"));
+    expect(phone.slice(0, 600)).toContain(".oo-mini { display: none; }");
+  });
+  it("the matte: a built-in skin's is the page's background token; a pack's own `matte`; else its background's edge, sampled", async () => {
+    const firstFill = () => { const c = p.root.querySelector(".oo-canvas")._ctx.calls; const i = c.map(([k]: any) => k).lastIndexOf("clearRect"); return c.slice(i).find(([k]: any) => k === "fillRect")[2]; };
+    studio(); await office();
+    expect(firstFill()).toBe(K.DEFAULT_PAL.bg);
+    await p.unmount();
+    const was = (globalThis as any).Image;
+    (globalThis as any).Image = class { onload: any = null; onerror: any = null; set src(_u: string) { setTimeout(() => this.onload && this.onload(), 0); } };
+    try {
+      skins = { rev: "r", packs: [{ id: "clinic-sample", name: "Clinic", sha: "c".repeat(32) }] }; manifestAnswer = { manifest: { ...MANIFEST(), matte: "#ABCDEF" }, files: FILES };
+      localStorage.setItem("agend_org_office_skin", "clinic-sample");
+      await office(); await settle(6);
+      expect(firstFill()).toBe("#abcdef");
+      expect(p.root.querySelector(".oo-mini-matte").getAttribute("fill")).toBe("#abcdef");
+      await p.unmount();
+      edge = [16, 32, 48, 255];
+      skins = { rev: "r", packs: [{ id: "clinic-sample", name: "Clinic", sha: "d".repeat(32) }] }; manifestAnswer = { manifest: MANIFEST(), files: FILES };
+      await office(); await settle(6);
+      expect(firstFill()).toBe("#102030");
+    } finally { (globalThis as any).Image = was; }
+  });
+});
