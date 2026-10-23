@@ -14,7 +14,7 @@
  *   refusal, in an office's overrides a 400 (never a 500); the reads a page makes on its own (the list, a manifest, its
  *   pictures) never slide an idle session, while uploads and deletes keep their session and CSRF checks.
  * - Format v1 additions: a strip's displayed size (dw/dh) and walkDown / walkUp / walkSide pass the host's checks.
- * The fixture (tests/fixtures/office-skin-clinic) is a real pack drawn by the fleet's own artist for this project.
+ * The fixture (tests/fixtures/office-skin-clinic) is a small pack whose pictures are drawn by a script (simple shapes, no outside art).
  */
 import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -61,7 +61,7 @@ const scratch = () => { const d = mkdtempSync(join(tmpdir(), "agend-skins-")); d
 
 describe("checkSkinUpload: the manifest by the page's rules, then the pictures", () => {
   const refused = (body: unknown) => { const r = checkSkinUpload(body, "me", 1); return r.ok ? null : [r.status, r.error, r.detail ?? ""]; };
-  it("the clinic pack (a real artist's pack) passes: its files by content id, sizes recorded, metadata stripped", () => {
+  it("the clinic sample pack passes: its files by content id, sizes recorded, metadata stripped", () => {
     const r = checkSkinUpload(UPLOAD(), "me", 7);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
