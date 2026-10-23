@@ -286,7 +286,9 @@ only calls and work get bubbles (a few at most) and name tags show on hover or f
 bubble (never message content). Reduced motion: still poses, nothing in the air, bubbles shown whole.
 **All offices** (in the switcher once two or more offices are stored, kept per device) shows every stored office as
 a tile on one canvas, each exactly as its own view (its style, members, seats, bubbles, walking), labelled with its
-name and head count; **Lobby tile** (on by default) adds the instances in no office. Hover and click work across
+name and head count, each as large as its office's content, packed to fill the panel; **Lobby tile** (on by
+default; disabled when everyone is in an office) adds the instances in no office. Below 75% name tags show on hover
+only. Hover and click work across
 tiles; a tile's label, or a double-click on it, opens that office; traffic between offices flies straight across.
 Edit offices and Edit layout wait for a single office.
 The Office fills the Fleet panel and moves like the Canvas (#2540): drag to pan, the wheel or a pinch to zoom,

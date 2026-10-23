@@ -5,11 +5,12 @@
 //
 // - Shown when at least two offices are stored (overviewOk); an id no stored office can have (ALL_ID: '*' is not an
 //   office id's character), kept per device as any office pick is.
-// - The tiles: a cell per tile, CELL_W × CELL_H logical units (a zones scene's 1280×720) under a LABEL band, GAP apart,
-//   M from the edge. A tile keeps its scene's aspect: a zones scene fills its cell (scale 1); a desks layout (its own
-//   computed size) is scaled down to fit the cell when it is larger, never up. Rows are as tall as their tallest tile.
-//   The columns: whichever count (1…n) lets the whole overview show largest in the panel (Fit's contain); a tie keeps
-//   the fewer columns. The order is the stored order, the lobby last — the same input always gives the same picture.
+// - The tiles: each as large as its office's drawn content — a zones scene its 1280×720, a desks office its rooms'
+//   bounds (cropToRooms: an office of three is small) — scaled down to at most CELL_W × CELL_H, never up; a LABEL band
+//   above each (the page's label sits there), GAP apart, M from the edge. Shelf packing in the stored order (the lobby
+//   last): a row takes tiles while they fit a row width, each row as tall as its tallest tile and centred across. The
+//   row width: whichever (of the widths a run of tiles makes) lets the whole overview show largest in the panel (Fit's
+//   contain); a tie keeps the narrower. The same input always gives the same picture.
 // - Traffic between people in different tiles is a straight flight between their seats in overview coordinates
 //   (createCrossFlights); between two people in the same tile it is that tile's own (createFlights, along its corridors).
 import { FLIGHT, along, desksOf, membersOf, pathLength } from "./fleet-office-model.js";
@@ -20,7 +21,7 @@ export const ALL_ID = "*all";
 /** The lobby tile's key: never an office's id. */
 export const LOBBY_TILE = "\u0000lobby";
 /** The overview's geometry, in logical units. */
-export const OV = { CELL_W: 1280, CELL_H: 720, LABEL: 56, GAP: 48, M: 48 };
+export const OV = { CELL_W: 1280, CELL_H: 720, LABEL: 56, GAP: 24, M: 24 };
 
 /** Whether "All offices" is offered: at least two stored offices. */
 export const overviewOk = (stored) => Array.isArray(stored) && stored.length >= 2;
@@ -36,36 +37,59 @@ export function lobbyNodes(stored, view) {
   return [...out.values()];
 }
 
-/** A scene's scale in its tile: as large as fits the cell, never larger than its own size. */
+/** A scene's scale in its tile: its own size, scaled down to fit a CELL_W × CELL_H cell (never up). */
 export const tileScale = (w, h) => Math.min(1, OV.CELL_W / Math.max(1, w), OV.CELL_H / Math.max(1, h));
 
 /**
- * The tiles of `scenes` ([{ key, w, h }], in order) in `cols` columns: each { key, x, y, w, h, s (its scale), label:
- * { x, y, w, h } (the band above it) }, and the overview's size. A tile is centred across its cell, at the top of its row.
+ * A desks layout cropped to its rooms: everything moved so the rooms' bounds start at (0, 0), its size theirs (the
+ * corridors outside the rooms and the margins are not part of a tile). Unchanged when it has no rooms.
  */
-export function arrangeTiles(scenes, cols) {
-  const { CELL_W, CELL_H, LABEL, GAP, M } = OV;
-  const n = scenes.length, c = Math.max(1, Math.min(n || 1, Math.floor(cols) || 1));
-  const tiles = [];
-  let y = M;
-  for (let r = 0; r * c < n; r++) {
-    const row = scenes.slice(r * c, r * c + c).map((sc) => { const s = tileScale(sc.w, sc.h); return { sc, s, w: Math.max(1, sc.w) * s, h: Math.max(1, sc.h) * s }; });
-    const rowH = Math.min(CELL_H, Math.max(...row.map((t) => t.h)));
-    row.forEach((t, i) => {
-      const x = M + i * (CELL_W + GAP) + (CELL_W - t.w) / 2;
-      tiles.push({ key: t.sc.key, x, y: y + LABEL, w: t.w, h: t.h, s: t.s, label: { x, y, w: t.w, h: LABEL } });
-    });
-    y += LABEL + rowH + GAP;
-  }
-  const across = Math.min(c, n);
-  return { cols: c, tiles, width: 2 * M + across * CELL_W + Math.max(0, across - 1) * GAP, height: n ? y - GAP + M : 2 * M };
+export function cropToRooms(L) {
+  if (!L.rooms.length) return L;
+  const x0 = Math.min(...L.rooms.map((r) => r.x)), y0 = Math.min(...L.rooms.map((r) => r.y));
+  const x1 = Math.max(...L.rooms.map((r) => r.x + r.w)), y1 = Math.max(...L.rooms.map((r) => r.y + r.h));
+  const mv = (p) => ({ ...p, x: p.x - x0, y: p.y - y0 });
+  return { ...L, rooms: L.rooms.map((r) => ({ ...mv(r), desks: r.desks.map((d) => ({ ...mv(d), seat: mv(d.seat) })) })), waypoints: (L.waypoints || []).map(mv),
+    width: x1 - x0, height: y1 - y0 };
 }
 
-/** The tiles packed for a `size` panel: the column count whose overview shows largest there (a tie: fewer columns). */
+/**
+ * The tiles of `scenes` ([{ key, w, h }], in order) on shelves at most `rowW` wide (a tile wider than that has a row of
+ * its own): each { key, x, y, w, h, s (its scale), label: { x, y, w, h } (the band above it) }; and the overview's size.
+ * Each row is centred across the widest; its tiles stand at its top, under their labels.
+ */
+export function arrangeTiles(scenes, rowW) {
+  const { LABEL, GAP, M } = OV;
+  const rows = [];
+  let row = null;
+  for (const sc of scenes) {
+    const s = tileScale(sc.w, sc.h), it = { key: sc.key, s, w: Math.max(1, sc.w) * s, h: Math.max(1, sc.h) * s };
+    if (!row || row.w + GAP + it.w > rowW + 1e-6) { row = { items: [], w: -GAP, h: 0 }; rows.push(row); }
+    row.items.push(it); row.w += GAP + it.w; row.h = Math.max(row.h, it.h);
+  }
+  const inner = rows.length ? Math.max(...rows.map((r) => r.w)) : 0, tiles = [];
+  let y = M;
+  for (const r of rows) {
+    let x = M + (inner - r.w) / 2;
+    for (const it of r.items) {
+      tiles.push({ key: it.key, x, y: y + LABEL, w: it.w, h: it.h, s: it.s, label: { x, y, w: it.w, h: LABEL } });
+      x += it.w + GAP;
+    }
+    y += LABEL + r.h + GAP;
+  }
+  return { rows: rows.length, rowW, tiles, width: 2 * M + inner, height: rows.length ? y - GAP + M : 2 * M };
+}
+
+/**
+ * The tiles packed for a `size` panel: of the row widths a run of consecutive tiles makes, the one whose overview shows
+ * largest there (min of the two fits); a tie keeps the narrower.
+ */
 export function tileLayout(scenes, size) {
-  let best = arrangeTiles(scenes, 1), bestK = -1;
-  for (let c = 1; c <= Math.max(1, scenes.length); c++) {
-    const a = arrangeTiles(scenes, c), k = Math.min(size.w / a.width, size.h / a.height);
+  const ws = scenes.map((sc) => Math.max(1, sc.w) * tileScale(sc.w, sc.h)), cands = new Set();
+  for (let i = 0; i < ws.length; i++) { let run = -OV.GAP; for (let j = i; j < ws.length; j++) { run += OV.GAP + ws[j]; cands.add(run); } }
+  let best = arrangeTiles(scenes, 0), bestK = -1;
+  for (const rowW of [...cands].sort((a, b) => a - b)) {
+    const a = arrangeTiles(scenes, rowW), k = Math.min(size.w / a.width, size.h / a.height);
     if (k > bestK + 1e-9) { best = a; bestK = k; }
   }
   return best;

@@ -1762,6 +1762,8 @@ strong.org-name { font-size: var(--fs-sm); color: var(--text); }
 .oo-people-list label { display: flex; align-items: center; gap: 8px; padding: 3px 2px; font-size: var(--fs-xs); color: var(--text); cursor: pointer; overflow-wrap: anywhere; }
 .oo-note { font-size: var(--fs-xs); }
 .oo-stage { position: relative; flex: 1 1 auto; min-height: 340px; overflow: hidden; background: var(--bg); touch-action: none; user-select: none; -webkit-user-select: none; }
+/* #2554: clip, not a scroll container — nothing past the edge (a tile's label) can scroll the stage and its controls. */
+.oo-stage { overflow: clip; }
 .oo-canvas { position: absolute; left: 0; top: 0; display: block; image-rendering: pixelated; cursor: grab; touch-action: none; }
 .oo-canvas:active { cursor: grabbing; }
 .oo-canvas:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }

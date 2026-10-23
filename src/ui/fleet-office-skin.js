@@ -222,14 +222,16 @@ function drawDeskFront(ctx, d, look, env) {
     ctx.fillStyle = pal.text2; ctx.font = "600 8px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.fillText(fitText(ctx, env.labels.closed, 32), d.x + 48, d.y + 63);
   }
-  // The name tag.
-  ctx.fillStyle = pal.surface;
-  ctx.fillRect(d.x + 6, d.y + 78, d.w - 12, 16);
-  ctx.strokeStyle = look.match ? pal.focus : pal.border;
-  ctx.lineWidth = look.match ? 2 : 1;
-  ctx.strokeRect(d.x + 6.5, d.y + 78.5, d.w - 13, 15);
-  ctx.fillStyle = pal.text; ctx.font = "600 11px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.fillText(fitText(ctx, look.label, d.w - 18), d.x + d.w / 2, d.y + 86.5);
+  // The name tag (#2554: none when `notag` — a tile too small to read it; the page draws it again on hover).
+  if (!look.notag) {
+    ctx.fillStyle = pal.surface;
+    ctx.fillRect(d.x + 6, d.y + 78, d.w - 12, 16);
+    ctx.strokeStyle = look.match ? pal.focus : pal.border;
+    ctx.lineWidth = look.match ? 2 : 1;
+    ctx.strokeRect(d.x + 6.5, d.y + 78.5, d.w - 13, 15);
+    ctx.fillStyle = pal.text; ctx.font = "600 11px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(fitText(ctx, look.label, d.w - 18), d.x + d.w / 2, d.y + 86.5);
+  }
   ctx.restore();
   if (look.match) { ctx.save(); ctx.strokeStyle = pal.focus; ctx.lineWidth = 2; ctx.strokeRect(d.x + 2, d.y + 2, d.w - 4, d.h - 6); ctx.restore(); }
 }
