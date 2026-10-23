@@ -423,6 +423,12 @@ import { getTmuxSession } from "./config.js";
 /** #2163: `classic` — a ClassicBot room's agent: only the skills about its own look and the dashboard. */
 type ManagedSkillRole = "general" | "worker" | "classic";
 
+/** #2348: how a guest sign-in code's issuance ended (issueGuestCode), for Settings → Guests' Send sign-in code. */
+export type GuestCodeOutcome =
+  | { kind: "sent"; expiresInMs: number; publicLink: boolean }
+  | { kind: "nothing" } | { kind: "paused" } | { kind: "busy" } | { kind: "revoked" }
+  | { kind: "dm_failed"; platform: string; reason: string; startUrl?: string };
+
 // Closed migration cohort: these 11 names existed immediately before the first
 // managed-skill publisher (a1ac499f; parent e267e684). Never grow this set when
 // adding a bundled skill: its new name is not proof of old AgEnD ownership.
@@ -1014,6 +1020,11 @@ type CleanupWatch = { receipt: UpdateReceipt; summary: RestartProgressSummary; f
 
 /** #1774: an instance's identity when one of its replies was sent (the name's generation, its daemon then). */
 interface WebChatIdentity { generation: number; daemon: unknown }
+
+/** #2499 review: one line of Settings → Guests' Recent changes (guestOverview), from the event log. */
+export type GuestAuditEntry =
+  | { kind: "grant"; at: number; account: string; name: string; via: "direct" | "confirmed"; added: string[]; removed: string[]; endedSessions: number }
+  | { kind: "code"; at: number; account: string; name: string; outcome: string };
 
 export class FleetManager implements FleetContext, LifecycleContext, ArchiverContext, StatuslineWatcherContext, OutboundContext, AgentEndpointContext {
   private static signalTarget: FleetManager | null = null;
@@ -6854,9 +6865,11 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
    * reaches now, its sessions and devices, and its narrowing. Ids are the accounts' own (an admin's page).
    */
   guestOverview(): {
-    enabled: boolean; chat: boolean; instances: string[];
+    enabled: boolean; chat: boolean; explicit: boolean; instances: string[];
     connections: Array<{ id: string; type: string; mode: "open" | "allowlist"; named: string[] }>;
-    guests: Array<{ adapterId: string; userId: string; name: string; platform: string; scope: string[]; reach: string[]; sessions: number; lastSeen: number | null; devices: number; narrow: string[] | null }>;
+    guests: Array<{ adapterId: string; userId: string; name: string; platform: string; scope: string[]; reach: string[]; sessions: number; lastSeen: number | null; devices: number; narrow: string[] | null;
+      grant: { name?: string; instances: string[] } | null; code?: { at: number; outcome: string; expiresAt?: number; reason?: string; platform?: string; startUrl?: string } }>;
+    audit: GuestAuditEntry[];
   } {
     this.initializeWebSessions();
     const cfg = this.fleetConfig?.web?.guests;
@@ -6867,7 +6880,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     for (const a of this.webSessions!.guestActivity()) accounts.set(`${a.adapterId}\u0000${a.userId}`, a);
     const devices = this.returningDevices!.guestCounts();
     for (const k of devices.keys()) if (!accounts.has(k)) { const [adapterId, userId] = k.split("\u0000") as [string, string]; accounts.set(k, { adapterId, userId, sessions: 0, lastSeen: null }); }
-    for (const key of Object.keys(cfg?.narrow ?? {})) {
+    // #2348: every granted account is listed too, signed in or not.
+    for (const key of [...Object.keys(cfg?.narrow ?? {}), ...Object.keys(cfg?.grants ?? {})]) {
       const at = key.indexOf(":"), adapterId = key.slice(0, at), userId = key.slice(at + 1), k = `${adapterId}\u0000${userId}`;
       if (at > 0 && !accounts.has(k)) accounts.set(k, { adapterId, userId, sessions: 0, lastSeen: null });
     }
@@ -6875,10 +6889,132 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       const owner = { adapterId: a.adapterId, userId: a.userId };
       const badge = this.guestBadge(owner);
       // `reach`: before narrowing — what Settings offers to narrow to (#2104 review: never an agent it cannot reach).
+      const grant = own(cfg?.grants, `${a.adapterId}:${a.userId}`);
+      const sent = this.guestCodeSent.get(`${a.adapterId}:${a.userId}`);
       return { ...a, name: badge.name, platform: badge.platform, scope: [...this.guestScope(owner)].sort(), reach: [...this.guestReach(owner)].sort(),
-        devices: devices.get(k) ?? 0, narrow: own(cfg?.narrow, `${a.adapterId}:${a.userId}`) ?? null };
+        devices: devices.get(k) ?? 0, narrow: own(cfg?.narrow, `${a.adapterId}:${a.userId}`) ?? null,
+        // #2348: the grant as fleet.yaml has it (null: none), and the last code an admin sent from Settings.
+        grant: grant ? { ...(grant.name ? { name: grant.name } : {}), instances: [...grant.instances] } : null,
+        ...(sent ? { code: { at: sent.at, outcome: sent.outcome.kind, ...(sent.outcome.kind === "sent" ? { expiresAt: sent.at + sent.outcome.expiresInMs } : {}),
+          ...(sent.outcome.kind === "dm_failed" ? { reason: sent.outcome.reason, platform: sent.outcome.platform, ...(sent.outcome.startUrl ? { startUrl: sent.outcome.startUrl } : {}) } : {}) } } : {}) };
     }).sort((x, y) => (y.lastSeen ?? -1) - (x.lastSeen ?? -1));
-    return { enabled: cfg?.enabled === true, chat: cfg?.chat !== false, instances: Object.keys(this.fleetConfig?.instances ?? {}).sort(), connections, guests };
+    // #2348: `explicit` — grants are the scope (default deny); false: the derived scope of #1920, until grants are saved.
+    return { enabled: cfg?.enabled === true, chat: cfg?.chat !== false, explicit: cfg?.grants !== undefined, instances: Object.keys(this.fleetConfig?.instances ?? {}).sort(), connections, guests,
+      audit: this.guestAudit() };
+  }
+
+  /**
+   * #2499 review: the guest audit an admin reads — the newest grant changes and admin-sent codes from the event log
+   * (`fleet` rows: no agent's Log shows them). Through guestOverview only: Settings' admin gate, never over the public
+   * link, never a guest's. The person's name as the card shows it; a session handle stays on the server (`by` → whether
+   * a person saved it here or it was confirmed in General).
+   */
+  private guestAudit(limit = FleetManager.GUEST_AUDIT_SHOWN): GuestAuditEntry[] {
+    if (!this.eventLog) return [];
+    // One read, newest first by row id: a total order (created_at is to the second), so the cap never drops a newer row.
+    let rows: Array<{ created_at: string; event_type: string; payload: Record<string, unknown> | null }> = [];
+    try { rows = this.eventLog.latestOfTypes("fleet", ["guest_grant_changed", "guest_code_sent"], limit); } catch { return []; }
+    const names = (list: unknown) => (Array.isArray(list) ? list.filter((n): n is string => typeof n === "string") : []);
+    return rows.flatMap((r): GuestAuditEntry[] => {
+      const p = r.payload ?? {}, account = typeof p.account === "string" ? p.account : "";
+      const at = account.indexOf(":");
+      if (at <= 0) return [];
+      const name = this.webPerson({ adapterId: account.slice(0, at), userId: account.slice(at + 1) }).name;
+      const when = Date.parse(r.created_at.includes("T") ? r.created_at : `${r.created_at.replace(" ", "T")}Z`);
+      return r.event_type === "guest_grant_changed"
+        ? [{ kind: "grant" as const, at: when, account, name, via: p.via === "confirmed" ? "confirmed" as const : "direct" as const, added: names(p.added), removed: names(p.removed),
+          endedSessions: typeof p.endedSessions === "number" ? p.endedSessions : 0 }]
+        : [{ kind: "code" as const, at: when, account, name, outcome: typeof p.outcome === "string" ? p.outcome : "unknown" }];
+    });
+  }
+  private static readonly GUEST_AUDIT_SHOWN = 20;
+
+  /**
+   * #2348: Settings → Guests' picker — the people AgEnD has seen in chat (seen_people, from human receipts: never a bot,
+   * never the web), without fleet admins (they sign in as admins) or accounts of a connection the fleet no longer has.
+   * Admin only (settings-api.ts), never over the public link.
+   */
+  guestPeople(): { people: Array<{ adapterId: string; userId: string; platform: string; username: string | null; name: string; lastSeen: string; instances: string[] }> } {
+    const seen = this.deliveryOutbox?.isOpen ? this.deliveryOutbox.seenPeople() : [];
+    const people = seen.filter((p) => this.worlds.has(p.adapterId) && !this.isFleetAdmin(p.userId, p.adapterId)).map((p) => {
+      const owner = { adapterId: p.adapterId, userId: p.userId };
+      return { adapterId: p.adapterId, userId: p.userId, platform: this.worlds.get(p.adapterId)?.adapter.type ?? p.adapterId, username: p.username,
+        name: this.webPerson(owner).name, lastSeen: p.lastSeen, instances: p.instances.map((i) => i.name) };
+    });
+    return { people };
+  }
+
+  /**
+   * #2348: why this account may not be given a grant, or null. Only someone AgEnD has seen in chat, on a connection the
+   * fleet runs, who is not a fleet admin of it (an admin is never a guest).
+   */
+  guestGrantRefusal(adapterId: string, userId: string): string | null {
+    if (!this.worlds.has(adapterId) && !this.fleetConfig?.channels?.some((c) => (c.id ?? c.type) === adapterId)) return "no such connection in this fleet";
+    if (this.isFleetAdmin(userId, adapterId)) return "a fleet admin signs in as an admin, not as a guest";
+    if (!this.deliveryOutbox?.isOpen || !this.deliveryOutbox.isSeenPerson(adapterId, userId)) return "only someone AgEnD has seen in chat can be given guest access";
+    return null;
+  }
+
+  /**
+   * #2348 delta §5: a grant changed with a save — one event-log entry per person, shown in Settings → Guests' Recent
+   * changes (guestOverview: admin-only, never over the public link or to a guest): who saved it (an admin's
+   * session handle, the header token, or null when replayed for a confirmation), whether it applied at once or was
+   * confirmed in General, the agents added and taken away, and the sessions a removal ended. Never message content.
+   */
+  noteGuestGrantChange(change: { by: string | null; via: "direct" | "confirmed"; account: string; added: string[]; removed: string[]; endedSessions: number }): void {
+    this.logger.info({ account: change.account, via: change.via, added: change.added.length, removed: change.removed.length }, "Guest access changed in Settings");
+    try { this.eventLog?.insert("fleet", "guest_grant_changed", { ...change }); } catch { /* the log line stands */ }
+  }
+
+  /** #2348: an admin's Send sign-in code, per admin (the caller): at most this many in ADMIN_CODE_WINDOW_MS. */
+  private static readonly ADMIN_CODE_MAX = 10;
+  private static readonly ADMIN_CODE_WINDOW_MS = 10 * 60_000;
+  private readonly adminCodeSends = new Map<string, number[]>();
+  /** #2348: the last admin-sent code per account, for the Settings card ("Code sent 18:42 · expires 18:52", or why not). */
+  private readonly guestCodeSent = new Map<string, { at: number; outcome: GuestCodeOutcome }>();
+
+  /**
+   * #2348: Settings → Guests' "Send sign-in code" — a guest code to an account an admin granted access, by DM only (no
+   * chat to answer in, nothing posted anywhere). The same issuance as the person's own /web (one code per account, the
+   * code store's caps and breaker, the public link's audience when it is open) and the same once-a-minute limit per
+   * account, plus a per-admin cap. Refused without guest sign-in, for a fleet admin, or with nothing granted. Audited.
+   */
+  async sendGuestCodeByAdmin(owner: { adapterId: string; userId: string }, by: string,
+    /** #2365 review: the initiating admin is still signed in and still an admin (settings-api re-checks the session). */
+    current: () => boolean = () => true): Promise<{ status: number; body: Record<string, unknown> }> {
+    const guests = this.fleetConfig?.web?.guests;
+    if (guests?.enabled !== true) return { status: 409, body: { ok: false, outcome: "guests_off", error: "Guest sign-in is off" } };
+    if (this.isFleetAdmin(owner.userId, owner.adapterId)) return { status: 409, body: { ok: false, outcome: "admin", error: "A fleet admin signs in as an admin" } };
+    if (!this.guestScope(owner).size) return { status: 409, body: { ok: false, outcome: "nothing", error: "Nothing is granted to this person yet: save their access first" } };
+    const token = this.webToken;
+    const adapter = this.adapters.get(owner.adapterId);
+    if (this.shuttingDown || !token || !adapter) return { status: 503, body: { ok: false, outcome: "starting", error: "AgEnD is starting or this connection is not running" } };
+    const key = `${owner.adapterId}\u0000${owner.userId}`, asked = this.guestCodeAskedAt.get(key);
+    const now = performance.now();
+    if (this.guestCodeInFlight.has(key) || (asked !== undefined && now - asked < 60_000)) {
+      return { status: 429, body: { ok: false, outcome: "wait", retryAfterMs: asked !== undefined ? Math.max(0, 60_000 - (now - asked)) : 60_000 } };
+    }
+    const mine = (this.adminCodeSends.get(by) ?? []).filter((at) => now - at < FleetManager.ADMIN_CODE_WINDOW_MS);
+    if (mine.length >= FleetManager.ADMIN_CODE_MAX) return { status: 429, body: { ok: false, outcome: "admin_limit", retryAfterMs: FleetManager.ADMIN_CODE_WINDOW_MS - (now - mine[0]!) } };
+    this.adminCodeSends.set(by, [...mine, now]);
+    while (this.adminCodeSends.size > 256) this.adminCodeSends.delete(this.adminCodeSends.keys().next().value as string);
+    let outcome: GuestCodeOutcome = { kind: "busy" };
+    this.guestCodeInFlight.add(key);
+    try {
+      await this.issueGuestCode({ replyHere: async () => undefined }, owner, key, adapter, token, (o) => { outcome = o; }, current);
+    } finally { this.guestCodeInFlight.delete(key); }
+    const done = outcome as GuestCodeOutcome;
+    // #2365 review: the admin's session ended (or stopped being an admin's) while the code was on its way: nothing was
+    // sent, or what was made is withdrawn — the answer says so, as to anyone no longer signed in.
+    if (done.kind === "revoked" && !current()) return { status: 401, body: { ok: false, outcome: "revoked", error: "no longer authorized" } };
+    this.guestCodeSent.set(`${owner.adapterId}:${owner.userId}`, { at: Date.now(), outcome: done });
+    while (this.guestCodeSent.size > 512) this.guestCodeSent.delete(this.guestCodeSent.keys().next().value as string);
+    // Audited: who asked, for whom, what happened (never the code).
+    this.logger.info({ by, adapterId: owner.adapterId, outcome: done.kind }, "Guest sign-in code sent by an admin from Settings");
+    try { this.eventLog?.insert("fleet", "guest_code_sent", { by, account: `${owner.adapterId}:${owner.userId}`, outcome: done.kind, instances: this.guestScope(owner).size }); } catch { /* the log line stands */ }
+    const status = done.kind === "sent" ? 200 : done.kind === "dm_failed" ? 502 : 409;
+    return { status, body: { ok: done.kind === "sent", outcome: done.kind, ...(done.kind === "sent" ? { expiresAt: Date.now() + done.expiresInMs, publicLink: done.publicLink } : {}),
+      ...(done.kind === "dm_failed" ? { platform: done.platform, reason: done.reason, ...(done.startUrl ? { startUrl: done.startUrl } : {}) } : {}) } };
   }
 
   /** #1920 phase 3 (the app shell): a guest's chip — its web name, and its connection's platform (discord, telegram). */
@@ -6946,29 +7082,37 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
 
   /** guestWebCommand's issuance, one per account at a time; a revoke made meanwhile (either kind) ends it unissued. */
   private async issueGuestCode(ask: { username?: string; replyHere: (text: string) => Promise<unknown>; replyPrivately?: (text: string) => Promise<unknown> },
-    owner: { adapterId: string; userId: string }, key: string, adapter: ChannelAdapter, token: string): Promise<void> {
+    owner: { adapterId: string; userId: string }, key: string, adapter: ChannelAdapter, token: string,
+    /** #2348: how it ended, for a caller with no chat to answer in (Settings → Guests' Send sign-in code). */
+    report: (outcome: GuestCodeOutcome) => void = () => {},
+    /**
+     * #2365 review: the one who asked may still ask — for an admin's Send sign-in code, that admin's session as it is
+     * now. Asked with the revocation checks, after every wait: false ends the issuance, and withdraws its code if one was made.
+     */
+    stillAllowed: () => boolean = () => true): Promise<void> {
     const say = (text: string) => ask.replyHere(text).catch(() => undefined);
     const revokes = this.guestRevokes, accountRevokes = this.guestAccountRevokes.get(key) ?? 0;
-    const unrevoked = (): boolean => this.guestRevokes === revokes && (this.guestAccountRevokes.get(key) ?? 0) === accountRevokes;
+    const unrevoked = (): boolean => this.guestRevokes === revokes && (this.guestAccountRevokes.get(key) ?? 0) === accountRevokes && stillAllowed();
     // §3.2: its rooms are read at sign-in (bounded; never longer than the reads' own deadline).
     await withinBudget(this.refreshGuestRooms(owner, { mode: "force" }), performance.now() + 6_000).catch(() => undefined);
-    if (!unrevoked()) return;                         // revoked while its rooms were read: no code
+    if (!unrevoked()) { report({ kind: "revoked" }); return; }   // revoked while its rooms were read: no code
     const scope = this.guestScope(owner);
     if (!scope.size) {
       const open = this.worlds.get(owner.adapterId)?.accessManager.getMode() === "open";
       await say(t(open ? "web.guest_not_set_up" : "web.guest_nothing"));
+      report({ kind: "nothing" });
       return;
     }
     this.initializeWebSessions();
     const codes = this.webGuestLoginCodes!;
-    if (codes.pausedForMs() > 0) { await say(t("web.guest_paused")); return; }
+    if (codes.pausedForMs() > 0) { await say(t("web.guest_paused")); report({ kind: "paused" }); return; }
     // §5.5 (step 4b): with the public link open, the code works through it too (an admin opened it; a guest is still a
     // guest there) — most guests are not on the host's network. Its closing withdraws that audience (revokeAudience).
     const open = this.publicWebLink?.openSignin() ?? null;
     // One code per account (a new one replaces only its own); at the cap, refused — never another guest's evicted.
     const login = codes.issue({ epoch: tokenEpoch(token), audiences: ["local", ...(open ? [open.exposureId] : [])],
       recipient: { adapterId: owner.adapterId, userId: owner.userId, ...(ask.username ? { username: ask.username } : {}) } });
-    if (!login) { await say(t("web.guest_busy")); return; }
+    if (!login) { await say(t("web.guest_busy")); report({ kind: "busy" }); return; }
     this.guestCodeAskedAt.delete(key); this.guestCodeAskedAt.set(key, performance.now());
     while (this.guestCodeAskedAt.size > 256) this.guestCodeAskedAt.delete(this.guestCodeAskedAt.keys().next().value as string);
     const current = (): boolean => !this.shuttingDown && this.webToken === token && this.adapters.get(owner.adapterId) === adapter
@@ -6993,11 +7137,13 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         if (!current()) throw new Error("guest no longer admitted");
         await say(t("web.guest_sent"));
       }
+      report({ kind: "sent", expiresInMs: LOGIN_CODE_TTL_MS, publicLink: !!open });
     } catch (err) {
       codes.revokeIfCurrent(login.issuanceId);              // this flow's code only, never a later one's
       this.logger.info({ err: (err as Error)?.message, adapterId: owner.adapterId }, "Guest sign-in code was not delivered privately");
-      if (!unrevoked()) return;                              // revoked meanwhile: the revoke's own answer said so
+      if (!unrevoked()) { report({ kind: "revoked" }); return; }   // revoked meanwhile: the revoke's own answer said so
       const start = adapter.type === "telegram" ? this.tgStartWebUrl(owner.adapterId) : null;
+      report({ kind: "dm_failed", platform: adapter.type, reason: String((err as Error)?.message ?? err).slice(0, 200), ...(start ? { startUrl: start } : {}) });
       // #1742 for guests (step 4b-3): its START button (a bare /start, or the link's /start web) then asks again, from
       // the DM — once, within the window.
       if (adapter.type === "telegram") this.openTgWebStartWindow(owner.adapterId, owner.userId);
@@ -20990,6 +21136,25 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
   }
 
   /**
+   * #2347 restart flow: saved changes that take effect only after AgEnD restarts — the startup-only keys fleet.yaml
+   * now differs on, and the newest apply job whose fleet row can carry the restart (`job_id`, null when none can: a
+   * hand edit, or a job past its retention). Null when nothing is pending, and when a restart could not clear it
+   * (the signature mismatch the panel reports instead). The same test requestSettingsSelfRestart makes.
+   */
+  settingsRestartPending(): { keys: string[]; job_id: string | null } | null {
+    if (this.appliedFleetLevel === null || this.fleetSignatureMismatch) return null;
+    const next = this.nextFleetConfig();
+    if (this.appliedFleetLevel === this.fleetLevelSignature(next)) return null;
+    let job: ApplyJob | null = null;
+    // A job whose restart was asked for already has its row in flight ("running"), so it is never offered again.
+    for (const candidate of this.applyJobs.all()) {
+      const row = candidate.targets.find(item => item.target === APPLY_FLEET_TARGET);
+      if (row?.status === "restart-required" && (!job || candidate.startedAt >= job.startedAt)) job = candidate;
+    }
+    return { keys: fleetLevelDifferences(this.startupFleetConfig, next), job_id: job ? job.id : null };
+  }
+
+  /**
    * Restart AgEnD itself on behalf of a Settings apply.
    *
    * Deliberately a separate action from Apply: the panel is reachable from
@@ -22439,6 +22604,8 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
   guestScope(owner: { readonly adapterId: string; readonly userId: string } | undefined): ReadonlySet<string> {
     const guests = this.fleetConfig?.web?.guests;
     if (!owner || guests?.enabled !== true) return NO_GUEST_SCOPE;
+    // #2348: explicit grants, once the key exists, are the whole scope — no narrowing on top (a grant is already exact).
+    if (guests.grants !== undefined) { const granted = this.guestReach(owner); return granted.size ? granted : NO_GUEST_SCOPE; }
     const scope = new Set(this.guestReach(owner));
     const narrow = guests.narrow && Object.hasOwn(guests.narrow, `${owner.adapterId}:${owner.userId}`) ? guests.narrow[`${owner.adapterId}:${owner.userId}`] : undefined;
     if (narrow) { const keep = new Set(narrow); for (const name of [...scope]) if (!keep.has(name)) scope.delete(name); }
@@ -22454,6 +22621,18 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     const guests = this.fleetConfig?.web?.guests;
     const scope = new Set<string>();
     if (guests?.enabled !== true) return scope;
+    // #2348: with explicit grants, what an admin granted this account — of the instances that exist now (fleet.yaml's, or
+    // a ClassicBot room's) — and nothing else: no connection access, no room membership, no open_instances.
+    if (guests.grants !== undefined) {
+      const key = `${owner.adapterId}:${owner.userId}`;
+      const grant = Object.hasOwn(guests.grants, key) ? guests.grants[key] : undefined;
+      if (!grant || !Array.isArray(grant.instances)) return scope;
+      const rooms = new Set((this.classicChannels?.getAll() ?? []).map((r) => r.instanceName));
+      for (const name of grant.instances) {
+        if ((this.fleetConfig?.instances && Object.hasOwn(this.fleetConfig.instances, name)) || rooms.has(name)) scope.add(name);
+      }
+      return scope;
+    }
     const own = <T>(map: Record<string, T> | undefined, key: string): T | undefined => (map && Object.hasOwn(map, key) ? map[key] : undefined);
     const world = this.worlds.get(owner.adapterId);
     if (world && world.accessManager.isAllowed(owner.userId)) {
@@ -22490,7 +22669,9 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
     if (!this.webSessions || !this.webToken || !this.webSessions.isCurrent(record, tokenEpoch(this.webToken))) return "gone";
     const owner = record.owner;
     if (this.guestScope(owner).size) return "ok";
-    if (owner && this.fleetConfig?.web?.guests?.enabled === true) {
+    // #2348: with explicit grants no room's membership can give anything: nothing granted is gone, not pending. Nor does
+    // a connection's start matter: grants are config (and ClassicBot rooms), read without the adapter.
+    if (owner && this.fleetConfig?.web?.guests?.enabled === true && this.fleetConfig.web.guests.grants === undefined) {
       // Before adapters initialize, topic scope is unknown, not revoked. Keep the returning cookie but grant no
       // request until its configured world exists. Removed connections and initialized denied access stay final.
       const channels = this.fleetConfig.channels ?? (this.fleetConfig.channel ? [this.fleetConfig.channel] : []);

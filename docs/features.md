@@ -759,7 +759,7 @@ Sign in with a one-time code: send `/web` (fleet admin) or run `agend web` on th
 
 ### Named Cloudflare tunnel for the public link (#2307)
 
-**Settings → Web** can store or clear a write-only Cloudflare named-tunnel connector token and select an exact hostname and loopback origin port. The dashboard public link then keeps that hostname when you reopen it, so a phone's Add to Home Screen shortcut keeps its address. Leaving the hostname unset keeps the random quick tunnel. The token is set or cleared only (it cannot be read back); credentials stay out of command lines, API responses and logs. Token entry validates the decoded Cloudflare credential structure, trims surrounding whitespace and quotes, and explains a malformed paste without exposing credentials (#2344). The existing opening, expiry, Close, sign-in and session-revocation rules remain; this does not start an always-on public service. Login terminals and preview tunnels keep their own behaviour. Setup: [named-tunnel.md](named-tunnel.md).
+**Settings → Access & security** can store or clear a write-only Cloudflare named-tunnel connector token and select an exact hostname and loopback origin port. The dashboard public link then keeps that hostname when you reopen it, so a phone's Add to Home Screen shortcut keeps its address. Leaving the hostname unset keeps the random quick tunnel. The token is set or cleared only (it cannot be read back); credentials stay out of command lines, API responses and logs. Token entry validates the decoded Cloudflare credential structure, trims surrounding whitespace and quotes, and explains a malformed paste without exposing credentials (#2344). The existing opening, expiry, Close, sign-in and session-revocation rules remain; this does not start an always-on public service. Login terminals and preview tunnels keep their own behaviour. Setup: [named-tunnel.md](named-tunnel.md).
 
 ## Remote CLI sign-in (`/login`)
 
@@ -805,7 +805,7 @@ AgEnD keeps a snapshot of what this host can run (#2072). Each backend is **usab
 Where it shows:
 
 - **`/backend`** in chat (see [above](#diagnostics-and-per-agent-chat-commands)): an unusable backend is disabled with the reason and refused when typed.
-- **The web Create agent dialog and every Settings backend field** (an agent, the fleet default, the ClassicBot default and a room, Fleet → Config): "not installed", "not signed in (use /login)" and "needs X or newer" are disabled with that reason; "not checked yet" stays selectable; the current value is always selectable, and a backend AgEnD no longer has shows first, marked removed.
+- **The web Create agent dialog and every Settings backend field** (an agent, the fleet default, the ClassicBot default and a room): "not installed", "not signed in (use /login)" and "needs X or newer" are disabled with that reason; "not checked yet" stays selectable; the current value is always selectable, and a backend AgEnD no longer has shows first, marked removed.
 - **ClassicBot's `/start`** backend list and the setup wizard read the same snapshot. The `create_instance` tool does not check it.
 
 Model lists:
@@ -871,7 +871,7 @@ When one instance sends another a message (`send_to_instance`, `delegate_task`, 
 | `summary` | The same posts, each one line: `sender → target: ` plus the sender's task summary, or the opening of the message |
 | `hidden` | Nothing |
 
-Each topic follows its own instance: `instances.<name>.cross_instance_visibility`, else `defaults.cross_instance_visibility`, else `full`. A fleet admin sets the fleet default with `/visibility full|summary|hidden` (Telegram General topic, or Discord), which saves it to `fleet.yaml`; `/visibility` alone shows the current setting and the instances that have their own. Settings has the fleet default (Defaults) and a per-agent override (agent → Advanced). A change applies at once, with no restart.
+Each topic follows its own instance: `instances.<name>.cross_instance_visibility`, else `defaults.cross_instance_visibility`, else `full`. A fleet admin sets the fleet default with `/visibility full|summary|hidden` (Telegram General topic, or Discord), which saves it to `fleet.yaml`; `/visibility` alone shows the current setting and the instances that have their own. Settings has the fleet default (Agent defaults) and a per-agent override (agent → Advanced). A change applies at once, with no restart.
 
 The same lines appear in each instance's web chat (#1672), by the same rules and the same mode, even on a fleet with no chat platform or for an instance with no topic. They are drawn as muted, read-only status lines: plain text, never an agent's reply (no preview cards), and a long one is folded until opened. They count toward the chat history's limits and are there again after a restart.
 
@@ -1160,7 +1160,7 @@ instances:
     auto_pause_after: 30  # per-instance override: pause after 30 min idle
 ```
 
-Also configurable via the Settings web page: **Runtime & Resources → auto_pause_after**.
+Also configurable via the Settings web page: **Agent defaults → auto_pause_after**.
 
 ### Manual control
 
@@ -1350,7 +1350,7 @@ Since then:
 - **Filtering the sidebar** (2.2.5, #1936): the instance you have open stays on top under **Current**, matching or not.
 - **Names that open an instance** (2.2.5, #1990): in a chat's cross-instance status lines the other instance's name opens its chat, and in a prompt card the instance's name opens its View. An agent's or a person's message never gets such a link.
 - **The chat's commands and quick actions** (#1269): typing `/` runs the instance's own topic commands through the same handlers and command table. A paste over 4,000 characters is attached as a text file, and the thread stays at the newest message as content grows.
-- **Log tab** (#1218): a per-instance **Log** panel shows each prompt, the agent's replies (never its thinking), every tool call with arguments and result, errors, and fleet events such as crashes or restarts. Steps are read on demand from the agent's transcript while the tab is open, and update live; secret values are masked and long text is truncated. Off by default (`web.log_tab`); a fleet admin enables it in Settings → Web, and it then appears over the public link too. Supported fully on claude-code and codex; other backends show fleet events only; kiro shows fleet events with a note explaining why its own steps are not yet available.
+- **Log tab** (#1218): a per-instance **Log** panel shows each prompt, the agent's replies (never its thinking), every tool call with arguments and result, errors, and fleet events such as crashes or restarts. Steps are read on demand from the agent's transcript while the tab is open, and update live; secret values are masked and long text is truncated. Off by default (`web.log_tab`); a fleet admin enables it in Settings → Web dashboard, and it then appears over the public link too. Supported fully on claude-code and codex; other backends show fleet events only; kiro shows fleet events with a note explaining why its own steps are not yet available.
 - **The composer's row** (2.3, #2215): one row under the composer, at the bottom left: this browser's web authority, then the key hint (`✓ Verified · Enter to send · Shift+Enter for a new line`). When "Verified" ends is in its tooltip (on a touch screen, a tap shows it); not verified reads `Not verified · Authorize`. A guest's note and the public link's sentence share the same row.
 - **The chat's identity card** (2.3, #2217): nothing sits on the card. One card button in the chat header opens a menu with **Show card** and **Show picture and bio** (unticked, only the banner stays); both are kept on this device. Guests and the public link have the same button.
 - **Apply from a verified browser** (2.3, #2170): a web-verified browser's own **Apply** confirms a held Settings change when its account is on the change's platform and a fleet admin of every connection the change affects. No chat card is posted, General gets a notice, and every check runs again when the change executes. Guests, the public link, unverified browsers and changes that need the host CLI are unchanged.
@@ -1361,17 +1361,17 @@ See [web-dashboard.md](web-dashboard.md).
 
 ## Guest web sign-in (2.2.5)
 
-**Off by default (#1920).** With it on, someone who is not a fleet admin can sign in to the dashboard as their own Discord or Telegram account and see only the agents they can already use in chat. **Settings → Web → Guests** turns it on and lists who signed in, and a guest's app shows only what a guest can use.
+**Off by default (#1920).** With it on, someone who is not a fleet admin can sign in to the dashboard as their own Discord or Telegram account and see only the agents they can already use in chat. **Settings → Access & security → Guests** turns it on and decides who may sign in, and a guest's app shows only what a guest can use.
 
 **Turning it on.**
-- **Settings → Web → Guests** has:
+- **Settings → Access & security → Guests** has:
   - the **Guest sign-in** and **Guests may chat** switches;
-  - for each `open` connection, the agents its guests may reach;
-  - every guest account: name, platform and id, the agents it reaches, its sessions and devices, last active, and **Narrow**, **Remove narrowing** and **Sign out**.
+  - **People with access** and **Add a person** (see [Explicit grants](#guest-web-sign-in-225) below);
+  - before any grant exists, **Start from today's guests**, which turns each current guest's reach into a grant for you to review and save.
 - **Applying changes:**
-  - A change that widens what guests reach waits for a fleet admin's confirmation: turning it on, turning chat on, adding agents, or lifting a narrowing.
+  - A change that widens what guests reach waits for a fleet admin's confirmation: turning it on, turning chat on, or giving someone a person or an agent they did not have.
   - A change that narrows applies at once.
-  - The card is disabled over the public link.
+  - The section is not offered over the public link.
 - **Or in `fleet.yaml`:**
 
 ```yaml
@@ -1384,6 +1384,8 @@ web:
     narrow:                # "<connection id>:<user id>": only takes away
       "<connection id>:123456789": [helper]
     session: { absolute_hours: 12, idle_minutes: 120 }   # 1–24 h, 15–720 min
+    grants:                # #2348: once present, the whole scope (open_instances and narrow give nothing)
+      "<connection id>:123456789": { name: Ada, instances: [helper] }
 ```
 
 **Getting a code.**
@@ -1394,7 +1396,16 @@ web:
 - **Notices:** every guest sign-in is posted in General.
 - **Signing out:** a guest's own `/web revoke` ends only its sessions, code and remembered devices.
 
-**What a guest reaches.** It is worked out on every request and never stored:
+**Explicit grants (2.3.2, #2348).** **Settings → Access & security → Guests** lets an admin choose each guest and their agents:
+- **People with access:** one row per person, with their agents, whether they are signed in, and **Edit agents**, **Send sign-in code**, **Remove access** and **Sign out**.
+- **Add a person:** search the people AgEnD has seen writing to an agent (never a bot, never a fleet admin). Choosing one pre-ticks the agents they wrote to.
+- **How it looks:** one flat row per person with a letter avatar, the agents as chips and the state on the right (signed in, code sent, or why a DM failed; under the name on a phone). An edited row has the straight bar.
+- **Saving:** every edit is unsaved until **Save**. Adding a person, or an agent to someone, waits for a fleet admin's OK in General; taking away applies at once, and removing someone ends their sessions, code and remembered browsers right away.
+- **Send sign-in code** is an action, not part of Save. It DMs a saved grant's account its code (once a minute per person; never posted anywhere else). If the DM fails, the row says why — on Telegram, with the bot's start link to pass on. The code works on the dashboard reached directly and, if it is open when the code is sent, on the public link.
+- **Audit:** the event log records each code an admin sends (`guest_code_sent`: who, to whom, the outcome) and each saved change to someone's agents (`guest_grant_changed`: who saved it, whether it applied at once or was confirmed in General, the agents added and removed, and the sessions a removal ended). The section's **Recent changes** list shows the newest of them, to admins only (never a guest, never over the public link). Every guest sign-in is also posted in General.
+- **In `fleet.yaml`:** `web.guests.grants: { "<connection id>:<user id>": { name?, instances: [agent, …] } }`. Once `grants` exists it is the whole scope — default deny: connection access, rooms, `open_instances` and `narrow` give nothing then. **Start from today's guests** stages each current guest's reach as a grant.
+
+**What a guest reaches.** It is worked out on every request and never stored. With `grants`, only the agents granted to that account (of those that still exist). Without them (#1920's derived access):
 - **Its connection's agents:** the fleet topics and General, when that connection's access lets the account in (allowed or paired). On an `open` connection, only the agents named in `open_instances`.
 - **Its own Telegram private ClassicBot room.**
 - **A ClassicBot group room on its connection, while membership is verified:**
@@ -1403,7 +1414,7 @@ web:
   - Answers are read in the background (at sign-in, when the guest's page connects, and again every 10 minutes). A room shows only on a "member" answer at most 15 minutes old. While a room is still being checked the page waits instead of signing the guest out.
 - **Then `narrow`,** which only takes away.
 
-A fleet admin is never a guest.
+Either way the server enforces it on every read a guest can make: chat, history, files and the event stream are limited to those agents; search, the task board, the org chart and usage are never a guest's. A fleet admin is never a guest.
 
 **What a guest can do.**
 - **Chat:** with those agents only. That means the history its channel showed, files, reply buttons and Cancel, unless `chat: false` makes guests read-only.
@@ -1428,33 +1439,34 @@ Bot avatars and the custom emoji of the fleet's Discord servers are fetched on t
 Clearing the display name in View's **Edit profile** now removes the override — the name the agent set with `set_display_name` (or the instance name) shows again. Display names cleared before this release recover too.
 ## Agents' look on the web: themes, identity cards, widgets, custom CSS and mods (#1629)
 
-**Canvas Worker is experimental and off by default in 2.3.0 (#2275).** A local administrator can opt in under Settings → Web appearance → Experimental: Canvas Worker effects (`web.experimental.canvas_worker: true`). Until then, all CW UI, playback, agent tools and guidance are hidden or refused, including existing saved placements. Switching off stops playback without deleting saved data; switching on restores the existing consent and trust behavior. Ambient effects such as petals and click stars remain available either way. The following CW-specific sections describe the enabled feature.
+**Canvas Worker is experimental and off by default in 2.3.0 (#2275).** A local administrator can opt in under Settings → Web dashboard → Experimental: Canvas Worker effects (`web.experimental.canvas_worker: true`). Until then, all CW UI, playback, agent tools and guidance are hidden or refused, including existing saved placements. Switching off stops playback without deleting saved data; switching on restores the existing consent and trust behavior. Ambient effects such as petals and click stars remain available either way. The following CW-specific sections describe the enabled feature.
 
 Four things change how the dashboard looks, each with its own owner:
 
 - **An agent's theme** (its own chat; from 2.3, optionally the whole page while it is open: see [Page colours](#page-colours-23-2196)): colours for light and dark, an accent, bubble corners and border, a font, a background picture, its own picture and ring colour, and the words it shows while working. The agent sets it with `set_web_theme` and `set_web_theme_asset`; a person can **Lock** or **Reset** it from the chat's or Details' **⋯** menu. While a viewer shows agents' themes, an agent's theme picture comes right after a picture uploaded in **View** in the identity order above.
 - **An identity card** per instance: a portrait, a banner, a tagline and a bio, on Details, in View and folded into the chat. The agent sets its own; a person's field from **Edit profile** wins over the agent's, field by field.
-- **Widgets**: small panels of facts (numbers, progress, a line of text, a list, a badge, a sparkline) drawn by the dashboard's own components from a short spec and values — never HTML, script or CSS. An agent places one in its own chat header and one on its own Details page with `set_web_widget`. Your own goes in the sidebar (Settings → Web appearance), with the fleet's counts.
-- **Your own custom CSS** (Settings → Web appearance): a stylesheet for your own screens only.
+- **Widgets**: small panels of facts (numbers, progress, a line of text, a list, a badge, a sparkline) drawn by the dashboard's own components from a short spec and values — never HTML, script or CSS. An agent places one in its own chat header and one on its own Details page with `set_web_widget`. Your own goes in the sidebar (Settings → Look), with the fleet's counts.
+- **Your own custom CSS** (Settings → Look): a stylesheet for your own screens only.
 
-What a viewer sees is theirs to choose: **Settings → Web appearance → Show agents' themes, effects and widgets** turns agents' themes and widgets off on all their devices, and `?safe=1` loads any page without themes or custom CSS. Agents can check how they appear with `get_web_appearance` and draw it with `preview_web_appearance`; the `web-appearance` skill walks them through it.
+What a viewer sees is theirs to choose: **Settings → Look → Show agents' themes, effects and widgets** turns agents' themes and widgets off on all their devices, and `?safe=1` loads any page without themes or custom CSS. Agents can check how they appear with `get_web_appearance` and draw it with `preview_web_appearance`; the `web-appearance` skill walks them through it.
 
-A **mod** is one file that carries such a look: a theme with its pictures, card text, widgets, effects (Canvas Worker effects are experimental and off by default) and custom CSS. **Settings → Web appearance → Mods** imports one in two steps, showing everything in it first and applying only the parts you tick, all at once. Custom CSS from a file is never ticked for you. The same card exports a look as a file.
+A **mod** is one file that carries such a look: a theme with its pictures, card text, widgets, effects (Canvas Worker effects are experimental and off by default) and custom CSS. **Settings → Look → Mods** imports one in two steps, showing everything in it first and applying only the parts you tick, all at once. Custom CSS from a file is never ticked for you. The same card exports a look as a file.
 
 `web.themes.agent_edit: false` refuses every agent's appearance change; `web.appearance` sets the card's upload limits. An agent's changes are at least 30 s apart and at most 10 an hour.
 
 **Uploads are not counted (2.2.5, #2083).** An agent's uploads (pictures, effects, proposed mods; effects are Canvas Worker, experimental and off by default) are not counted. Each picture slot's size limits, the agent's picture quota and each file's own caps still apply.
 
-**The Web appearance page (2.2.5, #2071)** groups its cards under five headings, each card with a **?** that opens its section of the guide. Over a public link it shows only a notice.
+**The Look page (2.2.5, #2071; regrouped in 2.3.2, #2347)** groups its cards under four headings, each card with a **?** that opens its section of the guide, and ends with Restore defaults. Over a public link it shows only a notice.
 - **Look:** agents' themes on or off; identity colours, with a sample row; card size.
 - **Your layout:** your sidebar widget.
-- **Styles you write:** custom CSS, and turning it off on this device.
+- **Styles you write:** custom CSS.
 - **Add-ons:** mods, effects and your effect choices (Canvas Worker effects are experimental and off by default).
-- **Advanced:** card upload limits, and Restore defaults.
+
+This device's own switches (effects following reduced motion, custom CSS off here) are in **Settings → Preferences**, and the host-wide cards (the app icon, card upload limits, Canvas Worker effects) in **Settings → Web dashboard**.
 
 ### App icon (#2308)
 
-**Settings → Web appearance → App icon** takes a square picture (PNG, JPG or WebP) for the browser tab and a phone's home screen, with a preview and **Restore default**; an admin's session changes it. The dashboard has a web app manifest, so installing it as an app (Add to Home Screen) uses the same icon. Icon addresses carry a version, so a new icon shows at once (an iPhone home screen keeps the old one until the shortcut is added again).
+**Settings → Web dashboard → App icon** takes a square picture (PNG, JPG or WebP) for the browser tab and a phone's home screen, with a preview and **Restore default**; an admin's session changes it. The dashboard has a web app manifest, so installing it as an app (Add to Home Screen) uses the same icon. Icon addresses carry a version, so a new icon shows at once (an iPhone home screen keeps the old one until the shortcut is added again).
 
 **Banner focus (2.2.5, #2086).**
 - **Safe band:** a card's banner is never drawn wider than 5:1 (a wider screen centres it over a blurred copy) nor narrower than 9:4 (which crops the sides), so on a 1600×600 banner an area of about 1350×320, centred across the width, shows on every card size and layout. That area moves with the focus below; at the default focus, 50, it sits in the middle of the picture.
@@ -1491,7 +1503,7 @@ An agent can decorate its own chat with an **ambient effect**: falling petals, s
 
 **Reduced motion.**
 - It plays even when your system asks for reduced motion.
-- **Settings → Web appearance → Effects: follow the system's reduced-motion setting** keeps effects still on that device. It is per device and off by default.
+- **Settings → Preferences → Effects: follow the system's reduced-motion setting** keeps effects still on that device. It is per device and off by default.
 - When the system asks for reduced motion and an ambient plays anyway, the chat says so once on that device, with **Turn off here**.
 
 **When it doesn't show,** the chat's **⋯** menu says why, and choosing the line fixes it right there. The reasons:
@@ -1509,7 +1521,7 @@ The backend now keeps five owner effect selections (`fx.sidebar`, `fx.header`, `
 the signed-in web identity. Discord and Telegram identities stay separate; accounts are not merged. A web-only
 `agend web --code` sign-in uses a **host-wide operator** bucket shared by everyone signing in as that operator.
 Header tokens cannot read or write these five keys. Existing visible preferences remain host-wide, without migration;
-profile and custom-CSS internal identity rules are unchanged. Settings → Web appearance offers the five selectors. With effects enabled, without HTML-preview consent or its listener, page/header/sidebar/box choices play across the supported stock panels in the same pool as Chat, with slot-specific Pause/Resume and unavailable/Clear controls. The cursor choice applies a static host PNG without HTML-preview consent, preserves explicit pointer/text/resize cursors and falls back while dragging or when unavailable. It runs no Worker code and consumes no frame slot.
+profile and custom-CSS internal identity rules are unchanged. Settings → Look offers the five selectors. With effects enabled, without HTML-preview consent or its listener, page/header/sidebar/box choices play across the supported stock panels in the same pool as Chat, with slot-specific Pause/Resume and unavailable/Clear controls. The cursor choice applies a static host PNG without HTML-preview consent, preserves explicit pointer/text/resize cursors and falls back while dragging or when unavailable. It runs no Worker code and consumes no frame slot.
 
 Unsharing an effect revokes subsequent resource authorization for someone else's personal selection, including its
 cursor image. The saved choice remains as unavailable until cleared, retaining its blob reference. This is stricter
@@ -1557,9 +1569,9 @@ authority, local-admin API, host panel and shared app pool enforce this boundary
 
 A worked sample, [click-sparks](examples/click-sparks.md), shows a whole effect from `effect.json` to `upload_web_effect` and `apply_web_effect`: a burst where you click and a trail while you drag (512 px, 30 fps, 128 particles; #2043). A person can also choose it for the page or box slot.
 
-### General changes Web appearance for you (2.2.5)
+### General changes Look for you (2.2.5)
 
-General, coordinators and full-profile instances can read and change Settings → Web appearance for the user with `get_web_settings` and `set_web_settings` (#2056). The change goes through the page's own store, checks and announcement, so every open page reads it again. One change per call:
+General, coordinators and full-profile instances can read and change Settings → Look for the user with `get_web_settings` and `set_web_settings` (#2056). The change goes through the page's own store, checks and announcement, so every open page reads it again. One change per call:
 
 - **Host settings:** agents' themes shown, card size and per-agent sizes, where identity colours show, colours off, the sidebar widget. `null` puts one back.
 - **An agent's identity colour** (a preset or `#rrggbb`) and where it shows.

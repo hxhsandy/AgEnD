@@ -130,17 +130,22 @@ html:has(.shell), html:has(.shell) body { overflow: hidden; }
    A short box that clips to its corners (.msg-quote) moves the bar in (--lbar-left) and shortens it (--lbar-inset) so
    the corner never cuts its ends round.
    tests/web-left-bar-2330.test.ts keeps a coloured border-left off rounded boxes. */
-.lbar, .reply-bar, .msg-quote, .p-log .log-item.k-error, .p-log .log-item.s-failed, .org-node, .us-basis, .us-partial, .cmd-card.bad, .tb-tile,
+.lbar, .reply-bar, .msg-quote, .p-log .log-item.k-error, .p-log .log-item.s-failed, .org-node, .us-basis, .us-partial, .cmd-card.bad, .tb-tile, .s-dirty,
 .search-row.on, .search-recent-item:hover, .search-recent-item:focus-visible, .search-ctx-line.here, .tw-line:hover, .tw-line:focus-visible,
-.u-crow:focus-visible { position: relative; }
+.u-crow:focus-visible, .p-settings .s-nav .seg-item.active, .s-find-item.on { position: relative; }
 .lbar::before, .reply-bar::before, .msg-quote::before, .p-log .log-item.k-error::before, .p-log .log-item.s-failed::before, .org-node::before,
-.us-basis::before, .us-partial::before, .cmd-card.bad::before, .tb-tile::before,
+.us-basis::before, .us-partial::before, .cmd-card.bad::before, .tb-tile::before, .s-dirty::before,
 /* #2478 item 7 (the user's fixed template): a selected, hovered or keyboard-focused row is the straight bar and a flat
    background at most — never a rounded fill, a curved inset edge or a rounded ring. */
 .search-row.on::before, .search-recent-item:hover::before, .search-recent-item:focus-visible::before, .search-ctx-line.here::before,
-.tw-line:hover::before, .tw-line:focus-visible::before, .u-crow:focus-visible::before {
+.tw-line:hover::before, .tw-line:focus-visible::before, .u-crow:focus-visible::before,
+.p-settings .s-nav .seg-item.active::before, .s-find-item.on::before {
   content: ""; position: absolute; left: var(--lbar-left, 0); top: var(--lbar-inset, var(--s-2)); bottom: var(--lbar-inset, var(--s-2)); width: 3px;
   background: var(--lbar-color, var(--accent)); pointer-events: none; }
+/* #2347: a Settings field edited and not saved yet — the shared straight bar (above), a light tint, and the 3px the bar
+   takes added to its padding (and taken back from its margin), so the field's text stays put. */
+.s-dirty { --lbar-color: var(--accent); --lbar-inset: var(--s-1); background: color-mix(in srgb, var(--accent) 7%, transparent);
+  padding-left: calc(var(--s-2) + 3px); margin-left: calc(-1 * (var(--s-2) + 3px)); border-radius: 0; align-self: start; }
 .idc-swatches, .idc-places { border: 0; padding: 0; margin: 0 0 var(--s-3); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .idc-swatches legend, .idc-places legend { font-weight: var(--fw-semibold); margin-bottom: 6px; width: 100%; }
 .idc-swatch { --sw: var(--sw-dark); width: 28px; height: 28px; border-radius: 50%; border: 2px solid transparent; background: var(--sw); cursor: pointer; padding: 0; }
@@ -229,6 +234,9 @@ html:has(.shell), html:has(.shell) body { overflow: hidden; }
 /* #1620: Settings → Web — the lead, and the read-only list of what is set in fleet.yaml. */
 .s-web .sub { margin: 0; color: var(--text-3); font-size: var(--fs-sm); }
 .s-web-fields:disabled select { opacity: 0.6; }   /* over the public link: dimmed like the inputs (.field input:disabled) */
+/* #2347: forms that write what an unsaved fleet.yaml edit writes — off, with the way to that edit above them. */
+.s-yaml-lock:disabled select { opacity: 0.6; }
+.s-yaml-lock-note { margin: 0 0 var(--s-3); }
 .s-web-ro { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--s-1) var(--s-3); margin: 0; font-size: var(--fs-sm); }
 .s-web-ro > div { display: contents; }
 .s-web-ro dt { color: var(--text-3); }
@@ -385,6 +393,7 @@ html:has(.shell), html:has(.shell) body { overflow: hidden; }
 .dlg-wide { width: min(640px, calc(100vw - 32px)); }
 .dlg::backdrop { background: var(--scrim); }
 .dlg-box { display: flex; flex-direction: column; max-height: 85vh; }
+.dlg-box:focus { outline: none; }   /* the open dialog's first stop (ui-dialog.js): no ring; Tab moves on with one */
 .dlg-head { display: flex; align-items: center; gap: var(--s-2); padding: var(--s-4) var(--s-3) var(--s-2) var(--s-5); }
 .dlg-title { flex: 1; font-size: var(--fs-lg); font-weight: var(--fw-semibold); }
 .dlg-body { padding: var(--s-2) var(--s-5) var(--s-4); overflow-y: auto; display: flex; flex-direction: column; gap: var(--s-3); }
@@ -440,6 +449,99 @@ html:has(.shell), html:has(.shell) body { overflow: hidden; }
 .seg-item.active { background: var(--surface-2); color: var(--text); font-weight: var(--fw-semibold); }
 /* #1629: Settings has eight sections (Appearance added): they wrap to a second row rather than hide behind a scroll. */
 .p-settings .seg { flex-wrap: wrap; row-gap: var(--s-1); overflow-x: visible; }
+/* #2347: the sections in two groups, "You" and "Fleet", each with its name; a column on the left on a wide screen. */
+.s-nav { align-items: center; column-gap: var(--s-3); }
+/* #2347, the fixed template (#2330): Settings' sections are square; the one shown is the shared straight bar and a flat
+   background (no rounded pill). `.seg` elsewhere (Fleet's tabs, the chat header) is not changed here. */
+.p-settings .s-nav .seg-item { border-radius: 0; }
+.p-settings .s-nav .seg-item.active { background: var(--surface-2); }
+.s-nav-group { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1); }
+.s-nav-head { font-size: var(--fs-xs); color: var(--text-3, var(--text-2)); text-transform: uppercase; letter-spacing: 0.04em; padding: 0 var(--s-2); }
+.s-anchor { scroll-margin-top: var(--s-4); }
+/* #2347 §6: settings search — on top of the section nav; results grouped by section, the config key small; a setting
+   opened from it flashes for 2 s (a tint, no coloured edge). */
+/* One column (`.p-settings .seg` wraps, which in a column would start a second one beside it). */
+.p-settings > .s-nav { flex-direction: column; align-items: stretch; flex-wrap: nowrap; row-gap: var(--s-2); }
+.s-nav-groups { display: flex; flex-wrap: wrap; align-items: center; column-gap: var(--s-3); row-gap: var(--s-1); }
+/* The search never makes the nav wider than its column or row (a flex item's min-content would: a long config key). */
+.s-find, .s-find-results, .s-find-group { min-width: 0; max-width: 100%; }
+.s-find .s-search { width: 100%; box-sizing: border-box; min-width: 0; }
+.s-find .s-search input { text-overflow: ellipsis; }
+.s-find-results { max-height: min(60vh, 420px); overflow-y: auto; margin-top: var(--s-1);
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm); padding: var(--s-1) 0; }
+.s-find-head { padding: var(--s-2) var(--s-3) var(--s-1); font-size: var(--fs-xs); color: var(--text-2); }
+.s-find-item { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; column-gap: var(--s-2); padding: var(--s-2) var(--s-3); cursor: pointer; min-width: 0; }
+.s-find-label { min-width: 0; overflow-wrap: anywhere; }
+.s-find-item.on { background: var(--surface-2); }
+.s-find-item mark { background: color-mix(in srgb, var(--accent) 22%, transparent); color: inherit; border-radius: 2px; }
+.s-find-key { font-size: var(--fs-xs); color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.s-find-none, .s-find-foot { padding: var(--s-2) var(--s-3); margin: 0; font-size: var(--fs-xs); color: var(--text-2); }
+.s-find-foot { border-top: 1px solid var(--border); }
+/* #2382 review: "Fix N field(s) in <section> to save" goes there. */
+.s-pending button.s-fix { border: 0; background: none; padding: 0; cursor: pointer; text-decoration: underline; font: inherit; }
+@keyframes s-flash { from { background: color-mix(in srgb, var(--accent) 22%, transparent); } to { background: transparent; } }
+.s-flash { animation: s-flash 2s ease-out; }
+@media (prefers-reduced-motion: reduce) { .s-flash { animation: none; background: color-mix(in srgb, var(--accent) 12%, transparent); } }
+/* #2347: on a phone the sections keep their names (bare icons could not be told apart), on one row that scrolls
+   sideways, each group after its name. */
+@media (max-width: 479px) {
+  .p-settings > .s-nav .s-nav-groups { flex-wrap: nowrap; overflow-x: auto; }
+  .p-settings > .s-nav .s-nav-group { flex-wrap: nowrap; flex-shrink: 0; }
+}
+/* #2347 §7: on a phone (the app's narrow layout) Settings itself (/settings) is the list of sections — search on top,
+   the two groups as full-width rows — and a section opens on its own with "‹ Settings" back to the list. The strip
+   that scrolled sideways (and cut its ends) is gone there. Wider screens keep the list beside the section. */
+.p-settings .s-back { display: none; }
+@media (max-width: 899px) {
+  .p-settings[data-view="index"] > .panel-body { display: none; }
+  .p-settings[data-view="section"] > .s-nav { display: none; }
+  .p-settings > .panel-body .s-back { display: flex; align-items: center; gap: var(--s-2); min-height: var(--tap); margin: 0 0 var(--s-2);
+    color: var(--accent); font-size: var(--fs-sm); text-decoration: none; }
+  .p-settings .s-back .s-back-here { margin-left: auto; color: var(--text); font-weight: var(--fw-semibold); }
+  .p-settings[data-view="index"] > .s-nav { flex-direction: column; align-items: stretch; padding: 0 var(--s-4) var(--s-4); }
+  .p-settings[data-view="index"] > .s-nav .s-nav-groups { flex-direction: column; align-items: stretch; flex-wrap: nowrap; overflow: visible; gap: var(--s-4); }
+  .p-settings[data-view="index"] > .s-nav .s-nav-group { flex-direction: column; align-items: stretch; flex-wrap: nowrap; gap: 0; }
+  .p-settings[data-view="index"] > .s-nav .s-nav-head { padding: var(--s-2) var(--s-3) var(--s-1); }
+  .p-settings[data-view="index"] > .s-nav .seg-item { min-height: var(--tap); padding: 0 var(--s-3); font-size: var(--fs-md); white-space: normal;
+    border-bottom: 1px solid var(--border); }
+  /* In the list no section is open: none is marked as the one shown — every row alike. */
+  .p-settings[data-view="index"] > .s-nav .seg-item, .p-settings[data-view="index"] > .s-nav .seg-item.active { color: var(--text); }
+  .p-settings[data-view="index"] > .s-nav .seg-item.active { background: none; font-weight: inherit; }
+  /* The list fills the screen, so unsaved changes' bar stays at the bottom (above the tabs), not right under a short list;
+     on a short screen (a small phone, one turned) it takes the room there is and scrolls (#2501 review). */
+  .p-settings[data-view="index"] > .s-nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+  /* The bar on a phone: the app's 16 px gutter, and Discard / Save a full tap target. */
+  .p-settings > .s-pending { padding-left: var(--s-4); padding-right: var(--s-4); }
+  .p-settings > .s-pending .btn { min-height: var(--tap); }
+  /* Settings' dialogs are full-screen sheets (§7): an agent's or a connection's fields get the whole screen, the title on
+     top and the actions at the bottom, inside it. The app's own questions (ask()) stay bottom sheets. */
+  .p-settings .dlg { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; border-radius: 0; }
+  .p-settings .dlg-box { height: 100%; max-height: 100dvh; }
+  .p-settings .dlg-head { padding-top: max(var(--s-3), env(safe-area-inset-top)); border-bottom: 1px solid var(--border); }
+  .p-settings .dlg-body { flex: 1; padding-top: var(--s-4); }
+  .p-settings .dlg-actions { border-top: 1px solid var(--border); padding-top: var(--s-3); }
+  /* Effect tags wrap under the label (§7): whole, on their own line, where the label's text starts — beside a long label
+     on a narrow screen they were squeezed or broken mid-tag. */
+  .p-settings .field > label:not(.check) .impact, .p-settings .field > legend .impact { display: block; margin: 2px 0 0; white-space: nowrap; }
+  /* A checkbox row: the box, the text (and its "default" mark), then the tag on a line of its own under the text. */
+  .p-settings .check:has(> .impact) { flex-wrap: wrap; row-gap: 2px; }
+  .p-settings .check:has(> .impact) > input { flex: none; width: 16px; height: 16px; margin: 0; }
+  .p-settings .check > .impact { flex: 1 0 calc(100% - 16px - var(--s-2)); margin-left: calc(16px + var(--s-2)); white-space: nowrap; }
+  /* A tag inside a note (a dialog's status-emoji line) goes to the next line whole, never broken mid-tag. */
+  .p-settings .note > .impact { display: inline-block; white-space: nowrap; }
+  .p-settings[data-view="index"] > .s-nav .seg-item.active::before { display: none; }
+}
+@media (min-width: 1100px) {
+  .p-settings { display: grid; grid-template-columns: 220px minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; }
+  .p-settings > :not(.s-nav):not(.panel-body) { grid-column: 1 / -1; }
+  .p-settings > .s-nav { grid-column: 1; grid-row: 2; margin: 0; max-width: none; min-width: 0; padding: var(--s-2) var(--s-2) var(--s-4) var(--s-4); overflow-x: hidden; overflow-y: auto; }
+  .p-settings > .s-nav .s-nav-groups { flex-direction: column; align-items: stretch; flex-wrap: nowrap; gap: var(--s-3); }
+  .p-settings > .s-nav .s-nav-group { flex-direction: column; align-items: stretch; flex-wrap: nowrap; }
+  .p-settings > .s-nav .s-nav-head { padding: var(--s-1) var(--s-3); }
+  .p-settings > .s-nav .seg-item { border-radius: 0; }
+  .p-settings > .panel-body { grid-column: 2; grid-row: 2; }
+  .p-settings > .s-pending { grid-column: 1 / -1; grid-row: 3; }
+}
 .list-head { display: flex; justify-content: space-between; align-items: center; gap: var(--s-3); margin: var(--s-2) 0 var(--s-3); color: var(--text-2); font-size: var(--fs-sm); }
 .rows { display: flex; flex-direction: column; gap: var(--s-1); }
 .row-item { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; padding: var(--s-3) var(--s-4); border-radius: var(--r-md); background: var(--surface); font-size: var(--fs-sm); }
@@ -821,15 +923,45 @@ img.amb-p { object-fit: contain; }
   padding: var(--s-1) var(--s-2); border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); color: var(--text);
   box-shadow: var(--shadow-2); }
 .webauth-tip[hidden] { display: none; }
-/* #1920 phase 3: Settings → Web → Guests. */
+/* #1920 phase 3 / #2348: Settings → Access & security → Guests. The fixed template (#2330): flat rows split by a rule,
+   no rounded box or fill; an edited row is .s-dirty (the shared straight bar + tint, square). A state is coloured text. */
 .s-guests .guest-names { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 2px var(--s-3); max-height: 220px; overflow: auto;
-  padding: var(--s-1) var(--s-2); border: 1px solid var(--border); border-radius: var(--r-sm); }
+  padding: var(--s-1) 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .s-guests .guest-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.s-guests .guest-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-2); }
-.s-guests .guest-row { padding: var(--s-2) var(--s-3); border: 1px solid var(--border); border-radius: var(--r-sm); }
-.s-guests .guest-actions { display: flex; flex-wrap: wrap; gap: var(--s-1); margin-top: var(--s-1); }
+.s-guests .guest-list, .s-guests .g-pick { list-style: none; margin: 0 0 var(--s-3); padding: 0; display: flex; flex-direction: column; border-top: 1px solid var(--border); }
+.s-guests .guest-row, .s-guests .g-cand { padding: var(--s-3) 0; border-bottom: 1px solid var(--border); min-width: 0; }
+.s-guests .guest-row.s-dirty { border-radius: 0; margin-left: 0; align-self: stretch; padding-left: calc(var(--s-2) + 3px); padding-right: var(--s-2); }
+.s-guests .guest-row.g-removed .g-id strong { text-decoration: line-through; color: var(--text-3); }
+.s-guests .g-head { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; min-width: 0; }
+.s-guests .g-av { flex: none; width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--text); font-weight: 600; font-size: var(--fs-sm); }
+.s-guests .g-id { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+.s-guests .g-id .note { white-space: normal; }
+.s-guests .g-state { flex: 0 1 auto; max-width: 100%; margin-left: auto; font-size: var(--fs-sm); color: var(--text-3); text-align: right; }
+.s-guests .g-state.on { color: var(--ok); }
+.s-guests .g-state.sent { color: var(--accent); }
+.s-guests .g-state.warn { color: var(--danger); text-align: left; flex-basis: 100%; margin-left: calc(28px + var(--s-2)); }
+.s-guests .g-chips { display: flex; flex-wrap: wrap; gap: var(--s-1); margin: var(--s-2) 0 0 calc(28px + var(--s-2)); }
+.s-guests .g-chip { padding: 1px var(--s-2); border: 1px solid color-mix(in srgb, var(--text-3) 55%, transparent); border-radius: 0; font-size: var(--fs-sm); color: var(--text-2); white-space: nowrap; }
+.s-guests .g-edit { margin: var(--s-2) 0 0 calc(28px + var(--s-2)); }
+.s-guests .guest-actions { display: flex; flex-wrap: wrap; gap: var(--s-1); margin: var(--s-2) 0 0 calc(28px + var(--s-2)); }
+.s-guests .g-error { color: var(--danger); margin-left: calc(28px + var(--s-2)); }
+.s-guests .g-search { width: 100%; max-width: 360px; margin: var(--s-1) 0 var(--s-2); }
+.s-guests .g-cand { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: var(--s-2); }
+.s-guests .g-legacy { margin: var(--s-2) 0; }
+.s-guests .g-audit { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--border); font-size: var(--fs-sm); }
+.s-guests .g-audit-row { padding: var(--s-1) 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.s-guests .g-audit-row .g-when { color: var(--text-3); }
+.s-guests .g-add { color: var(--ok); }
+.s-guests .g-del { color: var(--danger); }
+.s-guests .g-when, .s-guests .g-wrote { white-space: nowrap; }
 .s-guests .guest-narrow-edit { margin-top: var(--s-2); }
 .s-guests .guest-away { color: var(--text-3); }
+@media (max-width: 560px) {
+  .s-guests .g-state { flex-basis: 100%; margin-left: calc(28px + var(--s-2)); text-align: left; }
+  .s-guests .g-cand { grid-template-columns: 28px minmax(0, 1fr); }
+  .s-guests .g-cand > .btn { grid-column: 2; justify-self: start; }
+}
 /* #1939 S2b: this browser's authorization, under the composer and in the session menu (one compact line). */
 .webauth-chip { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); margin: var(--s-1) 0 0; font-size: var(--fs-xs); }
 .webauth-chip .webauth-ok { color: var(--ok); }
@@ -1224,7 +1356,7 @@ body.side-resizing, body.side-resizing * { cursor: col-resize !important; user-s
 .s-toolbar { display: flex; gap: var(--s-2); margin: var(--s-2) 0; }
 .s-search { flex: 1; display: flex; align-items: center; gap: var(--s-2); padding: 0 var(--s-3); border-radius: var(--r-sm); background: var(--surface); color: var(--text-3); }
 .s-search:focus-within { box-shadow: 0 0 0 2px var(--focus); }
-.s-search input { flex: 1; min-width: 0; height: 36px; border: 0; background: transparent; color: var(--text); outline: none; font-size: var(--fs-sm); }
+.s-search input { flex: 1; min-width: 0; height: 36px; border: 0; background: transparent; color: var(--text); outline: none; font-size: var(--fs-sm); text-overflow: ellipsis; }
 .s-list { display: flex; flex-direction: column; gap: 2px; margin-bottom: var(--s-4); }
 .s-group { margin-bottom: var(--s-2); }
 .s-group-head { display: flex; align-items: center; gap: var(--s-2); width: 100%; padding: var(--s-2) var(--s-2); border: 0; background: transparent; color: var(--text-3);
@@ -1259,6 +1391,10 @@ body.side-resizing, body.side-resizing * { cursor: col-resize !important; user-s
 .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-3) var(--s-4); }
 .override { display: flex; flex-direction: column; gap: var(--s-1); }
 .inherit-row { font-size: var(--fs-xs); color: var(--text-3); }
+/* #2347 §10: the value in effect (an empty field's, an inherited one's) in plain text; "default" marks what nobody set. */
+.s-effect, .s-inherited { margin: 0; font-size: var(--fs-xs); color: var(--text-2); }
+.s-inherited a { color: var(--accent); }
+.tag.s-default { font-weight: var(--fw-regular); }
 .impact { font-size: 11px; font-weight: var(--fw-regular); color: var(--text-3); margin-left: var(--s-1); }
 .check .impact { margin-left: auto; }
 .feedback { font-size: var(--fs-xs); color: var(--text-2); }
@@ -1283,6 +1419,12 @@ body.side-resizing, body.side-resizing * { cursor: col-resize !important; user-s
 .btn.on { background: var(--surface-2); color: var(--text); font-weight: var(--fw-semibold); }
 .card h4 { font-size: var(--fs-sm); font-weight: var(--fw-semibold); color: var(--text-2); }
 .pill.ver { text-transform: none; letter-spacing: 0; }
+/* #2347 §7: Settings' title stays whole on a narrow phone (at 320 px it was cut to "S…"): the version beside it takes the
+   room that is left — shortened, or not shown when too little is. */
+.p-settings .panel-title h1 { flex: none; }
+.p-settings .panel-sub { flex: 1 1 0; min-width: 0; container: settings-ver / inline-size; }
+.p-settings .panel-sub .pill.ver { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+@container settings-ver (max-width: 56px) { .p-settings .panel-sub .pill.ver { display: none; } }
 .s-key { display: flex; flex-direction: column; gap: var(--s-1); padding: var(--s-2) 0; border-top: 1px solid var(--border); }
 .s-key:first-of-type { border-top: 0; }
 .s-key-row { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
@@ -1316,6 +1458,7 @@ textarea.s-yaml { white-space: pre; overflow-x: auto; }
 .s-pending { position: sticky; bottom: 0; display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; padding: var(--s-3) var(--s-5);
   background: var(--bg); border-top: 1px solid var(--border); box-shadow: var(--shadow-2); }
 .s-pending .grow { flex: 1; }
+.s-pending-actions { display: flex; align-items: center; gap: var(--s-3); margin-left: auto; }
 .s-op { border: 1px solid var(--border); }
 .s-op.failed { border-color: var(--danger-line); }
 .s-op-head { display: flex; align-items: center; gap: var(--s-2); }
@@ -1357,6 +1500,10 @@ textarea.s-yaml { white-space: pre; overflow-x: auto; }
 .op-line { display: flex; align-items: center; justify-content: center; gap: var(--s-2); }
 .op-line.ok { color: var(--ok); }
 .op-line.bad { color: var(--danger); }
+/* #2347: saved changes waiting for an AgEnD restart — one line, the shared straight bar on its left. */
+.restart-line { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: var(--s-2); color: var(--text);
+  --lbar-color: var(--warn); }
+.restart-line .restart-keys { font-family: var(--font-mono); }
 /* #2233: the backend sign-in dialog and Settings' list */
 .signin-field { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; margin: var(--s-2) 0; }
 .signin-label { color: var(--text-2); font-size: var(--fs-xs); min-width: 6em; }
@@ -1379,6 +1526,7 @@ textarea.s-yaml { white-space: pre; overflow-x: auto; }
   .shell:has(.s-pending) .pending-stack { bottom: calc(64px + 64px + var(--s-3)); }
   .shell:has(.s-pending) .toasts { bottom: auto; }
   .s-pending { padding: var(--s-2) var(--s-3); }
+  .s-pending-actions { flex-basis: 100%; justify-content: flex-end; }
 }
 
 /* ── Needs you (#1408 step 4 = #1386 part b) ── */
@@ -1690,7 +1838,7 @@ html.oo-immersive .p-fleet > .panel-body { z-index: 50; }
 }
 /* A phone: Fleet's five tabs fit when only the open one shows its label (the others keep theirs for screen readers). */
 @media (max-width: 479px) {
-  .p-fleet .seg-item:not(.active) > span, .p-settings .seg-item:not(.active) > span { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+  .p-fleet .seg-item:not(.active) > span { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 }
 
 /* ── Cache analysis (#1468): Fleet → Cache. Bars are SVG attributes; nothing here is an inline style. ── */
