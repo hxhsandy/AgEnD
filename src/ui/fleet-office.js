@@ -21,7 +21,18 @@
 //   the lobby) and pinned people — kept per browser (fleet-office-store.js).
 // - One requestAnimationFrame loop, drawing only when a frame changes; it stops while the tab is hidden and when the view
 //   goes. Reduced motion: still poses, nothing in the air. Colours are the dashboard's tokens (dark and light).
-// - Drawing is the skin's (fleet-office-skin.js); a skin pack (fleet-office-pack.js) can replace any part later.
+// - Drawing is the skin's (fleet-office-skin.js); a skin pack an admin uploaded (fleet-office-pack.js, #2513) replaces
+//   any part — an office names it as its style; one this page cannot load is drawn as Desks, and says so.
+// - Crowds (#2513): an area with more people than seats packs the rest into a tighter grid, then counts who is left
+//   ("+N", in its corner, never over its name); there idle and asleep people say nothing, at most a few speak (calls
+//   first, then work), no bubble covers a name tag, and the tags show on hover or focus only. "Hide paused and stopped"
+//   (per browser) leaves the sleepers out.
+// - Edit layout (an admin, a stored office on a zones skin): fleet-office-layout.js, saved as the office's overrides.
+//   An editing session (#2513 review) is bound to the office it opened on, that office's style (the pack's id and sha)
+//   and the list and rev read then: a re-read of the offices meanwhile (the stream) changes the view, never the session,
+//   so Save sends that rev and a change made meanwhile is a 409 (the session then takes the list read again, and Save
+//   again is the person's decision). While it is open the office picker and Edit offices wait; if the office goes or its
+//   style changes underneath it, the editor says so and only Cancel is left.
 import { html, useEffect, useLayoutEffect, useMemo, useRef, useState } from "/assets/app-html.js";
 import { appStore } from "/assets/app-store.js";
 import { t, lang, register } from "/assets/app-i18n.js";
@@ -30,10 +41,12 @@ import { nodeText } from "./fleet-org.js";
 import { hits, needle } from "./fleet-canvas-layout.js";
 import { AUTO_ID, LOBBY, autoLayout, backingScale, coatOf, createFlights, customLayout, deskAt, desksOf, filterOk, lampOf, layoutOk, lightOf, membersOf,
   officePose, officeRooms, signOf, workOn } from "./fleet-office-model.js";
-import { CHAR_DEPTH, DEFAULT_PAL, bubbleBox, modeOf, skinFor } from "./fleet-office-skin.js";
-import { CALLING, activeFurniture, bubbleAt, createWalkers, linesFor, personAt, placeBubbles, zonesLayout } from "./fleet-office-zones.js";
+import { BUILT_IN_SKINS, CHAR_DEPTH, DEFAULT_PAL, bubbleBox, loadPackSkin, modeOf, skinFor, tagBox } from "./fleet-office-skin.js";
+import { CALLING, activeFurniture, bubbleAt, bubbleRank, createWalkers, linesFor, personAt, placeBubbles, thinBubbles, zonesLayout } from "./fleet-office-zones.js";
 import { createOfficeStore } from "./fleet-office-store.js";
-import { OfficeEditor } from "./fleet-office-editor.js";
+import { OfficeEditor, officeForSave } from "./fleet-office-editor.js";
+import { LayoutEditor } from "./fleet-office-layout.js";
+import { applyOverrides } from "./fleet-office-pack.js";
 
 register("orgo", {
   en: {
@@ -46,6 +59,7 @@ register("orgo", {
     b_working: "On it.|Typing…|Almost there|In the zone|One more test", b_idle: "Tea time|Ready when you are|Stretching|Anything for me?",
     b_paused: "Zzz…|Back later", b_stopped: "Off duty|Zzz…", b_needs: "Need you!|A question for you|Over here!",
     b_crashed: "Ouch, crashed|Help!", b_stuck: "Hmm, stuck?|Still thinking…",
+    hideAsleep: "Hide paused and stopped", layoutIgnored: "Its saved layout does not fit this style: drawn as the style's own.",
   },
   "zh-TW": {
     label: "辦公室：每個 team 是一間房間，每個 instance 一張桌子；General 和未加入 team 的 instance 在大廳。",
@@ -57,6 +71,7 @@ register("orgo", {
     b_working: "處理中|打字中…|快好了|專心中|再測一次", b_idle: "喝茶中|隨時可以開工|伸個懶腰|有事找我嗎？",
     b_paused: "Zzz…|晚點回來", b_stopped: "下班了|Zzz…", b_needs: "需要你！|有個問題|在這裡！",
     b_crashed: "糟糕，當掉了|救命！", b_stuck: "嗯，卡住了？|還在想…",
+    hideAsleep: "隱藏暫停與停止的成員", layoutIgnored: "它儲存的配置不適用這個風格：以風格本身的配置顯示。",
   },
 });
 const to = (k, ...v) => t(`orgo.${k}`, ...v);
@@ -70,7 +85,9 @@ const reducedMotion = () => typeof matchMedia === "function" && matchMedia("(pre
 const now = () => (typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now());
 /** How often the picture can change when nothing is in the air (the poses loop at 4 fps; a bubble types faster). */
 const FPS = 12;
-const STYLES = ["pixel", "studio"];
+const STYLES = BUILT_IN_SKINS;
+/** Paused and stopped: left out when "Hide paused and stopped" is on. */
+const ASLEEP = new Set(["paused", "stopped"]);
 const BUBBLE_STATES = ["working", "idle", "paused", "stopped", "needs", "crashed", "stuck"];
 /** The page's own bubble lines, by state, in its language (short, never message content). */
 export const bubbleDefaults = () => Object.fromEntries(BUBBLE_STATES.map((s) => [s, to(`b_${s}`).split("|")]));
@@ -135,6 +152,14 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   const [choice, setChoice] = useState(() => store.choice());
   const [filter, setFilter] = useState(() => store.filter());
   const [style, setStyle] = useState(() => store.skin());
+  const [hideAsleep, setHideAsleep] = useState(() => store.hideAsleep());
+  const [packs, setPacks] = useState([]);                             // the skin packs the host keeps: [{ id, name, sha }]
+  const [packSkins, setPackSkins] = useState(() => new Map());        // id@sha → a loaded skin, or null (not a pack)
+  // Edit layout's session while it is open: { id, officeId, skin, pack (the style's identity), base (the pack as kept),
+  // start, draft, rev, list (the offices and rev read when it opened — what Save sends) }; null when closed.
+  const [layout, setLayout] = useState(null);
+  const layoutRef = useRef(null), layoutSeq = useRef(0);
+  layoutRef.current = layout;
   const [width, setWidth] = useState(960);
   const [stageH, setStageH] = useState(0);                            // the stage's height (0: not known — fit the width only)
   const [themeRev, setThemeRev] = useState(0);
@@ -167,6 +192,15 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     void read();
     const sub = appStore.get().streamOn;
     const off = sub ? lease.hold(sub("offices", () => { void read(); })) : null;
+    return () => { if (off) off(); };
+  }, [lease, store]);
+  // The skin packs: on opening, and again whenever the stream says one was uploaded or deleted.
+  useEffect(() => {
+    if (!lease) return undefined;
+    const read = async () => { const d = await store.skins(); if (lease.current() && d) setPacks(d.packs); };
+    void read();
+    const sub = appStore.get().streamOn;
+    const off = sub ? lease.hold(sub("office_skins", () => { void read(); })) : null;
     return () => { if (off) off(); };
   }, [lease, store]);
   // Whether this page may edit the offices: an admin session (the host asks again on every save), never a guest page or
@@ -206,15 +240,43 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   const mode = modeOf(pal);
 
   const custom = choice !== AUTO_ID ? stored.find((o) => o.id === choice) || null : null;
-  const skin = skinFor(custom ? custom.skin : STYLES.includes(style) ? style : "pixel");
-  const zones = !!(skin.pack && skin.pack.stateZones);
+  // The style: a built-in one, or an uploaded pack once it is loaded (until then, and when it is not one, Desks).
+  const wanted = custom ? custom.skin : style;
+  const packInfo = STYLES.includes(wanted) ? null : packs.find((pk) => pk.id === wanted) || null;
+  const packKey = packInfo ? `${packInfo.id}@${packInfo.sha}` : null;
+  useEffect(() => {
+    if (!packInfo || packSkins.has(packKey)) return undefined;
+    let live = true;
+    const get = lease ? (path, o) => lease.fetch(path, o) : undefined;
+    loadPackSkin(packInfo.id, packInfo.sha, get ? { fetch: get } : {}).then((sk) => { if (live) setPackSkins((m) => new Map(m).set(packKey, sk)); });
+    return () => { live = false; };
+  }, [packKey]);
+  const loading = !!packInfo && !packSkins.has(packKey);
+  const baseSkin = packInfo ? packSkins.get(packKey) || skinFor("pixel") : skinFor(STYLES.includes(wanted) ? wanted : custom ? wanted : "pixel");
+  const zones = !!(baseSkin.pack && baseSkin.pack.stateZones);
+  /** The style's identity: a pack's id and sha (a pack replaced is another), or the built-in skin's id. */
+  const styleKey = packKey || baseSkin.id;
+  // An open session no longer on its office and style (the office went, or its style changed meanwhile): only Cancel.
+  const layoutStale = !!layout && (!custom || custom.id !== layout.officeId || custom.skin !== layout.skin || styleKey !== layout.pack || !zones || loading);
+  // A stored office's own layout on a zones style (its overrides; while Edit layout is open, the draft).
+  const placed = useMemo(() => {
+    if (!zones) return { skin: baseSkin, ignored: false };
+    if (layout && !layoutStale) return { skin: { ...baseSkin, pack: layout.draft }, ignored: false };
+    const ov = custom && custom.overrides;
+    if (!ov || ov.pack !== baseSkin.id) return { skin: baseSkin, ignored: false };
+    const a = applyOverrides(baseSkin.pack, ov);
+    return a.ok ? { skin: { ...baseSkin, pack: a.pack }, ignored: false } : { skin: baseSkin, ignored: true };
+  }, [baseSkin, zones, custom, layout, layoutStale]);
+  const skin = placed.skin;
   const L = useMemo(() => {
-    const nodes = custom ? membersOf(custom, view) : [...new Map(officeRooms(view, filter).flatMap((r) => r.nodes).map((n) => [n.name, n])).values()];
+    const all = custom ? membersOf(custom, view) : [...new Map(officeRooms(view, filter).flatMap((r) => r.nodes).map((n) => [n.name, n])).values()];
+    const keep = (n) => !(hideAsleep && ASLEEP.has(n.state));
+    const nodes = all.filter(keep);
     if (zones) { const z = zonesLayout(skin.pack, nodes, seatsRef.current); seatsRef.current = z.seats; return z; }
-    if (!custom) return autoLayout(officeRooms(view, filter), { width });
+    if (!custom) return autoLayout(officeRooms(view, filter).map((r) => (hideAsleep ? { ...r, nodes: r.nodes.filter(keep) } : r)), { width });
     const lay = custom.layout || layoutOk(skin.layout);
     return lay ? customLayout({ ...custom, layout: lay }, nodes) : autoLayout([{ key: custom.id, name: custom.name, lobby: false, nodes }], { width });
-  }, [view, filter, custom, width, skin]);
+  }, [view, filter, custom, width, skin, hideAsleep]);
   /** Layout units → CSS px: the zones scene fits the stage (16:9, whole); the desks are drawn at their size. */
   const k = zones ? Math.max(0.2, Math.min(1.25, (width - 2) / L.width, stageH > 0 ? (stageH - 2) / L.height : Infinity)) : 1;
   const looks = useMemo(() => {
@@ -265,7 +327,12 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     const all = L.rooms.flatMap((r) => r.desks);
     const back = layer((g) => {
       g.fillStyle = env.pal.bg; g.fillRect(0, 0, L.width, L.height);
-      if (zones) { skin.drawBackground(g, L, env); return; }
+      if (zones) {
+        skin.drawBackground(g, L, env);
+        // Who found no spot in an area: a count in its corner (never over its name).
+        for (const [a, n] of L.crowd || []) if (L.areas[a] && skin.drawCrowd) skin.drawCrowd(g, L.areas[a], n, env);
+        return;
+      }
       skin.drawFloor(g, L, env);
       for (const r of L.rooms) skin.drawRoom(g, r, env);
       for (const d of all) skin.drawDeskBack(g, d, looks.get(d.key), env);
@@ -287,7 +354,7 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     if (s.back) ctx.drawImage(s.back, 0, 0);
     ctx.setTransform(scale, 0, 0, scale, 0, 0);
     ctx.imageSmoothingEnabled = false;
-    const speakers = [];
+    const speakers = [], tags = [];
     let walking = false;
     if (s.zones) {
       // Furniture under the people, the people (nearest last), furniture over them, then their name tags.
@@ -301,11 +368,17 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
       for (const f of furniture) if (f.depth < CHAR_DEPTH) sk.drawFurniture(ctx, f, s.active.has(f.id), ms, env);
       for (const p of people) {
         const box = { ...p.d, x: p.at.x - 44, y: p.at.y - 53, w: 88, h: 53, seat: { x: p.at.x, y: p.at.y } };
-        sk.drawCharacter(ctx, box, p.at.walking ? { ...p.look, pose: "walk" } : p.look, ms, env);
-        if (!p.at.walking) speakers.push({ look: p.look, x: p.at.x + 10, y: p.at.y - 50 });
+        sk.drawCharacter(ctx, box, p.at.walking ? { ...p.look, pose: "walk", heading: p.at.heading } : p.look, ms, env);
+        if (!p.at.walking) speakers.push({ look: p.look, x: p.at.x + 10, y: p.at.y - 50, area: p.d.area });
       }
       for (const f of furniture) if (f.depth >= CHAR_DEPTH) sk.drawFurniture(ctx, f, s.active.has(f.id), ms, env);
-      for (const p of people) sk.drawTag(ctx, p.at.x, p.at.y, p.look, env);
+      // In an area over capacity the name tags show on hover or focus only (#2513: a crowd's tags covered each other).
+      const over = s.L.over || new Set(), hot = tipNow.current;
+      for (const p of people) {
+        if (over.has(p.d.area) && p.d.key !== hot && !p.look.match) continue;
+        sk.drawTag(ctx, p.at.x, p.at.y, p.look, env);
+        tags.push(tagBox(ctx, p.at.x, p.at.y, p.look.label));
+      }
     } else {
       for (const d of s.desks) { const look = s.looks.get(d.key); sk.drawCharacter(ctx, d, look, ms, env); speakers.push({ look, x: d.x + 58, y: d.y + 12 }); }
       ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -320,9 +393,11 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     for (const sp of speakers) {
       if (sp.look.dim || sp.look.pose === "away") continue;
       const b = bubbleAt(sp.look.name, sp.look.state, ms, linesFor(sp.look.state, s.lang, sk.pack, s.lines));
-      if (b) bubbles.push({ key: sp.look.name, calling: CALLING.has(sp.look.state), shown: b.shown, box: bubbleBox(ctx, sp.x, sp.y, b.text), tail: { x: sp.x, y: sp.y }, sp, b });
+      if (b) bubbles.push({ key: sp.look.name, area: sp.area, state: sp.look.state, calling: CALLING.has(sp.look.state), rank: bubbleRank(sp.look.state), shown: b.shown,
+        box: bubbleBox(ctx, sp.x, sp.y, b.text), tail: { x: sp.x, y: sp.y }, sp, b });
     }
-    for (const { sp, b, dy } of placeBubbles(bubbles)) sk.drawBubble(ctx, sp.x, sp.y, [...b.text].slice(0, b.shown).join(""), env, -dy);
+    // A crowded area speaks less (thinBubbles: calls, then work, a few at most); no bubble covers a name tag.
+    for (const { sp, b, dy } of placeBubbles(thinBubbles(bubbles, s.zones ? s.L.over : null), 22, tags)) sk.drawBubble(ctx, sp.x, sp.y, [...b.text].slice(0, b.shown).join(""), env, -dy);
     return walking || up.length > 0 || flights.size() > 0;
   }
   // The loop: drawing only when the frame (FPS) changed or something is in the air; stopped while the tab is hidden,
@@ -359,6 +434,11 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   }, []);
   useEffect(() => { loop.current?.wake(); }, [traffic]);
 
+  // The person hovered or focused: their name tag shows even in a crowd.
+  const tipNow = useRef(null);
+  tipNow.current = tip;
+  useEffect(() => { if (!scene.current) return; scene.current.dirty = true; if (still) draw(0); else loop.current?.wake(); }, [tip]);
+
   // ── The tooltip: what the canvas's card says, above the desk (below it at the top edge) ──
   const tipDesk = tip ? desksOf(L).find((d) => d.key === tip) || null : null;
   useLayoutEffect(() => {
@@ -371,8 +451,12 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     const r = canvasRef.current ? canvasRef.current.getBoundingClientRect() : null;
     if (!r) return null;
     const x = (e.clientX - r.left) / k, y = (e.clientY - r.top) / k;
-    // The zones scene draws people where they walk: they are hit there, not at the seat they are heading for.
-    return zones ? personAt(L.rooms.flatMap((rm) => rm.desks), x, y, (d) => walkers.at(d.node.name, now())) : deskAt(L, x, y);
+    // The zones scene draws people where they walk: they are hit there, not at the seat they are heading for, and in
+    // the box the skin draws them in (an uploaded character's strip, anchor and size: #2513 review), nearest first.
+    if (!zones) return deskAt(L, x, y);
+    const t = now(), s = scene.current, sk = (s && s.skin) || skin, lk = s ? s.looks : looks;
+    return personAt(L.rooms.flatMap((rm) => rm.desks), x, y, (d) => walkers.at(d.node.name, t),
+      (d, at) => (sk.charBox && lk.get(d.key) ? sk.charBox(lk.get(d.key), at) : null));
   };
   const onMove = (e) => { if (e.pointerType === "touch") return; const d = deskOf(e); const k = d ? d.key : null; if (k !== tip) setTip(k); };
   const onClick = (e) => {
@@ -383,40 +467,75 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   };
 
   const auto = !custom;
+  // Edit layout: an admin, a stored office, a zones style (built in, or a pack loaded here); not while the offices'
+  // editor is open, nor a second session.
+  const canLayout = canEdit && storedRev !== null && !!custom && zones && !loading && baseSkin.id === custom.skin && !editing && !layout;
+  const openLayout = () => {
+    setLayout({ id: ++layoutSeq.current, officeId: custom.id, skin: custom.skin, pack: styleKey, base: baseSkin.pack, start: skin.pack, draft: skin.pack, rev: storedRev, list: stored });
+    setTip(null);
+  };
+  const closeLayout = () => setLayout(null);
+  const onDraft = (draft) => setLayout((cur) => (cur ? { ...cur, draft } : cur));
+  // Save: the session's list, this office's overrides replaced (none: back to the style's own), with the session's rev.
+  // A change made meanwhile (409) reads the list again: the session takes it (the view too), the draft is kept, and
+  // Save again — the person's call, told so — puts it on that list.
+  const saveLayout = async (ov) => {
+    const s = layoutRef.current;
+    const mine = s && s.list.find((o) => o.id === s.officeId);
+    if (!s || !mine || mine.skin !== s.skin) return { ok: false, message: t("orgl.stale") };
+    const list = s.list.map((o) => (o.id === s.officeId ? (({ overrides: _gone, ...rest }) => (ov ? { ...rest, overrides: ov } : rest))(o) : o)).map(officeForSave);
+    const sent = ask();
+    const r = await store.saveOffices(list, s.rev);
+    if (r.ok) { adopt({ rev: r.rev, offices: r.offices }, sent); return { ok: true }; }
+    if (r.status === 409) {
+      const at = ask(); const cur = adopt(await store.offices(), at);
+      if (cur) setLayout((c) => (c && c.id === s.id ? { ...c, list: cur.offices, rev: cur.rev } : c));
+      return { ok: false, message: t("orgl.changed") };
+    }
+    return { ok: false, message: r.status === 429 ? t("orgl.rateLimited") : t("orgl.failed", r.error || r.status) };
+  };
+  const styleName = (id) => (STYLES.includes(id) ? to(`style_${id}`) : (packs.find((pk) => pk.id === id) || { name: id }).name);
   const f = filterOk(filter);
   const opts = teamOptions(view);
   const teamValue = (opts.find((o) => o.team === f.team) || opts[0]).value;
   const setF = (next) => { const v = filterOk(next); store.saveFilter(v); setFilter(v); };
-  const pick = (id) => { store.saveChoice(id); setChoice(id); setTip(null); };
+  // While Edit layout is open the office stays (its picker is disabled; this is the guard behind it).
+  const pick = (id) => { if (layoutRef.current) return; store.saveChoice(id); setChoice(id); setTip(null); };
   const everyone = useMemo(() => { const m = new Map(); for (const n of [...view.top, ...view.teams.flatMap((tm) => tm.nodes), ...view.rest.nodes]) if (!m.has(n.name)) m.set(n.name, n); return [...m.values()]; }, [view]);
   const desks = desksOf(L);
   const tipText = tipDesk ? nodeText(tipDesk.node) : null;
   return html`<div class="oo">
     <div class="oo-bar">
       <label class="oo-pick"><span class="oo-pick-label">${to("office")}</span>
-        <select class="tb-select" value=${custom ? custom.id : AUTO_ID} onChange=${(e) => pick(e.target.value)}>
+        <select class="tb-select oo-office" value=${layout ? layout.officeId : custom ? custom.id : AUTO_ID} disabled=${!!layout} onChange=${(e) => pick(e.target.value)}>
           <option value=${AUTO_ID}>${to("allOffice")}</option>
           ${stored.map((o) => html`<option key=${o.id} value=${o.id}>${o.name}</option>`)}
         </select></label>
       ${auto ? html`<label class="oo-pick"><span class="oo-pick-label">${to("styleLabel")}</span>
-        <select class="tb-select" value=${skin.id} onChange=${(e) => { store.saveSkin(e.target.value); setStyle(e.target.value); setTip(null); }}>
+        <select class="tb-select" value=${STYLES.includes(style) || packs.some((pk) => pk.id === style) ? style : skin.id} onChange=${(e) => { store.saveSkin(e.target.value); setStyle(e.target.value); setTip(null); }}>
           ${STYLES.map((id) => html`<option key=${id} value=${id}>${to(`style_${id}`)}</option>`)}
+          ${packs.map((pk) => html`<option key=${`pack:${pk.id}`} value=${pk.id}>${pk.name}</option>`)}
         </select></label>` : null}
       ${auto ? html`<label class="oo-pick"><span class="oo-pick-label">${to("show")}</span>
         <select class="tb-select" value=${teamValue} onChange=${(e) => { const o = opts.find((x) => x.value === e.target.value); setF({ ...f, team: o ? o.team : "" }); }}>
           ${opts.map((o) => html`<option key=${o.value} value=${o.value}>${o.label}</option>`)}
         </select></label>
         <${People} nodes=${everyone} pinned=${f.pinned} onChange=${(pinned) => setF({ ...f, pinned })} />` : null}
-      ${custom && skin.id !== custom.skin ? html`<span class="muted oo-note">${to("skinUnknown", custom.skin)}</span>` : null}
+      <label class="check oo-hide-asleep"><input type="checkbox" checked=${hideAsleep} onChange=${() => { const v = !hideAsleep; store.saveHideAsleep(v); setHideAsleep(v); setTip(null); }} /><span>${to("hideAsleep")}</span></label>
+      ${custom && baseSkin.id !== custom.skin && !loading ? html`<span class="muted oo-note">${to("skinUnknown", styleName(custom.skin))}</span>` : null}
+      ${placed.ignored ? html`<span class="muted oo-note">${to("layoutIgnored")}</span>` : null}
       ${L.unseated ? html`<span class="muted oo-note">${to("unseated", L.unseated)}</span>` : null}
-      ${canEdit && storedRev !== null ? html`<button type="button" class="btn btn-sm oo-edit" onClick=${() => setEditing(true)}>${t("orge.edit")}</button>` : null}
+      ${canEdit && storedRev !== null ? html`<button type="button" class="btn btn-sm oo-edit" onClick=${() => setEditing(true)} disabled=${!!layout}>${t("orge.edit")}</button>` : null}
+      ${canLayout ? html`<button type="button" class="btn btn-sm oo-layout" onClick=${openLayout}>${t("orgl.edit")}</button>` : null}
     </div>
-    ${editing ? html`<${OfficeEditor} offices=${stored} rev=${storedRev} view=${view} store=${store}
+    ${editing ? html`<${OfficeEditor} offices=${stored} rev=${storedRev} view=${view} store=${store} packs=${packs}
       ask=${ask} current=${() => shown.current} onSaved=${adopt} onClose=${() => setEditing(false)} />` : null}
     ${desks.length || L.rooms.length ? null : html`<p class="note oo-empty">${to("nobody")} ${auto && (f.team || f.pinned.length) ? html`<button type="button" class="btn btn-sm" onClick=${() => setF({ team: "", pinned: [] })}>${to("everyone")}</button>` : null}</p>`}
     <div class="oo-stage" ref=${stageRef}>
       <canvas ref=${canvasRef} class=${`oo-canvas${tipDesk && tipDesk.node.i ? " hot" : ""}`} role="img" aria-label=${to("label")}
         onPointerMove=${onMove} onPointerLeave=${() => setTip(null)} onPointerDown=${(e) => { lastType.current = e.pointerType || "mouse"; }} onClick=${onClick}></canvas>
+      ${layout ? html`<${LayoutEditor} key=${layout.id} base=${layout.base} start=${layout.start} width=${Math.ceil(L.width * k)} height=${Math.ceil(L.height * k)}
+        canvas=${canvasRef} stale=${layoutStale ? t("orgl.stale") : ""} onChange=${onDraft} onSave=${saveLayout} onClose=${closeLayout} />` : null}
       ${tipText ? html`<div ref=${tipRef} class="oo-tip" role="tooltip">
         <strong>${tipText.primary}</strong>${tipText.secondary ? html` <span class="muted mono">${tipText.secondary}</span>` : null}
         <div>${tipText.sub}</div><div class="muted">${caption(officePose(tipDesk.node.state), tipDesk.node.state)}</div>

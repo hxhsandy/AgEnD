@@ -1586,6 +1586,13 @@ strong.org-name { font-size: var(--fs-sm); color: var(--text); }
 .oe-label { font-size: var(--fs-xs); color: var(--text-2); }
 .oe-name { min-width: 0; width: 16em; max-width: 100%; }
 .oe-remove { margin-left: auto; }
+/* #2513: the skin packs the host keeps — a row each with its delete, then the upload buttons (a hidden file input each). */
+.oe-packs { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); margin-top: var(--s-3); }
+.oe-packs > legend, .oe-packs > .note { flex-basis: 100%; }
+.oe-pack-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; flex-basis: 100%; }
+.oe-pack { display: flex; align-items: center; gap: var(--s-2); overflow-wrap: anywhere; }
+.oe-pack-remove { margin-left: auto; }
+.oe-upload { position: relative; cursor: pointer; }
 .oe-members { display: flex; flex-wrap: wrap; gap: var(--s-3); }
 .oe-group { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; min-width: 12em; max-height: 240px; overflow-y: auto; }
 .oe-group legend { font-size: var(--fs-xs); font-weight: var(--fw-semibold); color: var(--text-2); padding: 0; margin-bottom: 4px; }
@@ -1607,6 +1614,27 @@ strong.org-name { font-size: var(--fs-sm); color: var(--text); }
   display: inline-flex; flex-wrap: wrap; gap: 4px; max-width: calc(100% - 2 * var(--s-2)); background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); white-space: normal; }
 .oo-desk { font-size: var(--fs-xs); padding: 2px 6px; border-radius: var(--r-sm); background: var(--bg); color: var(--text); border: 1px solid var(--border); }
 .oo-desk:focus-visible { outline: none; border-color: var(--focus); box-shadow: inset 0 -2px 0 var(--focus); }
+/* #2513: Edit layout (fleet-office-layout.js) — an SVG over the canvas (placed and sized through the CSSOM), its 1280×720
+   grid, the areas, corridors and a handle for each seat, item, the door and waypoint; its bar sticks to the stage's foot. */
+.oo-hide-asleep { font-size: var(--fs-xs); color: var(--text-2); }
+.ol-overlay { position: absolute; left: 0; top: 0; z-index: 4; }
+.ol-svg { display: block; overflow: visible; touch-action: none; }
+.ol-grid { stroke: var(--text-3); stroke-opacity: 0.25; stroke-width: 1; }
+.ol-label, .ol-coord { fill: var(--text); font-size: 12px; font-family: var(--font-mono, monospace); paint-order: stroke; stroke: var(--bg); stroke-width: 3px; }
+.ol-area { fill: none; stroke: var(--text-2); stroke-dasharray: 6 4; stroke-width: 1.5; }
+.ol-edge { stroke: var(--focus); stroke-width: 3; stroke-opacity: 0.7; }
+.ol-handle { cursor: grab; outline: none; }
+.ol-handle > circle, .ol-handle > rect { fill: var(--surface); stroke: var(--text); stroke-width: 2; }
+.ol-seat > circle { fill: var(--ok); }
+.ol-furniture > rect { fill: var(--warn); }
+.ol-door > rect { fill: var(--danger); }
+.ol-waypoint > circle { fill: var(--focus); }
+.ol-handle.on > circle, .ol-handle.on > rect, .ol-handle:focus-visible > circle, .ol-handle:focus-visible > rect { stroke: var(--focus); stroke-width: 4; }
+.ol-bar { position: sticky; left: 0; bottom: 0; z-index: 6; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); padding: var(--s-2);
+  background: var(--surface); border-top: 1px solid var(--border); }
+.ol-actions { display: inline-flex; gap: var(--s-2); margin-left: auto; }
+.ol-corridors { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.ol-msg { flex-basis: 100%; margin: 0; }
 @media (max-width: 640px) {
   .oo-stage { height: calc(100dvh - 300px); min-height: 340px; }
   .oo-pick .tb-select { max-width: 150px; }
