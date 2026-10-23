@@ -18284,7 +18284,12 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
       const isPrimaryAdapter = !mentionWorld || mentionWorld.adapter === this.adapter;
       const adapterBotUserId = mentionWorld?.botUserId ?? (isPrimaryAdapter ? this.botUserId : undefined);
       const mentionTag = adapterBotUserId ? `<@${adapterBotUserId}>` : null;
-      const isMentioned = mentionTag && text.includes(mentionTag);
+      // #2551: a native reply to one of THIS bot's messages is addressed to it, as a mention is (a Discord reply carries
+      // its ping in the reference, not the text). One hop only: a reply to a message of ours that itself answered a bot
+      // (or the sender) is a chain of bots answering each other — a mention still carries it on. A reply to our answer
+      // to a person is the ordinary handoff, and is addressed.
+      const repliesToUs = !!adapterBotUserId && msg.replyToAuthorId === adapterBotUserId && msg.replyToChain !== true;
+      const isMentioned = (mentionTag && text.includes(mentionTag)) || repliesToUs;
       if (!isMentioned) {
         // Bare attachment (no @mention) — already saved above; just acknowledge.
         if (saved) {

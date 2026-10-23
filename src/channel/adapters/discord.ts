@@ -298,6 +298,8 @@ export class DiscordAdapter extends EventEmitter implements ChannelAdapter {
   private queue: MessageQueue;
   private lastChatId: string | null = null;
   private attachmentUrls = new Map<string, string>();
+  /** #2551: recent messages a bot wrote (ids), so a reply to one pings its author explicitly (repliedUser). */
+  private botAuthored = new Set<string>();
   private categoryIdPromise?: Promise<string>;
 
   constructor(opts: DiscordAdapterOptions) {
@@ -625,11 +627,20 @@ export class DiscordAdapter extends EventEmitter implements ChannelAdapter {
       // the reply rather than reducing the reference to text alone. Keep this
       // limited to real attachments: ordinary URL auto-embeds must not become
       // downloads (the same policy as the outer message above).
-      let replyToText: string | undefined;
+      let replyToText: string | undefined, replyToAuthorId: string | undefined, replyToChain = false;
       if (msg.reference?.messageId) {
         try {
           const ref = await msg.fetchReference();
           replyToText = ref.content || ref.embeds?.[0]?.description || undefined;
+          // #2551: who the reply answers (a bot's reply to our bot's message is addressed to it), and whether that
+          // message itself answered a bot or this sender — then this is a chain of bots answering each other, not one
+          // hop. Its own reply target: the user it pinged, else read once (a reply to a deleted message: not a chain).
+          replyToAuthorId = ref.author?.id || undefined;
+          if (ref.reference?.messageId) {
+            let parent = ref.mentions?.repliedUser ?? null;
+            if (!parent) { try { parent = (await ref.fetchReference()).author ?? null; } catch { parent = null; } }
+            replyToChain = !!parent && (parent.bot === true || parent.id === userId);
+          }
           for (const att of ref.attachments?.values() ?? []) {
             if (!att.contentType?.startsWith("image/")) continue;
             if (!attachments.some(existing => existing.fileId === att.id)) {
@@ -664,6 +675,10 @@ export class DiscordAdapter extends EventEmitter implements ChannelAdapter {
         this.attachmentUrls.set(fileId, url);
       });
 
+      if (isBotMessage) {
+        this.botAuthored.add(messageId);
+        while (this.botAuthored.size > 1000) this.botAuthored.delete(this.botAuthored.values().next().value!);
+      }
       // Store attachment URLs for later download
       for (const att of msg.attachments.values()) {
         this.attachmentUrls.set(att.id, att.url);
@@ -690,6 +705,8 @@ export class DiscordAdapter extends EventEmitter implements ChannelAdapter {
         attachments: attachments.length > 0 ? attachments : undefined,
         replyTo: msg.reference?.messageId ?? undefined,
         replyToText,
+        ...(replyToAuthorId ? { replyToAuthorId } : {}),
+        ...(replyToChain ? { replyToChain: true } : {}),
       });
       } catch (err) {
         // A throw here would become an unhandledRejection → process.exit(1) for
@@ -1529,11 +1546,16 @@ export class DiscordAdapter extends EventEmitter implements ChannelAdapter {
     // #2281: `replyTo` makes the first part a native reply (a Discord snowflake only). failIfNotExists: false — a reply
     // to a message deleted since is sent as a plain message by Discord itself.
     const replyTo = opts?.replyTo && /^\d{15,25}$/.test(opts.replyTo) ? opts.replyTo : undefined;
+    // #2551: a reply to a bot's message pings that bot explicitly (repliedUser), with the caller's mentions or Discord's
+    // defaults otherwise unchanged — a parse list given without it would leave the replied bot unpinged.
+    const allowedMentions = replyTo && this.botAuthored.has(replyTo)
+      ? { ...(opts?.allowedMentions ?? { parse: ["users", "roles", "everyone"] as const }), repliedUser: true }
+      : opts?.allowedMentions;
     for (const [i, chunk] of chunks.entries()) {
       const components = replyRows && i === chunks.length - 1 ? { components: replyRows } : {};
       const reply = replyTo && i === 0 ? { reply: { messageReference: replyTo, failIfNotExists: false } } : {};
-      const payload = (withReply: boolean): string | MessageCreateOptions => opts?.disablePreview || opts?.allowedMentions || replyRows || (withReply && replyTo && i === 0)
-        ? { content: chunk, ...(opts?.disablePreview ? { flags: MessageFlags.SuppressEmbeds as const } : {}), ...(opts?.allowedMentions ? { allowedMentions: opts.allowedMentions } : {}), ...components, ...(withReply ? reply : {}) }
+      const payload = (withReply: boolean): string | MessageCreateOptions => opts?.disablePreview || allowedMentions || replyRows || (withReply && replyTo && i === 0)
+        ? { content: chunk, ...(opts?.disablePreview ? { flags: MessageFlags.SuppressEmbeds as const } : {}), ...(allowedMentions ? { allowedMentions } : {}), ...components, ...(withReply ? reply : {}) }
         : chunk;
       let sent: Awaited<ReturnType<typeof channel.send>>;
       try { sent = await channel.send(payload(true)); } catch (err) {
