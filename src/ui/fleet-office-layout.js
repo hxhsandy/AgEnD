@@ -90,12 +90,13 @@ const KEY_STEP = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], Arr
 
 /**
  * The editor over the canvas: `base` the pack as uploaded; `start` the layout shown when it opens (the base with the
- * office's overrides on it); `width`/`height` the canvas's CSS px; `canvas` a ref to it (the overlay sits on it, placed
- * through the CSSOM, never a style attribute: #1300); `onChange(edited)` as anything moves (the canvas
- * redraws it); `onSave(overrides | null)` → { ok } or { ok: false, message }; `onClose()`. `stale` (a message): the
+ * office's overrides on it); `place(el)` puts the overlay over the scene wherever the view has it (#2540: panned and
+ * zoomed; the page sets its box through the CSSOM, never a style attribute: #1300) — a pointer is read back through
+ * the overlay's own box, so a drag lands on the logical point under it at any zoom; `onChange(edited)` as anything
+ * moves (the canvas redraws it); `onSave(overrides | null)` → { ok } or { ok: false, message }; `onClose()`. `stale` (a message): the
  * office or its style changed underneath the session — no handles, nothing to save, only Cancel.
  */
-export function LayoutEditor({ base, start, width, height, canvas = null, stale = "", onChange, onSave, onClose }) {
+export function LayoutEditor({ base, start, place = null, stale = "", onChange, onSave, onClose }) {
   const [edited, setEdited] = useState(start);
   const [sel, setSel] = useState(null);
   const [coords, setCoords] = useState(true);
@@ -103,13 +104,7 @@ export function LayoutEditor({ base, start, width, height, canvas = null, stale 
   const [msg, setMsg] = useState("");
   const [joinTo, setJoinTo] = useState("");
   const svg = useRef(null), drag = useRef(null), overlay = useRef(null);
-  useLayoutEffect(() => {
-    const el = overlay.current, cv = canvas && canvas.current;
-    if (!el || !el.style) return;
-    el.style.setProperty("width", `${width}px`); el.style.setProperty("height", `${height}px`);
-    el.style.setProperty("left", `${cv && Number.isFinite(cv.offsetLeft) ? cv.offsetLeft : 0}px`);
-    el.style.setProperty("top", `${cv && Number.isFinite(cv.offsetTop) ? cv.offsetTop : 0}px`);
-  });
+  useLayoutEffect(() => { if (place) place(overlay.current); });
   const change = (next) => { setEdited(next); onChange(next); };
   useEffect(() => { onChange(start); }, []);
   const handles = handlesOf(edited);
@@ -162,7 +157,7 @@ export function LayoutEditor({ base, start, width, height, canvas = null, stale 
   }
   return html`<div class="ol" role="group" aria-label=${tl("title")}>
     <div class="ol-overlay" ref=${overlay}>
-      <svg ref=${svg} class="ol-svg" viewBox=${`0 0 ${LOGICAL.w} ${LOGICAL.h}`} width=${width} height=${height}
+      <svg ref=${svg} class="ol-svg" viewBox=${`0 0 ${LOGICAL.w} ${LOGICAL.h}`} width="100%" height="100%"
         onPointerMove=${move} onPointerUp=${up} onPointerCancel=${up} onPointerLeave=${up}>
         ${grid}
         ${Object.values(edited.areas).map((a) => html`<rect key=${`a:${a.name}`} class="ol-area" x=${a.rect.x} y=${a.rect.y} width=${a.rect.w} height=${a.rect.h} />`)}

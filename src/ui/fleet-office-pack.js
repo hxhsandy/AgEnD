@@ -6,13 +6,21 @@
 // it is used here — the idea of the format only.
 //
 // A pack is a JSON manifest plus images. Every coordinate is in logical units on a 1280×720 canvas (LOGICAL), which
-// the page scales to fit its width. Images are pixel art, drawn unsmoothed at `scale` logical units per image pixel.
+// the page shows whole, then pans and zooms (fleet-office-view.js). Images are pixel art, drawn unsmoothed at `scale` logical units per image pixel.
 //
 //   {
 //     "format": 1,                                    required
 //     "id": "cozy",                                   letters, digits, - and _ (≤ 40); not a built-in skin's id
 //     "scale": 2,                                     1–8 (default 2)
 //     "background": "office.png",                     drawn over the whole 1280×720 canvas (16:9)
+//     "foreground": "front.png",                      optional, with stateZones: drawn over the whole canvas (16:9, as
+//                                                     the background) above the people, the furniture and the items in
+//                                                     the air, below the name tags, bubbles and "+n" counts (and Edit
+//                                                     layout's overlay): door frames, pillars, table fronts that hide
+//                                                     whoever walks behind them — transparent everywhere else
+//     "matte": "#1b1d24",                             optional (#2540): the colour around the scene where the Office
+//                                                     view's panel is not 16:9 (or is zoomed out), "#rrggbb"; without it
+//                                                     the page samples the background's edge pixels
 //     "areas": {                                      named zones: a rect [x, y, w, h] and its seats, in the order
 //       "desks":  { "rect": [40, 120, 620, 440], "seats": [[120, 220], [260, 220], …] },    they fill up
 //       "lounge": { "rect": [700, 120, 540, 260], "seats": [[760, 260], …] } },
@@ -25,7 +33,10 @@
 //     "furniture": [ { "id": "rack", "sprite": STRIP, "x": 1020, "y": 140, "depth": 2,
 //                      "activeWhen": "crashed", "activeSprite": STRIP } ],
 //                                                     drawn by depth: below 1000 under the people, 1000 and up over
-//                                                     them; (x, y) is where the strip's anchor goes. `activeWhen` (a
+//                                                     them; "depth": "y" (the string) sorts it among the people by base
+//                                                     y — its anchor's y against each person's feet: someone whose feet
+//                                                     are lower down (a greater y; a tie too) is drawn after it, in
+//                                                     front. (x, y) is where the strip's anchor goes. `activeWhen` (a
 //                                                     state, or a list): while anyone shown is in it, the item plays its
 //                                                     strip (or `activeSprite`); otherwise it holds the first frame
 //     "characters": { "default": { "working": STRIP, "idle": STRIP, "paused": STRIP, "needs": STRIP, "walk": STRIP,
@@ -62,7 +73,7 @@
 // "__proto__", …): such a name is refused, and every lookup is of the pack's own names only (own()).
 //
 // The host keeps an uploaded pack whole and never changes it: every PNG starts with its signature, a STRIP's image is
-// exactly frames·w × h, the background is 16:9, and each file and the pack have a size cap (web-office-skins.ts).
+// exactly frames·w × h, the background and the foreground are 16:9, and each file and the pack have a size cap (web-office-skins.ts).
 //
 // ── Layout overrides (the Office view's "Edit layout": a stored office's own positions on a zones pack) ──
 //
@@ -88,6 +99,7 @@ const POSES = ["working", "idle", "paused", "needs", "walk", "walkDown", "walkUp
 const BUILT_IN = new Set(["pixel", "studio"]);
 const ID = /^[A-Za-z0-9_-]{1,40}$/;
 const SRC = /^[A-Za-z0-9._/-]{1,200}$/;
+const HEX = /^#[0-9a-f]{6}$/i;
 const LIMIT = { areas: 32, seats: 64, furniture: 128, waypoints: 512, edges: 2048, sets: 64, byInstance: 500, lines: 12, line: 40 };
 
 class Refused extends Error { constructor(at, why) { super(`${at}: ${why}`); } }
@@ -107,7 +119,14 @@ function point(v, at) {
   if (!Array.isArray(v) || v.length !== 2) throw new Refused(at, "[x, y]");
   return { x: num(v[0], 0, LOGICAL.w, `${at}[0]`), y: num(v[1], 0, LOGICAL.h, `${at}[1]`) };
 }
+/** Where an item sorts: by depth, a "y" one among the people (after every number under them, before the rest). */
+const order = (f) => (f.depth === "y" ? CHAR_DEPTH - 0.5 : f.depth);
+/** A furniture item's numeric depth (its "y" is taken before this). */
+function depth(v, at) { if (!Number.isInteger(v) || v < -10000 || v > 10000) throw new Refused(at, 'a whole number from -10000 to 10000, or "y"'); return v; }
 function list(v, max, at) { if (!Array.isArray(v)) throw new Refused(at, "a list"); if (v.length > max) throw new Refused(at, `at most ${max}`); return v; }
+
+/** Whether `v` is a pack's `matte`: a colour as #rrggbb (six hex digits, either case). */
+export const matteOk = (v) => typeof v === "string" && HEX.test(v);
 
 /** A frame strip, strictly; `scale` the pack's (its displayed size, dw × dh, is resolved here). */
 export function checkStrip(v, at = "strip", scale = 2) {
@@ -133,11 +152,12 @@ function states(v, at) {
 export function checkSkinPack(x) {
   try {
     obj(x, "pack");
-    keys(x, ["format", "id", "scale", "background", "areas", "stateZones", "door", "waypoints", "edges", "furniture", "characters", "byInstance", "props", "bubbles", "room", "desk"], "pack");
+    keys(x, ["format", "id", "scale", "background", "foreground", "matte", "areas", "stateZones", "door", "waypoints", "edges", "furniture", "characters", "byInstance", "props", "bubbles", "room", "desk"], "pack");
     if (x.format !== 1) throw new Refused("format", "1");
     if (typeof x.id !== "string" || !ID.test(x.id)) throw new Refused("id", "1–40 letters, digits, _ or -");
     if (BUILT_IN.has(x.id)) throw new Refused("id", "a built-in skin's id");
     const scale = x.scale === undefined ? 2 : int(x.scale, 1, 8, "scale");
+    if (x.matte !== undefined && !matteOk(x.matte)) throw new Refused("matte", "a colour as #rrggbb");
     const areas = {};
     const rawAreas = x.areas === undefined ? {} : obj(x.areas, "areas");
     if (Object.keys(rawAreas).length > LIMIT.areas) throw new Refused("areas", `at most ${LIMIT.areas}`);
@@ -168,6 +188,7 @@ export function checkSkinPack(x) {
       }
       if (x.background === undefined) throw new Refused("background", "required with stateZones");
     }
+    if (x.foreground !== undefined && !stateZones) throw new Refused("foreground", "only with stateZones");
     const waypoints = [], ids = new Set();
     for (const [i, w] of list(x.waypoints ?? [], LIMIT.waypoints, "waypoints").entries()) {
       const at = `waypoints[${i}]`;
@@ -188,9 +209,9 @@ export function checkSkinPack(x) {
       fids.add(f.id);
       if (f.activeSprite !== undefined && f.activeWhen === undefined) throw new Refused(`${at}.activeSprite`, "only with activeWhen");
       return { id: f.id, sprite: checkStrip(f.sprite, `${at}.sprite`, scale), x: num(f.x, 0, LOGICAL.w, `${at}.x`), y: num(f.y, 0, LOGICAL.h, `${at}.y`),
-        depth: int(f.depth ?? 0, -10000, 10000, `${at}.depth`), activeWhen: f.activeWhen === undefined ? null : states(f.activeWhen, `${at}.activeWhen`),
+        depth: f.depth === "y" ? "y" : depth(f.depth ?? 0, `${at}.depth`), activeWhen: f.activeWhen === undefined ? null : states(f.activeWhen, `${at}.activeWhen`),
         activeSprite: f.activeSprite === undefined ? null : checkStrip(f.activeSprite, `${at}.activeSprite`, scale) };
-    }).sort((a, b) => a.depth - b.depth);
+    }).sort((a, b) => order(a) - order(b));
     const sets = obj(x.characters, "characters");
     if (Object.keys(sets).length > LIMIT.sets) throw new Refused("characters", `at most ${LIMIT.sets} sets`);
     const characters = {};
@@ -226,7 +247,7 @@ export function checkSkinPack(x) {
     keys(room, ["floor", "wall"], "room"); keys(desk, ["back", "front", "lit"], "desk");
     const opt = (v, at) => (v === undefined ? undefined : src(v, at));
     return { ok: true, pack: {
-      format: 1, id: x.id, scale, background: opt(x.background, "background"), areas, stateZones,
+      format: 1, id: x.id, scale, background: opt(x.background, "background"), foreground: opt(x.foreground, "foreground"), matte: x.matte === undefined ? undefined : x.matte.toLowerCase(), areas, stateZones,
       door: x.door === undefined ? { x: LOGICAL.w / 2, y: LOGICAL.h - 10 } : point(x.door, "door"), waypoints, edges, furniture, characters, byInstance,
       props: x.props === undefined ? {} : strips(x.props, PROPS, "props", scale), bubbles,
       room: { floor: opt(room.floor, "room.floor"), wall: opt(room.wall, "room.wall") }, desk: { back: opt(desk.back, "desk.back"), front: opt(desk.front, "desk.front"), lit: opt(desk.lit, "desk.lit") },
@@ -239,7 +260,7 @@ export function checkSkinPack(x) {
 /** The checked pack, or null. */
 export const skinPackOk = (x) => { const r = checkSkinPack(x); return r.ok ? r.pack : null; };
 /** Every image a pack names (what a loader fetches before spriteSkin draws). */
-export const packImages = (pack) => [...new Set([pack.background, pack.room.floor, pack.room.wall, pack.desk.back, pack.desk.front, pack.desk.lit,
+export const packImages = (pack) => [...new Set([pack.background, pack.foreground, pack.room.floor, pack.room.wall, pack.desk.back, pack.desk.front, pack.desk.lit,
   ...pack.furniture.flatMap((f) => [f.sprite.src, f.activeSprite && f.activeSprite.src]),
   ...Object.values(pack.characters).flatMap((s) => Object.values(s).map((st) => st.src)), ...Object.values(pack.props).map((st) => st.src)].filter(Boolean))];
 

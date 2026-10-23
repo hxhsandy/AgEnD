@@ -4,9 +4,9 @@
 export interface PackStrip { src: string; frames: number; w: number; h: number; fps: number; ax: number; ay: number; dw: number; dh: number }
 export interface PackPoint { x: number; y: number }
 export interface PackArea { name: string; rect: { x: number; y: number; w: number; h: number }; seats: PackPoint[] }
-export interface PackFurniture { id: string; sprite: PackStrip; x: number; y: number; depth: number; activeWhen: string[] | null; activeSprite: PackStrip | null }
+export interface PackFurniture { id: string; sprite: PackStrip; x: number; y: number; depth: number | "y"; activeWhen: string[] | null; activeSprite: PackStrip | null }
 export interface CheckedPack {
-  format: 1; id: string; scale: number; background?: string;
+  format: 1; id: string; scale: number; background?: string; foreground?: string; matte?: string;
   areas: Record<string, PackArea>; stateZones: Record<string, string> | null; door: PackPoint;
   waypoints: Array<{ id: string; x: number; y: number }>; edges: Array<[string, string]>;
   furniture: PackFurniture[]; characters: Record<string, Record<string, PackStrip>>; byInstance: Record<string, string>;
@@ -26,6 +26,7 @@ export const CHAR_DEPTH: number;
 export const PACK_STATES: string[];
 export function own<T = unknown>(o: unknown, k: unknown): T | undefined;
 export function inherited(k: unknown): boolean;
+export function matteOk(v: unknown): v is string;
 export function checkStrip(v: unknown, at?: string, scale?: number): PackStrip;
 export function checkSkinPack(x: unknown): { ok: true; pack: CheckedPack } | { ok: false; error: string };
 export function skinPackOk(x: unknown): CheckedPack | null;

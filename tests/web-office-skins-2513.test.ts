@@ -14,6 +14,7 @@
  *   refusal, in an office's overrides a 400 (never a 500); the reads a page makes on its own (the list, a manifest, its
  *   pictures) never slide an idle session, while uploads and deletes keep their session and CSRF checks.
  * - Format v1 additions: a strip's displayed size (dw/dh) and walkDown / walkUp / walkSide pass the host's checks.
+ * - #2540: a `foreground` is one of the pack's PNG files and 16:9; furniture `depth: "y"` passes, other strings refused.
  * The fixture (tests/fixtures/office-skin-clinic) is a small pack whose pictures are drawn by a script (simple shapes, no outside art).
  */
 import { EventEmitter } from "node:events";
@@ -112,6 +113,43 @@ describe("checkSkinUpload: the manifest by the page's rules, then the pictures",
     u.files["fox_walk.png"] = png(64, 48).toString("base64");
     u.manifest.characters.default.walkSide.dw = 2000;
     expect(refused(u)).toEqual([400, "skin_manifest_invalid", "characters.default.walkSide.dw: a number from 1 to 1280"]);
+  });
+  it("#2540: a pack's `matte` (the colour around the scene) passes as #rrggbb and is kept as uploaded; anything else is refused by the page's rule", () => {
+    const u: any = UPLOAD(); u.manifest.matte = "#1B1D24";
+    const r = checkSkinUpload(u, "me", 1);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect([r.pack.matte, r.record.manifest.matte]).toEqual(["#1b1d24", "#1B1D24"]);
+    for (const bad of ["#fff", "red", "#1b1d24ff", 12, "", "#12345g"]) {
+      const b: any = UPLOAD(); b.manifest.matte = bad;
+      expect(refused(b), String(bad)).toEqual([400, "skin_manifest_invalid", "matte: a colour as #rrggbb"]);
+    }
+  });
+  it("#2540: a `foreground` is one of the pack's files, a PNG, 16:9 — sent, checked and kept; missing, not a PNG or not 16:9 is refused", () => {
+    const u: any = UPLOAD(); u.manifest.foreground = "front.png"; u.files["front.png"] = png(640, 360).toString("base64");
+    const r = checkSkinUpload(u, "me", 1);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect([r.pack.foreground, r.record.files["front.png"]?.width, r.record.files["front.png"]?.height]).toEqual(["front.png", 640, 360]);
+    const missing: any = UPLOAD(); missing.manifest.foreground = "front.png";
+    expect(refused(missing)).toEqual([400, "skin_file_missing", "front.png: named by the manifest, not sent"]);
+    u.files["front.png"] = png(640, 400).toString("base64");
+    expect(refused(u)).toEqual([400, "skin_foreground_aspect", "foreground: front.png is 640×400 px; it must be 16:9"]);
+    u.files["front.png"] = Buffer.from("GIF89a......").toString("base64");
+    expect(refused(u)).toEqual([400, "skin_not_png", "front.png: not a PNG (its signature)"]);
+    const jpg: any = UPLOAD(); jpg.manifest.foreground = "front.jpg"; jpg.files["front.jpg"] = png(640, 360).toString("base64");
+    expect(refused(jpg)?.[1]).toBe("skin_file_name");
+    const desks: any = UPLOAD(); delete desks.manifest.stateZones; desks.manifest.foreground = "front.png"; desks.files["front.png"] = png(640, 360).toString("base64");
+    expect(refused(desks)).toEqual([400, "skin_manifest_invalid", "foreground: only with stateZones"]);
+  });
+  it("#2540: furniture `depth: \"y\"` passes the host's check; any other string is refused", () => {
+    const u: any = UPLOAD();
+    u.manifest.furniture = [{ id: "pillar", sprite: { src: "fox_idle.png", frames: 4, w: 32, h: 48 }, x: 300, y: 300, depth: "y" }];
+    const r = checkSkinUpload(u, "me", 1);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.pack.furniture[0]!.depth).toBe("y");
+    for (const bad of ["Y", "x", "", "1000"]) {
+      u.manifest.furniture[0].depth = bad;
+      expect(refused(u), bad).toEqual([400, "skin_manifest_invalid", 'furniture[0].depth: a whole number from -10000 to 10000, or "y"']);
+    }
   });
   it("a picture that is not a PNG (a JPEG, a GIF, text named .png) or one cut short is refused, naming the file", () => {
     const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0xff, 0xd9]);

@@ -11,7 +11,7 @@
  * pack is there entirely or not at all; a delete renames it away before removing it. The manifest is checked by the
  * page's own module (checkSkinPack) — the page and the host agree on every rule — and then the pictures: each is a PNG
  * (its signature, IHDR first, walked to IEND), within the per-file and per-pack caps and the side and pixel caps; every
- * STRIP's picture is exactly frames·w × h; the background is 16:9; every file the manifest names is sent and nothing
+ * STRIP's picture is exactly frames·w × h; the background and the foreground are 16:9; every file the manifest names is sent and nothing
  * else. What is read back is checked again (a pack a tightened rule refuses is not offered; its files stay on disk).
  */
 import { createHash, randomBytes } from "node:crypto";
@@ -72,7 +72,7 @@ export function checkSkinPicture(name: string, bytes: Uint8Array): { ok: true; k
   return { ok: true, kept: Buffer.from(kept), width: size.width, height: size.height };
 }
 
-/** The sizes the checked manifest asks of its pictures: each STRIP exactly frames·w × h; the background 16:9. */
+/** The sizes the checked manifest asks of its pictures: each STRIP exactly frames·w × h; the background and foreground 16:9. */
 function sizesAgree(pack: CheckedPack, sizes: Map<string, { width: number; height: number }>): SkinRefusal | null {
   for (const { at, strip } of packStrips(pack)) {
     const s = sizes.get(strip.src);
@@ -82,6 +82,8 @@ function sizesAgree(pack: CheckedPack, sizes: Map<string, { width: number; heigh
   }
   const bg = pack.background ? sizes.get(pack.background) : undefined;
   if (bg && bg.width * 9 !== bg.height * 16) return refuse(400, "skin_background_aspect", `background: ${pack.background} is ${bg.width}×${bg.height} px; it must be 16:9`);
+  const fg = pack.foreground ? sizes.get(pack.foreground) : undefined;
+  if (fg && fg.width * 9 !== fg.height * 16) return refuse(400, "skin_foreground_aspect", `foreground: ${pack.foreground} is ${fg.width}×${fg.height} px; it must be 16:9`);
   return null;
 }
 
