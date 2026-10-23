@@ -3,7 +3,7 @@
 //   what comes back is checked again here (fleet-office-model.js officesOk), never trusted;
 // - this browser's own choices (localStorage; blocked storage: this page only, as the canvas's Canvas/List): which
 //   office is shown, the auto office's member filter, and its style (skin); #2540: the view (zoom and centre) and the
-//   fit mode (Fit or Fill) per office.
+//   fit mode (Fit or Fill) per office; #2554: whether All offices shows the lobby tile.
 // - the skin packs an admin uploaded (#2513: GET /ui/office-skins, POST to upload one, DELETE to remove one;
 //   src/web-office-skins.ts). The office editor and the layout editor call saveOffices() with the whole list and the rev
 //   they read (a change in between answers 409).
@@ -11,6 +11,8 @@ import { AUTO_ID, filterOk, officesOk } from "./fleet-office-model.js";
 import { fitModeOk, savedOk } from "./fleet-office-view.js";
 
 const CHOICE_KEY = "agend_org_office", FILTER_KEY = "agend_org_office_filter", SKIN_KEY = "agend_org_office_skin", ASLEEP_KEY = "agend_org_office_hide_asleep";
+/** #2554: "0" when All offices leaves the lobby tile out (default: shown). */
+const LOBBY_KEY = "agend_org_office_lobby";
 /** #2540: { "<office>@<style>": [k, cx, cy] (and a 1 after them: a fit) } — the last VIEWS_MAX views, the most recent last. */
 const VIEW_KEY = "agend_org_office_view", VIEWS_MAX = 32;
 /** #2540: { "<office>@<style>": "cover" } — the offices whose fit fills the panel (the rest: "contain"), the last VIEWS_MAX. */
@@ -80,7 +82,10 @@ export function createOfficeStore({ fetch: get = globalThis.fetch, storage } = {
         return r.ok ? { ok: true } : { ok: false, status: r.status, error: d.error || "skin_failed" };
       } catch { return { ok: false, status: 0, error: "skin_failed" }; }
     },
-    /** The office shown here: an id (one the host no longer has falls back to the auto office where it is used). */
+    /**
+     * The office shown here: an id (one the host no longer has falls back to the auto office where it is used), or
+     * #2554's All offices (fleet-office-overview.js ALL_ID; with fewer than two offices stored: the auto office).
+     */
     choice: () => { const v = read(CHOICE_KEY); return typeof v === "string" && v && v.length <= 40 ? v : AUTO_ID; },
     saveChoice: (id) => write(CHOICE_KEY, String(id)),
     filter: () => { const s = read(FILTER_KEY); try { return filterOk(s ? JSON.parse(s) : null); } catch { return filterOk(null); } },
@@ -91,6 +96,9 @@ export function createOfficeStore({ fetch: get = globalThis.fetch, storage } = {
     /** Whether paused and stopped people are left out of the Office here (default: shown). */
     hideAsleep: () => read(ASLEEP_KEY) === "1",
     saveHideAsleep: (v) => write(ASLEEP_KEY, v ? "1" : "0"),
+    /** #2554: whether All offices shows the lobby tile (the instances in no stored office) here (default: shown). */
+    lobbyTile: () => read(LOBBY_KEY) !== "0",
+    saveLobbyTile: (v) => write(LOBBY_KEY, v ? "1" : "0"),
     /** The view kept for `key` (an office and its style): { k, cx, cy } (fleet-office-view.js savedOf), or null. */
     view: (key) => {
       try { const m = JSON.parse(read(VIEW_KEY) || "{}"); const a = m && Object.prototype.hasOwnProperty.call(m, key) ? m[key] : null;

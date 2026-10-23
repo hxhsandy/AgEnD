@@ -44,6 +44,14 @@
 //   (webkit's prefix too); where a page cannot take an element fullscreen (an iPhone) or the browser refuses, "immersive":
 //   the container covers the window (CSS). Either way only the stage shows, with its floating controls (zoom, Fit, the
 //   overview, a compact office switcher, Exit); the stage's resize handling re-fits it. Nothing about it is kept.
+// - All offices (#2554; offered with two or more stored offices): every stored office as a tile on one canvas, each
+//   drawn as its own view would be — its style (a pack loaded once and shared), its members, seats, poses, bubbles,
+//   walking and in-office traffic — scaled into its tile (fleet-office-overview.js: the tiles, the lobby tile of whoever
+//   is in no office, hit-testing, culling, the flights between tiles). The same canvas, controls and loop; tiles off
+//   screen are not drawn. A tile's label (a button, a readable size whatever the zoom) or a double-click on it opens
+//   that office; a person opens their chat. A tile too small to read (under TAG_MIN_K) shows name tags on hover only;
+//   bubbles are drawn after every tile (never cut at a tile's edge). Fit keeps the tiles clear of the controls
+//   (FIT_PAD). Edit offices and Edit layout wait for a single office.
 import { html, useEffect, useLayoutEffect, useMemo, useRef, useState } from "/assets/app-html.js";
 import { appStore } from "/assets/app-store.js";
 import { t, lang, register } from "/assets/app-i18n.js";
@@ -59,6 +67,7 @@ import { createOfficeStore } from "./fleet-office-store.js";
 import { OfficeEditor, officeForSave } from "./fleet-office-editor.js";
 import { LayoutEditor, handlesOf } from "./fleet-office-layout.js";
 import { applyOverrides } from "./fleet-office-pack.js";
+import { ALL_ID, LOBBY_TILE, OV, createCrossFlights, cropToRooms, fromTile, inTile, labelAt, lobbyNodes, overviewOk, tileAt, tileBox, tileLayout, visibleTiles } from "./fleet-office-overview.js";
 import { centreOn, gestureState, gestures, miniPoint, toScreen, toWorld, wheelFactor, zoomKey, zoomTo } from "./fleet-canvas-view.js";
 import { OK_MAX, OK_MIN, clampPan, desksK, edgeMatte, edgeStrips, fitScene, layerScale, miniBox, miniFrame, openingView, pinchOffice, savedOf, stepK, viewFromSaved,
   zoomLabel, zoomOffice } from "./fleet-office-view.js";
@@ -77,6 +86,8 @@ register("orgo", {
     hideAsleep: "Hide paused and stopped", layoutIgnored: "Its saved layout does not fit this style: drawn as the style's own.",
     fit: "Fit the office", overview: "Overview: click to move there", fullscreen: "Fullscreen", exitFullscreen: "Exit fullscreen",
     fill: "Fill", fillTitle: "Fill the panel (the scene's overflow is cropped; drag to see it)", zoomLevel: "Zoom {0}",
+    allOffices: "All offices", labelAll: "All offices: each office is a tile, drawn in its own style. Drag to pan; the wheel, a pinch, + and − zoom, 0 fits, F is fullscreen. Double-click a tile to open that office.",
+    tileLabel: "{0} ({1})", openOffice: "Open the office {0}", lobbyTile: "Lobby tile (in no office)", lobbyEveryone: "Everyone is in an office", overviewNoEdit: "Pick one office to edit offices or a layout",
   },
   "zh-TW": {
     label: "辦公室：每個 team 是一間房間，每個 instance 一張桌子；General 和未加入 team 的 instance 在大廳。拖曳平移；滾輪、雙指、+ 和 − 縮放，0 顯示整個場景，F 切換全螢幕。",
@@ -91,6 +102,8 @@ register("orgo", {
     hideAsleep: "隱藏暫停與停止的成員", layoutIgnored: "它儲存的配置不適用這個風格：以風格本身的配置顯示。",
     fit: "顯示整個辦公室", overview: "總覽：點一下移到那裡", fullscreen: "全螢幕", exitFullscreen: "結束全螢幕",
     fill: "填滿", fillTitle: "填滿整個面板（超出的部分會被裁切，拖曳即可看到）", zoomLevel: "縮放 {0}",
+    allOffices: "所有辦公室", labelAll: "所有辦公室：每間辦公室是一格，以它自己的風格顯示。拖曳平移；滾輪、雙指、+ 和 − 縮放，0 顯示全部，F 切換全螢幕。雙擊一格即可開啟那間辦公室。",
+    tileLabel: "{0}（{1}）", openOffice: "開啟辦公室「{0}」", lobbyTile: "大廳格（不在任何辦公室）", lobbyEveryone: "每個成員都已在某間辦公室", overviewNoEdit: "請先選一間辦公室，再編輯辦公室或配置",
   },
 });
 const to = (k, ...v) => t(`orgo.${k}`, ...v);
@@ -105,6 +118,10 @@ const reducedMotion = () => typeof matchMedia === "function" && matchMedia("(pre
 const deviceRatio = () => Math.max(0.5, Math.min(4, Number(globalThis.devicePixelRatio) || 1));
 /** The stage's size before it is measured (a test's page has none). */
 const SIZE0 = { w: 960, h: 600 };
+/** #2554: All offices' Fit keeps this many CSS px clear round the tiles (the zoom controls' column and a margin). */
+const FIT_PAD = 60;
+/** #2554: in All offices a tile's name tags show (always) from this many CSS px a unit up; below it on hover only. */
+export const TAG_MIN_K = 0.75;
 const PAN_KEYS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
 /** Typing: no single-key shortcut (the `f` of fullscreen) there. */
 const typing = (el) => !!el && (el.tagName === "INPUT" || el.tagName === "SELECT" || el.tagName === "TEXTAREA" || el.isContentEditable === true);
@@ -155,6 +172,149 @@ function teamOptions(view) {
     ...view.teams.map((tm, i) => ({ value: `t${i}`, team: tm.name, label: tm.name }))];
 }
 
+// ── A scene: one office's layout, looks and skin, drawn by itself (the single view) or as a tile (All offices, #2554) ──
+
+/** What each desk shows: the pose, the light, the coat; dimmed when the Find box matches someone else. */
+function looksOf(L, work, q, mode, zones) {
+  return new Map(L.rooms.flatMap((r) => r.desks).map((d) => {
+    const n = d.node;
+    if (!n) return [d.key, { name: "", label: "", state: "missing", pose: "away", light: null, lamp: false, sign: null, coat: "", work: 0, dim: !!q, match: false, free: zones }];
+    const match = !!q && hits(n, q);
+    return [d.key, { name: n.name, label: nodeText(n).primary, state: n.state, pose: officePose(n.state), light: lightOf(n.state), lamp: lampOf(n.state),
+      sign: zones ? null : signOf(n.state), coat: coatOf(n.i, n.i ? identityOf(n.i) : null, mode), work: work.get(n.name) || 0, dim: !!q && !match, match, free: zones }];
+  }));
+}
+/** A stored office's own layout on a zones style (its overrides); `ignored`: they do not fit this style. */
+function withOverrides(baseSkin, zones, office) {
+  const ov = zones && office ? office.overrides : null;
+  if (!ov || ov.pack !== baseSkin.id) return { skin: baseSkin, ignored: false };
+  const a = applyOverrides(baseSkin.pack, ov);
+  return a.ok ? { skin: { ...baseSkin, pack: a.pack }, ignored: false } : { skin: baseSkin, ignored: true };
+}
+/** A stored office's scene (or the lobby tile's): seats in its style's areas, its own seats, or one room wrapping at `deskW`. */
+function officeScene(office, nodes, skin, zones, deskW, prevSeats) {
+  if (zones) return zonesLayout(skin.pack, nodes, prevSeats);
+  const lay = office.layout || layoutOk(skin.layout);
+  return lay ? customLayout({ ...office, layout: lay }, nodes) : autoLayout([{ key: office.id, name: office.name, lobby: !!office.lobby, nodes }], { width: deskW });
+}
+/** What drawPart needs of a scene; its layers are painted on first draw (and again at another resolution). */
+function partOf(L, looks, skin, zones, walkers, flights) {
+  const all = L.rooms.flatMap((r) => r.desks);
+  const shown = new Set([...looks.values()].map((l) => l.state));
+  return { L, looks, skin, zones, walkers, flights, all, desks: all.filter((d) => d.node), layers: null,
+    active: zones ? activeFurniture(skin.pack, shown) : new Set(), lines: bubbleDefaults(), lang: lang() };
+}
+/** The back and front layers: pictures of the scene at `ls` layer px per logical unit (`tagsOff`: no name tags but the Find box's matches). */
+function paintLayers(p, env, ls, tagsOff = false) {
+  const { L, skin, zones, looks, all } = p;
+  const lw = Math.max(1, Math.ceil(L.width * ls)), lh = Math.max(1, Math.ceil(L.height * ls));
+  const layer = (fn) => {
+    const c = document.createElement("canvas");
+    c.width = lw; c.height = lh;
+    const g = c.getContext && c.getContext("2d");
+    if (!g) return null;
+    g.setTransform(ls, 0, 0, ls, 0, 0);
+    g.imageSmoothingEnabled = false;
+    fn(g);
+    return c;
+  };
+  const back = layer((g) => {
+    g.fillStyle = env.pal.bg; g.fillRect(0, 0, L.width, L.height);
+    if (zones) {
+      skin.drawBackground(g, L, env);
+      return;
+    }
+    skin.drawFloor(g, L, env);
+    for (const r of L.rooms) skin.drawRoom(g, r, env);
+    for (const d of all) skin.drawDeskBack(g, d, looks.get(d.key), env);
+  });
+  const front = zones ? null : layer((g) => {
+    for (const d of all) { const lk = looks.get(d.key); skin.drawDeskFront(g, d, tagsOff && lk && !lk.match ? { ...lk, notag: true } : lk, env); }
+  });
+  return { ls, tagsOff, back, front };
+}
+/**
+ * One frame of a scene at `ms` (0: still), a logical unit `a` bitmap px, its origin at (ox, oy); `hot`: the desk key
+ * hovered (its name tag shows even in a crowd); `tagsOff` (#2554: a tile too small to read them): the name tags show
+ * only for the one hovered and the Find box's matches. Whether anything in it is moving (in the air, or someone walking).
+ */
+function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer = null) {
+  const sk = p.skin;
+  const ls = layerScale(a, p.L.width, p.L.height);
+  if (!p.layers || p.layers.ls !== ls || p.layers.tagsOff !== tagsOff) p.layers = paintLayers(p, env, ls, tagsOff);
+  const T = () => ctx.setTransform(a, 0, 0, a, ox, oy);
+  const blit = (c) => { if (!c) return; ctx.setTransform(a / ls, 0, 0, a / ls, ox, oy); ctx.drawImage(c, 0, 0); T(); };
+  blit(p.layers.back);
+  T();
+  const speakers = [], tags = [];
+  const up = still ? [] : p.flights.frame(ms, p.L);
+  let walking = false;
+  if (p.zones) {
+    // Furniture under the people; the people (nearest last) with the furniture whose depth is "y" among them, by base
+    // y (a tie: the item first, the person in front); furniture over them; things in the air; the pack's foreground
+    // (door frames, pillars, table fronts); then what must stay readable: crowd counts and name tags (bubbles below).
+    const t = ms > 0 ? ms : now();
+    const people = p.desks.map((d) => {
+      const at = p.walkers.at(d.node.name, t) || { ...d.seat, walking: false };
+      if (at.walking) walking = true;
+      return { d, at, look: p.looks.get(d.key) };
+    }).sort((x, y) => x.at.y - y.at.y);
+    const furniture = sk.pack.furniture;
+    const band = [...furniture.filter((f) => f.depth === "y").map((f) => ({ y: f.y, k: 0, f })), ...people.map((q) => ({ y: q.at.y, k: 1, p: q }))]
+      .sort((x, y) => x.y - y.y || x.k - y.k);
+    for (const f of furniture) if (f.depth !== "y" && f.depth < CHAR_DEPTH) sk.drawFurniture(ctx, f, p.active.has(f.id), ms, env);
+    for (const { f, p: q } of band) {
+      if (f) { sk.drawFurniture(ctx, f, p.active.has(f.id), ms, env); continue; }
+      const box = { ...q.d, x: q.at.x - 44, y: q.at.y - 53, w: 88, h: 53, seat: { x: q.at.x, y: q.at.y } };
+      sk.drawCharacter(ctx, box, q.at.walking ? { ...q.look, pose: "walk", heading: q.at.heading } : q.look, ms, env);
+      if (!q.at.walking) speakers.push({ look: q.look, x: q.at.x + 10, y: q.at.y - 50, area: q.d.area });
+    }
+    for (const f of furniture) if (f.depth !== "y" && f.depth >= CHAR_DEPTH) sk.drawFurniture(ctx, f, p.active.has(f.id), ms, env);
+    for (const it of up) sk.drawProp(ctx, it, ms, env);
+    if (sk.drawForeground) sk.drawForeground(ctx, p.L, env);
+    // Who found no spot in an area: a count in its corner (never over its name).
+    for (const [ar, n] of p.L.crowd || []) if (p.L.areas[ar] && sk.drawCrowd) sk.drawCrowd(ctx, p.L.areas[ar], n, env);
+    // In an area over capacity the name tags show on hover or focus only (#2513: a crowd's tags covered each other).
+    const over = p.L.over || new Set();
+    for (const q of people) {
+      if ((tagsOff || over.has(q.d.area)) && q.d.key !== hot && !q.look.match) continue;
+      sk.drawTag(ctx, q.at.x, q.at.y, q.look, env);
+      tags.push(tagBox(ctx, q.at.x, q.at.y, q.look.label));
+    }
+  } else {
+    for (const d of p.desks) { const look = p.looks.get(d.key); sk.drawCharacter(ctx, d, look, ms, env); speakers.push({ look, x: d.x + 58, y: d.y + 12 }); }
+    blit(p.layers.front);
+    // Tags left out of the layer: the hovered desk's front again, with its tag.
+    const hd = tagsOff && hot ? p.desks.find((d) => d.key === hot) : null;
+    if (hd) sk.drawDeskFront(ctx, hd, p.looks.get(hd.key), env);
+    for (const it of up) sk.drawProp(ctx, it, ms, env);
+  }
+  // Speech bubbles: a short line for the state, now and then (typed out; whole at once when still), placed so no two
+  // overlap (placeBubbles; #2431).
+  const bubbles = [];
+  for (const sp of speakers) {
+    if (sp.look.dim || sp.look.pose === "away") continue;
+    const b = bubbleAt(sp.look.name, sp.look.state, ms, linesFor(sp.look.state, p.lang, sk.pack, p.lines));
+    if (b) bubbles.push({ key: sp.look.name, area: sp.area, state: sp.look.state, calling: CALLING.has(sp.look.state), rank: bubbleRank(sp.look.state), shown: b.shown,
+      box: bubbleBox(ctx, sp.x, sp.y, b.text), tail: { x: sp.x, y: sp.y }, sp, b });
+  }
+  // A crowded area speaks less (thinBubbles: calls, then work, a few at most); no bubble covers a name tag. `defer`
+  // (All offices): drawn after every tile, unclipped, so a bubble at a tile's edge is whole.
+  const placed = placeBubbles(thinBubbles(bubbles, p.zones ? p.L.over : null), 22, tags);
+  const say = () => { T(); for (const { sp, b, dy } of placed) sk.drawBubble(ctx, sp.x, sp.y, [...b.text].slice(0, b.shown).join(""), env, -dy); };
+  if (defer) defer.push(say); else say();
+  return walking || up.length > 0 || p.flights.size() > 0;
+}
+/**
+ * The person at (x, y) in a scene's units, as it draws them: on zones where they walk, in the box the skin draws them
+ * in (an uploaded character's strip, anchor and size: #2513 review), nearest first; on desks, the desk.
+ */
+function hitPart(p, x, y, t) {
+  if (!p.zones) return deskAt(p.L, x, y);
+  return personAt(p.all, x, y, (d) => p.walkers.at(d.node.name, t),
+    (d, at) => (p.skin.charBox && p.looks.get(d.key) ? p.skin.charBox(p.looks.get(d.key), at) : null));
+}
+
 function People({ nodes, pinned, onChange }) {
   const [open, setOpen] = useState(false);
   const [find, setFind] = useState("");
@@ -196,6 +356,7 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   const [filter, setFilter] = useState(() => store.filter());
   const [style, setStyle] = useState(() => store.skin());
   const [hideAsleep, setHideAsleep] = useState(() => store.hideAsleep());
+  const [lobbyOn, setLobbyOn] = useState(() => store.lobbyTile());       // #2554: All offices' lobby tile
   const [packs, setPacks] = useState([]);                             // the skin packs the host keeps: [{ id, name, sha }]
   const [packSkins, setPackSkins] = useState(() => new Map());        // id@sha → a loaded skin, or null (not a pack)
   // Edit layout's session while it is open: { id, officeId, skin, pack (the style's identity), base (the pack as kept),
@@ -216,6 +377,10 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   const flights = useMemo(() => createFlights(), []);
   const walkers = useMemo(() => createWalkers(), []);
   const seatsRef = useRef(new Map());                                 // the zones layout's last seats: kept where they can be
+  // #2554: All offices' tiles keep their own: seats (by tile and style), walkers and flights (by tile); and the items
+  // flying between tiles.
+  const tileSeats = useRef(new Map()), tileWalkers = useRef(new Map()), tileFlights = useRef(new Map());
+  const cross = useMemo(() => createCrossFlights(), []);
   const still = useMemo(reducedMotion, []);
 
   // The host's offices: on opening, and again whenever the stream says they changed. Answers can arrive out of order
@@ -291,18 +456,26 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   // snaps to whole numbers of these (fleet-office-view.js), so a pixel-level view maps a logical unit onto whole pixels.
   const ratio = backingScale(size.w, size.h, dpr);
 
-  const custom = choice !== AUTO_ID ? stored.find((o) => o.id === choice) || null : null;
+  // #2554: All offices — chosen, and at least two offices stored (else the whole fleet, as an office gone is).
+  const overview = choice === ALL_ID && overviewOk(stored);
+  const custom = choice !== AUTO_ID && !overview ? stored.find((o) => o.id === choice) || null : null;
   // The style: a built-in one, or an uploaded pack once it is loaded (until then, and when it is not one, Desks).
   const wanted = custom ? custom.skin : style;
-  const packInfo = STYLES.includes(wanted) ? null : packs.find((pk) => pk.id === wanted) || null;
+  const packOf = (id) => (STYLES.includes(id) ? null : packs.find((pk) => pk.id === id) || null);
+  const packInfo = packOf(wanted);
   const packKey = packInfo ? `${packInfo.id}@${packInfo.sha}` : null;
+  // The packs to load: this office's style; in All offices every tile's (each loaded once, shared by the tiles using it).
+  const needed = [...new Map((overview ? [...stored.map((o) => o.skin), ...(lobbyOn ? [style] : [])] : [wanted]).map(packOf).filter(Boolean)
+    .map((pk) => [`${pk.id}@${pk.sha}`, pk])).entries()];
+  const neededKey = needed.map(([k]) => k).join(",");
   useEffect(() => {
-    if (!packInfo || packSkins.has(packKey)) return undefined;
+    const want = needed.filter(([k]) => !packSkins.has(k));
+    if (!want.length) return undefined;
     let live = true;
     const get = lease ? (path, o) => lease.fetch(path, o) : undefined;
-    loadPackSkin(packInfo.id, packInfo.sha, get ? { fetch: get } : {}).then((sk) => { if (live) setPackSkins((m) => new Map(m).set(packKey, sk)); });
+    for (const [k, pk] of want) loadPackSkin(pk.id, pk.sha, get ? { fetch: get } : {}).then((sk) => { if (live) setPackSkins((m) => new Map(m).set(k, sk)); });
     return () => { live = false; };
-  }, [packKey]);
+  }, [neededKey]);
   const loading = !!packInfo && !packSkins.has(packKey);
   const baseSkin = packInfo ? packSkins.get(packKey) || skinFor("pixel") : skinFor(STYLES.includes(wanted) ? wanted : custom ? wanted : "pixel");
   const zones = !!(baseSkin.pack && baseSkin.pack.stateZones);
@@ -312,42 +485,66 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   const layoutStale = !!layout && (!custom || custom.id !== layout.officeId || custom.skin !== layout.skin || styleKey !== layout.pack || !zones || loading);
   // A stored office's own layout on a zones style (its overrides; while Edit layout is open, the draft).
   const placed = useMemo(() => {
-    if (!zones) return { skin: baseSkin, ignored: false };
-    if (layout && !layoutStale) return { skin: { ...baseSkin, pack: layout.draft }, ignored: false };
-    const ov = custom && custom.overrides;
-    if (!ov || ov.pack !== baseSkin.id) return { skin: baseSkin, ignored: false };
-    const a = applyOverrides(baseSkin.pack, ov);
-    return a.ok ? { skin: { ...baseSkin, pack: a.pack }, ignored: false } : { skin: baseSkin, ignored: true };
+    if (zones && layout && !layoutStale) return { skin: { ...baseSkin, pack: layout.draft }, ignored: false };
+    return withOverrides(baseSkin, zones, custom);
   }, [baseSkin, zones, custom, layout, layoutStale]);
   const skin = placed.skin;
-  const L = useMemo(() => {
+  const keep = (n) => !(hideAsleep && ASLEEP.has(n.state));
+  const single = useMemo(() => {
+    if (overview) return { rooms: [], width: 1, height: 1 };            // All offices: the tiles below
     const all = custom ? membersOf(custom, view) : [...new Map(officeRooms(view, filter).flatMap((r) => r.nodes).map((n) => [n.name, n])).values()];
-    const keep = (n) => !(hideAsleep && ASLEEP.has(n.state));
     const nodes = all.filter(keep);
     if (zones) { const z = zonesLayout(skin.pack, nodes, seatsRef.current); seatsRef.current = z.seats; return z; }
     // The desks wrap at the stage's width at the scale they open on (desksK: a pixel level near one CSS px a unit).
     const deskW = Math.max(240, Math.floor(width / desksK(ratio)));
     if (!custom) return autoLayout(officeRooms(view, filter).map((r) => (hideAsleep ? { ...r, nodes: r.nodes.filter(keep) } : r)), { width: deskW });
-    const lay = custom.layout || layoutOk(skin.layout);
-    return lay ? customLayout({ ...custom, layout: lay }, nodes) : autoLayout([{ key: custom.id, name: custom.name, lobby: false, nodes }], { width: deskW });
-  }, [view, filter, custom, width, ratio, skin, hideAsleep]);
-  const looks = useMemo(() => {
-    const work = workOn(traffic);
-    return new Map(L.rooms.flatMap((r) => r.desks).map((d) => {
-      const n = d.node;
-      if (!n) return [d.key, { name: "", label: "", state: "missing", pose: "away", light: null, lamp: false, sign: null, coat: "", work: 0, dim: !!q, match: false, free: zones }];
-      const match = !!q && hits(n, q);
-      return [d.key, { name: n.name, label: nodeText(n).primary, state: n.state, pose: officePose(n.state), light: lightOf(n.state), lamp: lampOf(n.state),
-        sign: zones ? null : signOf(n.state), coat: coatOf(n.i, n.i ? identityOf(n.i) : null, mode), work: work.get(n.name) || 0, dim: !!q && !match, match, free: zones }];
-    }));
-  }, [L, traffic, q, mode, themeRev]);
+    return officeScene(custom, nodes, skin, false, deskW);
+  }, [overview, view, filter, custom, width, ratio, skin, hideAsleep]);
+  // ── #2554: All offices' tiles — each stored office (then the lobby: whoever is in no office) laid out as its own view
+  // lays it out, in its own style (desks wrap at a cell's width), with its own seats, walkers and flights ──
+  const lobbyAll = useMemo(() => (overview ? lobbyNodes(stored, view) : []), [overview, stored, view]);
+  const lobbyList = lobbyOn ? lobbyAll : [];
+  const tiles = useMemo(() => {
+    if (!overview) return [];
+    const mine = (m, k, make) => { if (!m.current.has(k)) m.current.set(k, make()); return m.current.get(k); };
+    const specs = stored.map((o) => ({ key: o.id, office: o, name: o.name, lobby: false, wanted: o.skin, nodes: membersOf(o, view) }));
+    if (lobbyList.length) specs.push({ key: LOBBY_TILE, office: { id: LOBBY_TILE, name: null, lobby: true, layout: null }, name: to("lobbyRoom"), lobby: true, wanted: style, nodes: lobbyList });
+    return specs.map((sp) => {
+      const info = packOf(sp.wanted), pk = info ? `${info.id}@${info.sha}` : null;
+      const base = info ? packSkins.get(pk) || skinFor("pixel") : skinFor(sp.wanted);
+      const z = !!(base.pack && base.pack.stateZones);
+      const sk = withOverrides(base, z, sp.lobby ? null : sp.office).skin;
+      const seatKey = `${sp.key}@${pk || base.id}`;
+      // A desks office is as large as its rooms (cropped: no margins, no corridors outside them).
+      const TL0 = officeScene(sp.office, sp.nodes.filter(keep), sk, z, OV.CELL_W, tileSeats.current.get(seatKey)), TL = z ? TL0 : cropToRooms(TL0);
+      if (z) tileSeats.current.set(seatKey, TL0.seats);
+      return { key: sp.key, name: sp.name, lobby: sp.lobby, count: sp.nodes.length, skin: sk, zones: z, L: TL, prefix: `${sp.key}\u0001`,
+        walkers: mine(tileWalkers, sp.key, createWalkers), flights: mine(tileFlights, sp.key, createFlights) };
+    });
+  }, [overview, stored, view, packs, packSkins, hideAsleep, lobbyOn, lobbyAll, style]);
+  const arranged = useMemo(() => tileLayout(tiles.map((tl) => ({ key: tl.key, w: tl.L.width, h: tl.L.height })), size), [tiles, size.w, size.h]);
+  const tileLooks = useMemo(() => { const work = workOn(traffic); return tiles.map((tl) => looksOf(tl.L, work, q, mode, tl.zones)); }, [tiles, traffic, q, mode, themeRev]);
+  // The scene the view pans and zooms: the office's, or the overview of every tile.
+  const L = useMemo(() => (overview ? { mode: "overview", rooms: [], width: arranged.width, height: arranged.height } : single), [overview, single, arranged]);
+  const looks = useMemo(() => looksOf(L, workOn(traffic), q, mode, zones), [L, traffic, q, mode, themeRev]);
   useEffect(() => { flights.sync(traffic || [], now(), still); }, [traffic]);
   // Zones: everyone's seat is where they walk to.
   useEffect(() => {
-    if (!zones) return;
+    if (!zones || overview) return;
     walkers.sync(new Map(desksOf(L).map((d) => [d.node.name, d.seat])), now(), L, still);
     loop.current?.wake();
   }, [L]);
+  // …and in each tile on a zones style; the traffic within a tile is its own, between tiles the overview's.
+  useEffect(() => {
+    for (const tl of tiles) if (tl.zones) tl.walkers.sync(new Map(desksOf(tl.L).map((d) => [d.node.name, d.seat])), now(), tl.L, still);
+    loop.current?.wake();
+  }, [tiles]);
+  useEffect(() => {
+    if (!overview) return;
+    for (const tl of tiles) tl.flights.sync(traffic || [], now(), still);
+    cross.sync(traffic || [], now(), still);
+    loop.current?.wake();
+  }, [traffic, tiles]);
 
   // ── The view (#2540): { k, x, y } as the org chart canvas's (fleet-canvas-view.js) — logical units → the stage's CSS
   // px. Set without a render (a ref): the canvas redraws, the overview, the tooltip and Edit layout's overlay follow ──
@@ -355,7 +552,9 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   // touched: a person moved the view (it is kept); fitted: the view is a fit (a resize fits it again, to the new size).
   const touched = useRef(false), fitted = useRef(false), drag = useRef(gestureState());
   const miniViewRef = useRef(null), miniRef = useRef(null), overlayEl = useRef(null), tipDeskRef = useRef(null), pctRef = useRef(null);
-  const officeKey = `${custom ? custom.id : AUTO_ID}@${baseSkin.id}`;   // what a view is kept for: the office and its style
+  const labelEls = useRef(new Map());                                 // #2554: the tiles' labels (tile key → element)
+  // What a view is kept for: the office and its style (All offices: its own key).
+  const officeKey = overview ? `${ALL_ID}@tiles` : `${custom ? custom.id : AUTO_ID}@${baseSkin.id}`;
   const keyRef = useRef(officeKey), saveTimer = useRef(0);
   // The fit mode (Fit: contain; Fill: cover), kept per office and style like the view.
   const [fitRev, setFitRev] = useState(0);
@@ -400,6 +599,21 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     const pc = pctRef.current;
     if (pc) { const lb = zoomLabel(v.k); if (pc.textContent !== lb) pc.textContent = lb; pc.setAttribute("aria-label", to("zoomLevel", lb)); }
     if (overlayEl.current) placeOverlay(overlayEl.current);
+    // All offices: each tile's label just above it, as wide as the room up to the next label in its row (or the stage's
+    // edge); hidden while its tile is off screen (nothing past the stage's edge for a focus to scroll it to: the
+    // controls stay where they are).
+    const shownTiles = overview ? new Set(visibleTiles(arranged, v, size).map((tt) => tt.key)) : null;
+    for (const [i, tt] of (overview ? arranged.tiles : []).entries()) {
+      const el = labelEls.current.get(tt.key);
+      if (!el || !el.style) continue;
+      const lp = toScreen(v, tt.x, tt.y), next = arranged.tiles[i + 1];
+      const room = next && next.label.y === tt.label.y ? (next.x - tt.x) * v.k - 6 : size.w - lp.x - 8;
+      el.style.setProperty("left", `${lp.x}px`); el.style.setProperty("top", `${lp.y}px`);
+      el.style.setProperty("max-width", `${Math.max(40, room)}px`);
+      el.style.setProperty("visibility", shownTiles.has(tt.key) ? "visible" : "hidden");
+    }
+    const st = stageRef.current;
+    if (st && (st.scrollLeft || st.scrollTop)) { st.scrollLeft = 0; st.scrollTop = 0; }
     placeTip();
   };
   /** …and redraw. */
@@ -420,12 +634,18 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(flushSave, 400);
   };
+  /**
+   * The scene fitted (`mode`: contain or cover). All offices' contain keeps FIT_PAD px clear all round, so no tile sits
+   * under the zoom controls at the side.
+   */
+  const fitL = (mode) => fitScene(L.width, L.height, size, mode, overview && mode !== "cover" ? FIT_PAD : 0);
   /** The view an office opens on: its kept one (a kept fit: fitted to this size), else its opening; and whether a fit. */
   const openView = () => {
     const kept = store.view(officeKey);
-    if (kept && kept.fit) return { v: fitScene(L.width, L.height, size, fitMode), fit: true };
+    if (kept && kept.fit) return { v: fitL(fitMode), fit: true };
     if (kept) return { v: viewFromSaved(kept, size), fit: false };
-    return { v: openingView(L.width, L.height, size, ratio, zones, fitMode), fit: zones };
+    const fitted0 = zones || overview;                                 // All offices opens whole, as a zones scene
+    return { v: overview ? fitL(fitMode) : openingView(L.width, L.height, size, ratio, fitted0, fitMode), fit: fitted0 };
   };
   // An office (or style) opened: its kept view, else its opening (zones fitted; desks from the top left). A resize fits
   // a fitted view again (and opens an untouched one again); a view a person moved keeps the same point in the middle.
@@ -440,16 +660,16 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
       opened.current = officeKey; keyRef.current = officeKey; touched.current = false;
       reopen();
     } else if (was && (was.w !== size.w || was.h !== size.h || was.ratio !== ratio)) {
-      if (fitted.current) vp.current = fitScene(L.width, L.height, size, fitMode);
+      if (fitted.current) vp.current = fitL(fitMode);
       else if (!touched.current) reopen();
       else { const v = vp.current, cx = (was.w / 2 - v.x) / v.k, cy = (was.h / 2 - v.y) / v.k; vp.current = { k: v.k, x: size.w / 2 - cx * v.k, y: size.h / 2 - cy * v.k }; }
-    } else if (fitted.current) vp.current = fitScene(L.width, L.height, size, fitMode);   // the scene's size changed
+    } else if (fitted.current) vp.current = fitL(fitMode);   // the scene's size changed
     vp.current = clampPan(view0(), L.width, L.height, size);
     raw.current = vp.current.k;
   }, [officeKey, size.w, size.h, ratio, L.width, L.height]);
   useEffect(() => () => flushSave(), []);
   /** Fit (the button, `0`): the office's mode — `mode` when it was just switched. */
-  const fit = (mode = fitMode) => { const v = fitScene(L.width, L.height, size, mode); raw.current = v.k; setView(v, true, true); };
+  const fit = (mode = fitMode) => { const v = fitL(mode); raw.current = v.k; setView(v, true, true); };
   /** Fill on or off: kept for this office, and fitted at once. */
   const toggleFill = () => {
     const next = fitMode === "cover" ? "contain" : "cover";
@@ -538,8 +758,9 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   // or the zoom changes, never on a pan); each frame draws the matte, the layers, the people and the items in the air ──
   const scene = useRef(null);
   const loop = useRef(null);
-  // The matte around the scene: the pack's own, else its background's edge (sampled once), else the skin's (tokens).
-  const matte = (skin.pack && skin.pack.matte) || sampledMatte(skin.backdrop) || (skin.matte ? skin.matte({ pal, mode }) : pal.bg);
+  // The matte around the scene: the pack's own, else its background's edge (sampled once), else the skin's (tokens);
+  // All offices: the dashboard's background (each tile is its own scene).
+  const matte = overview ? pal.bg : (skin.pack && skin.pack.matte) || sampledMatte(skin.backdrop) || (skin.matte ? skin.matte({ pal, mode }) : pal.bg);
   // …and behind the canvas too (the stage), so no page grey shows while it is (re)sized.
   useLayoutEffect(() => { const el = stageRef.current; if (el && el.style) el.style.setProperty("background-color", matte); }, [matte]);
   useLayoutEffect(() => {
@@ -552,108 +773,54 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     cv.style.setProperty("width", `${BW / ratio}px`);
     cv.style.setProperty("height", `${BH / ratio}px`);
     const env = { pal, mode, labels: { lobby: to("lobbyRoom"), closed: to("closed"), areas: { desks: to("area_desks"), lounge: to("area_lounge"), alert: to("area_alert"), nap: to("area_nap") } } };
-    const all = L.rooms.flatMap((r) => r.desks);
-    /** The layers at `ls` layer px per logical unit. */
-    const paint = (ls) => {
-      const lw = Math.max(1, Math.ceil(L.width * ls)), lh = Math.max(1, Math.ceil(L.height * ls));
-      const layer = (fn) => {
-        const c = document.createElement("canvas");
-        c.width = lw; c.height = lh;
-        const g = c.getContext && c.getContext("2d");
-        if (!g) return null;
-        g.setTransform(ls, 0, 0, ls, 0, 0);
-        g.imageSmoothingEnabled = false;
-        fn(g);
-        return c;
-      };
-      const back = layer((g) => {
-        g.fillStyle = env.pal.bg; g.fillRect(0, 0, L.width, L.height);
-        if (zones) {
-          skin.drawBackground(g, L, env);
-          return;
-        }
-        skin.drawFloor(g, L, env);
-        for (const r of L.rooms) skin.drawRoom(g, r, env);
-        for (const d of all) skin.drawDeskBack(g, d, looks.get(d.key), env);
-      });
-      const front = zones ? null : layer((g) => { for (const d of all) skin.drawDeskFront(g, d, looks.get(d.key), env); });
-      return { ls, back, front };
-    };
-    const shown = new Set([...looks.values()].map((l) => l.state));
-    scene.current = { ctx, ratio, BW, BH, paint, layers: null, matte, env, desks: all.filter((d) => d.node), looks, L, skin, zones, dirty: true,
-      active: zones ? activeFurniture(skin.pack, shown) : new Set(), lines: bubbleDefaults(), lang: lang() };
+    const base = { ctx, ratio, BW, BH, matte, env, dirty: true };
+    if (overview) {
+      // Each tile a scene of its own, where the overview puts it (arranged.tiles, in the same order).
+      const parts = tiles.map((tl, i) => ({ ...partOf(tl.L, tileLooks[i], tl.skin, tl.zones, tl.walkers, tl.flights), key: tl.key, prefix: tl.prefix, tile: arranged.tiles[i] }));
+      scene.current = { ...base, overview: true, parts, lay: arranged };
+    } else {
+      scene.current = { ...base, overview: false, part: partOf(L, looks, skin, zones, walkers, flights) };
+    }
     if (still) draw(0); else loop.current?.wake();
-  }, [L, looks, skin, pal, size.w, size.h, ratio, matte]);
+  }, [L, looks, skin, pal, size.w, size.h, ratio, matte, overview, tiles, tileLooks, arranged]);
 
   /** One frame at `ms` (0: still); whether anything is moving (in the air, or someone walking). */
   function draw(ms) {
     const s = scene.current;
     if (!s) return false;
-    const { ctx, BW, BH, env, skin: sk } = s;
+    const { ctx, BW, BH, env } = s;
     // The view in bitmap px: a logical unit is `a` px (a whole number at a pixel level), the origin on a whole px.
     const v = view0(), a = v.k * s.ratio, ox = Math.round(v.x * s.ratio), oy = Math.round(v.y * s.ratio);
-    const ls = layerScale(a, s.L.width, s.L.height);
-    if (!s.layers || s.layers.ls !== ls) s.layers = s.paint(ls);
-    const T = () => ctx.setTransform(a, 0, 0, a, ox, oy);
-    const blit = (c) => { if (!c) return; ctx.setTransform(a / ls, 0, 0, a / ls, ox, oy); ctx.drawImage(c, 0, 0); T(); };
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, BW, BH);
     ctx.fillStyle = s.matte; ctx.fillRect(0, 0, BW, BH);
     ctx.imageSmoothingEnabled = false;
-    blit(s.layers.back);
-    T();
-    const speakers = [], tags = [];
-    const up = still ? [] : flights.frame(ms, s.L);
-    let walking = false;
-    if (s.zones) {
-      // Furniture under the people; the people (nearest last) with the furniture whose depth is "y" among them, by base
-      // y (a tie: the item first, the person in front); furniture over them; things in the air; the pack's foreground
-      // (door frames, pillars, table fronts); then what must stay readable: crowd counts and name tags (bubbles below).
-      const t = ms > 0 ? ms : now();
-      const people = s.desks.map((d) => {
-        const at = walkers.at(d.node.name, t) || { ...d.seat, walking: false };
-        if (at.walking) walking = true;
-        return { d, at, look: s.looks.get(d.key) };
-      }).sort((a, b) => a.at.y - b.at.y);
-      const furniture = s.skin.pack.furniture;
-      const band = [...furniture.filter((f) => f.depth === "y").map((f) => ({ y: f.y, k: 0, f })), ...people.map((p) => ({ y: p.at.y, k: 1, p }))]
-        .sort((a, b) => a.y - b.y || a.k - b.k);
-      for (const f of furniture) if (f.depth !== "y" && f.depth < CHAR_DEPTH) sk.drawFurniture(ctx, f, s.active.has(f.id), ms, env);
-      for (const { f, p } of band) {
-        if (f) { sk.drawFurniture(ctx, f, s.active.has(f.id), ms, env); continue; }
-        const box = { ...p.d, x: p.at.x - 44, y: p.at.y - 53, w: 88, h: 53, seat: { x: p.at.x, y: p.at.y } };
-        sk.drawCharacter(ctx, box, p.at.walking ? { ...p.look, pose: "walk", heading: p.at.heading } : p.look, ms, env);
-        if (!p.at.walking) speakers.push({ look: p.look, x: p.at.x + 10, y: p.at.y - 50, area: p.d.area });
-      }
-      for (const f of furniture) if (f.depth !== "y" && f.depth >= CHAR_DEPTH) sk.drawFurniture(ctx, f, s.active.has(f.id), ms, env);
-      for (const it of up) sk.drawProp(ctx, it, ms, env);
-      if (sk.drawForeground) sk.drawForeground(ctx, s.L, env);
-      // Who found no spot in an area: a count in its corner (never over its name).
-      for (const [a, n] of s.L.crowd || []) if (s.L.areas[a] && sk.drawCrowd) sk.drawCrowd(ctx, s.L.areas[a], n, env);
-      // In an area over capacity the name tags show on hover or focus only (#2513: a crowd's tags covered each other).
-      const over = s.L.over || new Set(), hot = tipNow.current;
-      for (const p of people) {
-        if (over.has(p.d.area) && p.d.key !== hot && !p.look.match) continue;
-        sk.drawTag(ctx, p.at.x, p.at.y, p.look, env);
-        tags.push(tagBox(ctx, p.at.x, p.at.y, p.look.label));
-      }
-    } else {
-      for (const d of s.desks) { const look = s.looks.get(d.key); sk.drawCharacter(ctx, d, look, ms, env); speakers.push({ look, x: d.x + 58, y: d.y + 12 }); }
-      blit(s.layers.front);
-      for (const it of up) sk.drawProp(ctx, it, ms, env);
+    if (!s.overview) return drawPart(ctx, s.part, a, ox, oy, ms, still, tipNow.current, env);
+    // All offices: each tile on screen drawn as its own view, scaled into it and clipped to it; one off screen is not
+    // drawn (its flights still land). Then a frame round each tile, and the items flying between tiles.
+    const hot = tipNow.current, on = new Set(visibleTiles(s.lay, v, sizeRef.current).map((tt) => tt.key)), said = [];
+    let moving = false;
+    for (const p of s.parts) {
+      const tt = p.tile;
+      if (!on.has(tt.key)) { if (!still) p.flights.frame(ms, p.L); continue; }
+      const tx = Math.round((v.x + tt.x * v.k) * s.ratio), ty = Math.round((v.y + tt.y * v.k) * s.ratio), tw = tt.w * v.k * s.ratio, th = tt.h * v.k * s.ratio;
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.beginPath(); ctx.rect(tx, ty, tw, th); ctx.clip();
+      if (drawPart(ctx, p, a * tt.s, tx, ty, ms, still, hot && hot.startsWith(p.prefix) ? hot.slice(p.prefix.length) : null, env, v.k * tt.s < TAG_MIN_K, said)) moving = true;
+      ctx.restore();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.strokeStyle = env.pal.border; ctx.lineWidth = 1;
+      ctx.strokeRect(tx - 0.5, ty - 0.5, tw + 1, th + 1);
     }
-    // Speech bubbles: a short line for the state, now and then (typed out; whole at once when still), placed so no two
-    // overlap (placeBubbles; #2431).
-    const bubbles = [];
-    for (const sp of speakers) {
-      if (sp.look.dim || sp.look.pose === "away") continue;
-      const b = bubbleAt(sp.look.name, sp.look.state, ms, linesFor(sp.look.state, s.lang, sk.pack, s.lines));
-      if (b) bubbles.push({ key: sp.look.name, area: sp.area, state: sp.look.state, calling: CALLING.has(sp.look.state), rank: bubbleRank(sp.look.state), shown: b.shown,
-        box: bubbleBox(ctx, sp.x, sp.y, b.text), tail: { x: sp.x, y: sp.y }, sp, b });
+    for (const say of said) say();
+    const up = still ? [] : cross.frame(ms, s.parts);
+    if (up.length) {
+      ctx.setTransform(a, 0, 0, a, ox, oy);
+      const prop = skinFor("pixel").drawProp;
+      for (const it of up) prop(ctx, it, ms, env);
     }
-    // A crowded area speaks less (thinBubbles: calls, then work, a few at most); no bubble covers a name tag.
-    for (const { sp, b, dy } of placeBubbles(thinBubbles(bubbles, s.zones ? s.L.over : null), 22, tags)) sk.drawBubble(ctx, sp.x, sp.y, [...b.text].slice(0, b.shown).join(""), env, -dy);
-    return walking || up.length > 0 || flights.size() > 0;
+    return moving || up.length > 0 || cross.size() > 0;
   }
   // The loop: drawing only when the frame (FPS) changed or something is in the air; stopped while the tab is hidden,
   // gone with the view. Office review: while something walks or flies, one requestAnimationFrame per display frame (the
@@ -694,22 +861,38 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   tipNow.current = tip;
   useEffect(() => { if (!scene.current) return; scene.current.dirty = true; if (still) draw(0); else loop.current?.wake(); }, [tip]);
 
+  // Everyone drawn: { key, node, box (the desk, in the view's units), dot (where the overview marks them), office (All
+  // offices: the tile's name) }. In All offices a key is the tile's prefix and the desk's key: one person in two
+  // offices is two people here.
+  const people = overview
+    ? tiles.flatMap((tl, i) => { const tt = arranged.tiles[i];
+      return tt ? desksOf(tl.L).map((d) => ({ key: tl.prefix + d.key, node: d.node, box: tileBox(tt, d), office: tl.name,
+        dot: fromTile(tt, tl.zones ? d.seat : { x: d.x + d.w / 2, y: d.y + d.h / 2 }) })) : []; })
+    : desksOf(L).map((d) => ({ key: d.key, node: d.node, box: d, office: null, dot: zones ? d.seat : { x: d.x + d.w / 2, y: d.y + d.h / 2 } }));
   // Preact owns the markup, not the view: put it back on the overview, the overlay and the tooltip after every render.
-  const tipDesk = tip ? desksOf(L).find((d) => d.key === tip) || null : null;
-  tipDeskRef.current = tipDesk;
+  const tipDesk = tip ? people.find((d) => d.key === tip) || null : null;
+  tipDeskRef.current = tipDesk ? tipDesk.box : null;
   useLayoutEffect(mark);
   // ── Pointing (#2540: through the view): hover (or a first tap) shows a desk's card, a click (or a second tap) opens
   // its chat; a drag on the scene pans it (never on Edit layout's handles: they move), the wheel and a pinch zoom ──
-  const deskOf = (e) => {
+  /** The view's point under a pointer event (logical units), or null. */
+  const pointOf = (e) => {
     const r = canvasRef.current ? canvasRef.current.getBoundingClientRect() : null;
-    if (!r) return null;
-    const { x, y } = toWorld(view0(), e.clientX - r.left, e.clientY - r.top);
-    // The zones scene draws people where they walk: they are hit there, not at the seat they are heading for, and in
-    // the box the skin draws them in (an uploaded character's strip, anchor and size: #2513 review), nearest first.
-    if (!zones) return deskAt(L, x, y);
-    const t = now(), s = scene.current, sk = (s && s.skin) || skin, lk = s ? s.looks : looks;
-    return personAt(L.rooms.flatMap((rm) => rm.desks), x, y, (d) => walkers.at(d.node.name, t),
-      (d, at) => (sk.charBox && lk.get(d.key) ? sk.charBox(lk.get(d.key), at) : null));
+    return r ? toWorld(view0(), e.clientX - r.left, e.clientY - r.top) : null;
+  };
+  /** The person under a pointer event as drawn ({ key, node }), or null; All offices: in the tile there, in its own units. */
+  const deskOf = (e) => {
+    const w = pointOf(e), s = scene.current;
+    if (!w) return null;
+    // The zones scene draws people where they walk: they are hit there, not at the seat they are heading for (hitPart).
+    if (!s || !s.overview) {
+      if (overview) return null;
+      return hitPart(s && s.part ? s.part : { L, zones, walkers, skin, looks, all: L.rooms.flatMap((rm) => rm.desks) }, w.x, w.y, now());
+    }
+    const tt = tileAt(s.lay, w.x, w.y), p = tt ? s.parts.find((x) => x.tile.key === tt.key) : null;
+    if (!p) return null;
+    const at = inTile(tt, w.x, w.y), d = hitPart(p, at.x, at.y, now());
+    return d ? { key: p.prefix + d.key, node: d.node } : null;
   };
   const g = gestures(drag.current, { el: () => stageRef.current, pan: (dx, dy) => { const v = view0(); setView({ ...v, x: v.x + dx, y: v.y + dy }); },
     pinch: (from, to) => { raw.current = Math.min(OK_MAX, Math.max(OK_MIN, raw.current * (to.dist / from.dist))); setView(pinchOffice(view0(), from, to, raw.current)); } });
@@ -722,7 +905,7 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     if (drag.current.pts.size === 2) raw.current = view0().k;      // a pinch starts from the zoom shown
   };
   const onWheel = (e) => {
-    if (!onScene(e.target) && !(typeof e.target?.closest === "function" && e.target.closest(".ol-handle"))) return;
+    if (!onScene(e.target) && !(typeof e.target?.closest === "function" && e.target.closest(".ol-handle, .oo-tile-label"))) return;
     e.preventDefault();
     const r = stageRef.current.getBoundingClientRect(), v = view0();
     raw.current = Math.min(OK_MAX, Math.max(OK_MIN, raw.current * wheelFactor(e)));
@@ -743,9 +926,9 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     if (!el || typeof el.getAttribute !== "function") return;
     const hk = el.getAttribute("data-handle");
     if (hk && layout) { const hd = handlesOf(layout.draft).find((x) => x.key === hk); if (hd) show({ x: hd.x - 12, y: hd.y - 12, w: 24, h: 24 }); return; }
-    const name = el.classList && el.classList.contains("oo-desk") ? el.getAttribute("data-name") : null;
-    const d = name ? desksOf(L).find((x) => x.node.name === name) : null;
-    if (d) show(d);
+    const key = el.classList && el.classList.contains("oo-desk") ? el.getAttribute("data-key") : null;
+    const d = key ? people.find((x) => x.key === key) : null;
+    if (d) show(d.box);
   };
   const onMove = (e) => { if (e.pointerType === "touch" || g.busy()) return; const d = deskOf(e); const key = d ? d.key : null; if (key !== tip) setTip(key); };
   const onClick = (e) => {
@@ -754,14 +937,21 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     if (lastType.current === "touch" && tip !== d.key) { setTip(d.key); return; }   // a first tap shows; a second opens
     open(d.node.name);
   };
+  // All offices: a double-click on a tile (off its people) opens that office; the lobby is no office.
+  const onDblClick = (e) => {
+    const s = scene.current, w = pointOf(e);
+    if (!overview || !s || !s.overview || !w || deskOf(e)) return;
+    const tt = tileAt(s.lay, w.x, w.y) || labelAt(s.lay, w.x, w.y), tl = tt ? tiles.find((x) => x.key === tt.key) : null;
+    if (tl && !tl.lobby) pick(tl.key);
+  };
   const onMini = (e) => {
     const w = miniPoint(miniRef.current ? miniRef.current.getBoundingClientRect() : null, { x: 0, y: 0, w: L.width, h: L.height }, e.clientX, e.clientY);
     if (w) setView(centreOn(view0(), size, w.x, w.y));
   };
 
-  const auto = !custom;
+  const auto = !custom && !overview;
   // Edit layout: an admin, a stored office, a zones style (built in, or a pack loaded here); not while the offices'
-  // editor is open, nor a second session.
+  // editor is open, nor a second session (nor in All offices: custom is null there).
   const canLayout = canEdit && storedRev !== null && !!custom && zones && !loading && baseSkin.id === custom.skin && !editing && !layout;
   const openLayout = () => {
     setLayout({ id: ++layoutSeq.current, officeId: custom.id, skin: custom.skin, pack: styleKey, base: baseSkin.pack, start: skin.pack, draft: skin.pack, rev: storedRev, list: stored });
@@ -795,14 +985,17 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   // While Edit layout is open the office stays (its picker is disabled; this is the guard behind it).
   const pick = (id) => { if (layoutRef.current) return; store.saveChoice(id); setChoice(id); setTip(null); };
   const everyone = useMemo(() => { const m = new Map(); for (const n of [...view.top, ...view.teams.flatMap((tm) => tm.nodes), ...view.rest.nodes]) if (!m.has(n.name)) m.set(n.name, n); return [...m.values()]; }, [view]);
-  const desks = desksOf(L);
   const tipText = tipDesk ? nodeText(tipDesk.node) : null;
-  // The overview: the scene's rooms (or areas) and a dot for each person (a call in its colour), the view's frame on it.
-  const miniRects = zones ? Object.values(L.areas || {}).map((a) => ({ key: a.name, ...a.rect })) : L.rooms.map((r) => ({ key: r.key, x: r.x, y: r.y, w: r.w, h: r.h }));
+  // The overview: the scene's rooms (or areas; All offices: the tiles) and a dot for each person (a call in its colour),
+  // the view's frame on it.
+  const miniRects = overview ? arranged.tiles.map((tt) => ({ key: tt.key, x: tt.x, y: tt.y, w: tt.w, h: tt.h }))
+    : zones ? Object.values(L.areas || {}).map((a) => ({ key: a.name, ...a.rect })) : L.rooms.map((r) => ({ key: r.key, x: r.x, y: r.y, w: r.w, h: r.h }));
   const dotR = Math.max(L.width, L.height) / 90;
-  const officeSelect = (cls) => html`<select class=${`tb-select ${cls}`} value=${layout ? layout.officeId : custom ? custom.id : AUTO_ID} disabled=${!!layout}
+  // The switcher: the whole fleet, All offices (two or more stored), each stored office.
+  const officeSelect = (cls) => html`<select class=${`tb-select ${cls}`} value=${layout ? layout.officeId : overview ? ALL_ID : custom ? custom.id : AUTO_ID} disabled=${!!layout}
     aria-label=${to("office")} onChange=${(e) => pick(e.target.value)}>
       <option value=${AUTO_ID}>${to("allOffice")}</option>
+      ${overviewOk(stored) ? html`<option value=${ALL_ID}>${to("allOffices")}</option>` : null}
       ${stored.map((o) => html`<option key=${o.id} value=${o.id}>${o.name}</option>`)}
     </select>`;
   return html`<div class=${`oo${fs ? ` fs ${fs}` : ""}`} ref=${ooRef}>
@@ -819,32 +1012,43 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
         </select></label>
         <${People} nodes=${everyone} pinned=${f.pinned} onChange=${(pinned) => setF({ ...f, pinned })} />` : null}
       <label class="check oo-hide-asleep"><input type="checkbox" checked=${hideAsleep} onChange=${() => { const v = !hideAsleep; store.saveHideAsleep(v); setHideAsleep(v); setTip(null); }} /><span>${to("hideAsleep")}</span></label>
+      ${overview ? html`<label class="check oo-lobby-tile" title=${lobbyAll.length ? undefined : to("lobbyEveryone")}><input type="checkbox" checked=${lobbyOn && lobbyAll.length > 0}
+        disabled=${!lobbyAll.length} onChange=${() => { const v = !lobbyOn; store.saveLobbyTile(v); setLobbyOn(v); setTip(null); }} /><span>${to("lobbyTile")}</span></label>
+        ${lobbyAll.length ? null : html`<span class="muted oo-note oo-lobby-none">${to("lobbyEveryone")}</span>`}` : null}
       ${custom && baseSkin.id !== custom.skin && !loading ? html`<span class="muted oo-note">${to("skinUnknown", styleName(custom.skin))}</span>` : null}
       ${placed.ignored ? html`<span class="muted oo-note">${to("layoutIgnored")}</span>` : null}
       ${L.unseated ? html`<span class="muted oo-note">${to("unseated", L.unseated)}</span>` : null}
-      ${canEdit && storedRev !== null ? html`<button type="button" class="btn btn-sm oo-edit" onClick=${() => setEditing(true)} disabled=${!!layout}>${t("orge.edit")}</button>` : null}
+      ${canEdit && storedRev !== null ? html`<button type="button" class="btn btn-sm oo-edit" onClick=${() => { if (!overview) setEditing(true); }} disabled=${!!layout || overview}
+        title=${overview ? to("overviewNoEdit") : undefined}>${t("orge.edit")}</button>` : null}
       ${canLayout ? html`<button type="button" class="btn btn-sm oo-layout" onClick=${openLayout}>${t("orgl.edit")}</button>` : null}
     </div>
-    ${editing ? html`<${OfficeEditor} offices=${stored} rev=${storedRev} view=${view} store=${store} packs=${packs}
+    ${editing && !overview ? html`<${OfficeEditor} offices=${stored} rev=${storedRev} view=${view} store=${store} packs=${packs}
       ask=${ask} current=${() => shown.current} onSaved=${adopt} onClose=${() => setEditing(false)} />` : null}
-    ${desks.length || L.rooms.length ? null : html`<p class="note oo-empty">${to("nobody")} ${auto && (f.team || f.pinned.length) ? html`<button type="button" class="btn btn-sm" onClick=${() => setF({ team: "", pinned: [] })}>${to("everyone")}</button>` : null}</p>`}
+    ${overview || people.length || L.rooms.length ? null : html`<p class="note oo-empty">${to("nobody")} ${auto && (f.team || f.pinned.length) ? html`<button type="button" class="btn btn-sm" onClick=${() => setF({ team: "", pinned: [] })}>${to("everyone")}</button>` : null}</p>`}
     <div class=${`oo-stage${layout ? " editing" : ""}`} ref=${stageRef} onPointerDown=${onDown} onPointerMove=${g.move} onPointerUp=${g.up} onPointerCancel=${g.up}
       onWheel=${onWheel} onKeyDown=${onKeyDown} onFocusIn=${onFocusIn} onClickCapture=${g.clickCapture}>
-      <canvas ref=${canvasRef} class=${`oo-canvas${tipDesk && tipDesk.node.i ? " hot" : ""}`} role="application" tabindex="0" aria-label=${to("label")}
-        onPointerMove=${onMove} onPointerLeave=${() => setTip(null)} onClick=${onClick}></canvas>
+      <canvas ref=${canvasRef} class=${`oo-canvas${tipDesk && tipDesk.node.i ? " hot" : ""}`} role="application" tabindex="0" aria-label=${to(overview ? "labelAll" : "label")}
+        onPointerMove=${onMove} onPointerLeave=${() => setTip(null)} onClick=${onClick} ondblclick=${onDblClick}></canvas>
+      ${overview ? tiles.map((tl) => {
+        const text = to("tileLabel", tl.name, tl.count), at = (el) => { if (el) labelEls.current.set(tl.key, el); else labelEls.current.delete(tl.key); };
+        return tl.lobby ? html`<span key=${tl.key} ref=${at} class="oo-tile-label lobby">${text}</span>`
+          : html`<button key=${tl.key} ref=${at} type="button" class="oo-tile-label" data-office=${tl.key} title=${to("openOffice", tl.name)} aria-label=${to("openOffice", tl.name)}
+              onClick=${() => pick(tl.key)}>${text}</button>`;
+      }) : null}
       ${layout ? html`<${LayoutEditor} key=${layout.id} base=${layout.base} start=${layout.start} place=${placeOverlay}
         stale=${layoutStale ? t("orgl.stale") : ""} onChange=${onDraft} onSave=${saveLayout} onClose=${closeLayout} />` : null}
       ${tipText ? html`<div ref=${tipRef} class="oo-tip" role="tooltip">
         <strong>${tipText.primary}</strong>${tipText.secondary ? html` <span class="muted mono">${tipText.secondary}</span>` : null}
         <div>${tipText.sub}</div><div class="muted">${caption(officePose(tipDesk.node.state), tipDesk.node.state)}</div>
+        ${tipDesk.office ? html`<div class="muted oo-tip-office">${tipDesk.office}</div>` : null}
         ${tipDesk.node.i && lastType.current === "touch" ? html`<div class="muted">${to("tapAgain")}</div>` : null}
       </div>` : null}
-      <ul class="oo-desks" aria-label=${to("desks")}>${desks.map((d) => {
-        const nt = nodeText(d.node), cap = caption(officePose(d.node.state), d.node.state);
+      <ul class="oo-desks" aria-label=${to("desks")}>${people.map((d) => {
+        const nt = nodeText(d.node), cap = caption(officePose(d.node.state), d.node.state), where = d.office ? ` · ${d.office}` : "";
         return html`<li key=${d.key}>${d.node.i
-          ? html`<button type="button" class="oo-desk" data-name=${d.node.name} aria-label=${`${nt.full} · ${cap}. ${t("orgc.openChat")}`}
+          ? html`<button type="button" class="oo-desk" data-name=${d.node.name} data-key=${d.key} aria-label=${`${nt.full}${where} · ${cap}. ${t("orgc.openChat")}`}
               onFocus=${() => setTip(d.key)} onBlur=${() => setTip(null)} onClick=${() => open(d.node.name)}>${nt.primary}</button>`
-          : html`<span class="oo-desk" data-name=${d.node.name}>${nt.full}</span>`}</li>`;
+          : html`<span class="oo-desk" data-name=${d.node.name} data-key=${d.key}>${nt.full}</span>`}</li>`;
       })}</ul>
       <div class="oc-zoom oo-zoom" role="group" aria-label=${t("orgc.view")}>
         <output ref=${pctRef} class="oo-zoom-pct"></output>
@@ -861,8 +1065,7 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
         <rect class="oo-mini-matte" x=${-L.width} y=${-L.height} width=${L.width * 3} height=${L.height * 3} fill=${matte} />
         <rect class="oo-mini-scene" x="0" y="0" width=${L.width} height=${L.height} />
         ${miniRects.map((r) => html`<rect key=${r.key} class="oo-mini-room" x=${r.x} y=${r.y} width=${r.w} height=${r.h} />`)}
-        ${desks.map((d) => { const at = zones ? d.seat : { x: d.x + d.w / 2, y: d.y + d.h / 2 };
-          return html`<circle key=${d.key} class=${`oo-mini-dot st-${d.node.state}${q && hits(d.node, q) ? " match" : ""}`} cx=${at.x} cy=${at.y} r=${dotR} />`; })}
+        ${people.map((d) => html`<circle key=${d.key} class=${`oo-mini-dot st-${d.node.state}${q && hits(d.node, q) ? " match" : ""}`} cx=${d.dot.x} cy=${d.dot.y} r=${dotR} />`)}
         <rect ref=${miniViewRef} class="oc-mini-view oo-mini-view" />
       </svg>
     </div>

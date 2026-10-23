@@ -274,6 +274,13 @@ saved the offices meanwhile, Save says so and keeps your layout — Save again p
 only calls and work get bubbles (a few at most) and name tags show on hover or focus. **Hide paused and stopped**
 (per browser, off by default) leaves the sleepers out. Now and then someone says a short line for their state in a
 bubble (never message content). Reduced motion: still poses, nothing in the air, bubbles shown whole.
+**All offices** (in the switcher once two or more offices are stored, kept per device) shows every stored office as
+a tile on one canvas, each exactly as its own view (its style, members, seats, bubbles, walking), labelled with its
+name and head count, each as large as its office's content, packed to fill the panel; **Lobby tile** (on by
+default; disabled when everyone is in an office) adds the instances in no office. Below 75% name tags show on hover
+only. Hover and click work across
+tiles; a tile's label, or a double-click on it, opens that office; traffic between offices flies straight across.
+Edit offices and Edit layout wait for a single office.
 The Office fills the Fleet panel and moves like the Canvas (#2540): drag to pan, the wheel or a pinch to zoom,
 **+** / **−** / **Fit** / **Fill** at the top right (the zoom shown as a percentage above them) or the `+ - 0` keys
 (with the office focused), an overview at the bottom right to jump (not on a phone). It takes the whole panel: the
