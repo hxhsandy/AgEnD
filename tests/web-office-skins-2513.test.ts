@@ -39,7 +39,7 @@ const { bindGatewayRequest } = await import("../src/web-request-context.js");
 const FIXTURE = join(process.cwd(), "tests", "fixtures", "office-skin-clinic");
 const MANIFEST = () => JSON.parse(readFileSync(join(FIXTURE, "manifest.json"), "utf8"));
 const b64 = (f: string) => readFileSync(join(FIXTURE, f)).toString("base64");
-const UPLOAD = () => ({ manifest: MANIFEST(), files: { "office_bg.png": b64("office_bg.png"), "xiaojie_idle.png": b64("xiaojie_idle.png") } });
+const UPLOAD = () => ({ manifest: MANIFEST(), files: { "office_bg.png": b64("office_bg.png"), "fox_idle.png": b64("fox_idle.png") } });
 
 /** A tiny valid PNG of w×h (one IDAT; the bytes are never decoded by the host, only walked). */
 function png(w: number, h: number, extra: Buffer[] = []): Buffer {
@@ -63,7 +63,7 @@ describe("checkSkinUpload: the manifest by the page's rules, then the pictures",
     if (!r.ok) return;
     expect([r.record.id, r.record.name, r.record.by, r.record.uploaded_at]).toEqual(["clinic-sample", "clinic-sample", "me", 7]);
     expect(r.record.files["office_bg.png"]).toMatchObject({ width: 640, height: 360 });
-    expect(r.record.files["xiaojie_idle.png"]).toMatchObject({ width: 128, height: 48 });
+    expect(r.record.files["fox_idle.png"]).toMatchObject({ width: 128, height: 48 });
     expect(Object.values(r.record.files).every(f => /^[0-9a-f]{32}$/.test(f.id))).toBe(true);
     expect(r.pictures.size).toBe(2);
     expect(r.record.manifest).not.toHaveProperty("byInstance");                          // the fixture names no instance
@@ -75,7 +75,7 @@ describe("checkSkinUpload: the manifest by the page's rules, then the pictures",
     ["a manifest the page refuses", { ...UPLOAD(), manifest: { ...MANIFEST(), format: 2 } }, "skin_manifest_invalid", "format: 1"],
     ["a built-in id", { ...UPLOAD(), manifest: { ...MANIFEST(), id: "studio" } }, "skin_manifest_invalid", "id: a built-in skin's id"],
     ["a file the manifest does not name", { ...UPLOAD(), files: { ...UPLOAD().files, "extra.png": png(2, 2).toString("base64") } }, "skin_file_unused", "extra.png"],
-    ["a named file missing", { ...UPLOAD(), files: { "office_bg.png": b64("office_bg.png") } }, "skin_file_missing", "xiaojie_idle.png"],
+    ["a named file missing", { ...UPLOAD(), files: { "office_bg.png": b64("office_bg.png") } }, "skin_file_missing", "fox_idle.png"],
     ["not base64", { ...UPLOAD(), files: { ...UPLOAD().files, "office_bg.png": "!!!!" } }, "skin_invalid", "files.office_bg.png"],
     ["a long name", { ...UPLOAD(), name: "x".repeat(61) }, "skin_invalid", "name"],
   ])("refuses %s", (_what, body, error, detail = "") => {
@@ -86,18 +86,18 @@ describe("checkSkinUpload: the manifest by the page's rules, then the pictures",
   it("a picture that is not a PNG (a JPEG, a GIF, text named .png) or one cut short is refused, naming the file", () => {
     const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0xff, 0xd9]);
     for (const bad of [jpeg, Buffer.from("GIF89a......"), Buffer.from("<svg xmlns='http://www.w3.org/2000/svg'/>")]) {
-      expect(refused({ ...UPLOAD(), files: { ...UPLOAD().files, "xiaojie_idle.png": bad.toString("base64") } })).toEqual([400, "skin_not_png", "xiaojie_idle.png: not a PNG (its signature)"]);
+      expect(refused({ ...UPLOAD(), files: { ...UPLOAD().files, "fox_idle.png": bad.toString("base64") } })).toEqual([400, "skin_not_png", "fox_idle.png: not a PNG (its signature)"]);
     }
     const cut = png(128, 48).subarray(0, 60);
-    expect(refused({ ...UPLOAD(), files: { ...UPLOAD().files, "xiaojie_idle.png": cut.toString("base64") } })?.slice(0, 2)).toEqual([400, "skin_png_unreadable"]);
+    expect(refused({ ...UPLOAD(), files: { ...UPLOAD().files, "fox_idle.png": cut.toString("base64") } })?.slice(0, 2)).toEqual([400, "skin_png_unreadable"]);
     const huge = png(1, 1); huge.writeUInt32BE(5000, 16);                                   // IHDR says 5000 px wide
-    expect(refused({ ...UPLOAD(), files: { ...UPLOAD().files, "xiaojie_idle.png": huge.toString("base64") } })?.slice(0, 2)).toEqual([400, "skin_png_dimensions"]);
+    expect(refused({ ...UPLOAD(), files: { ...UPLOAD().files, "fox_idle.png": huge.toString("base64") } })?.slice(0, 2)).toEqual([400, "skin_png_dimensions"]);
   });
   it("a STRIP's picture must be exactly frames·w × h; the background 16:9", () => {
     const wrong = png(120, 48);                                                             // 4 frames of 32 need 128
-    expect(refused({ ...UPLOAD(), files: { ...UPLOAD().files, "xiaojie_idle.png": wrong.toString("base64") } }))
-      .toEqual([400, "skin_strip_dimensions", "characters.default.idle: xiaojie_idle.png is 120×48 px; its strip needs 128×48 (frames·w × h)"]);
-    expect(refused({ ...UPLOAD(), files: { ...UPLOAD().files, "xiaojie_idle.png": png(128, 40).toString("base64") } })?.[1]).toBe("skin_strip_dimensions");
+    expect(refused({ ...UPLOAD(), files: { ...UPLOAD().files, "fox_idle.png": wrong.toString("base64") } }))
+      .toEqual([400, "skin_strip_dimensions", "characters.default.idle: fox_idle.png is 120×48 px; its strip needs 128×48 (frames·w × h)"]);
+    expect(refused({ ...UPLOAD(), files: { ...UPLOAD().files, "fox_idle.png": png(128, 40).toString("base64") } })?.[1]).toBe("skin_strip_dimensions");
     expect(refused({ ...UPLOAD(), files: { ...UPLOAD().files, "office_bg.png": png(640, 400).toString("base64") } }))
       .toEqual([400, "skin_background_aspect", "background: office_bg.png is 640×400 px; it must be 16:9"]);
     expect(checkSkinUpload({ ...UPLOAD(), files: { ...UPLOAD().files, "office_bg.png": png(1280, 720).toString("base64") } }, "me", 1).ok).toBe(true);
@@ -106,14 +106,14 @@ describe("checkSkinUpload: the manifest by the page's rules, then the pictures",
     for (const bad of ["../x.png", "a/../x.png", "/x.png", ".x.png", "a//x.png", "a/./x.png", "x.PNG.svg", "x.gif", "a\\x.png", "a/b/c/d/e.png"]) expect(skinFileNameOk(bad), bad).toBe(false);
     for (const good of ["x.png", "sprites/idle_2.png", "A-b.c.PNG"]) expect(skinFileNameOk(good), good).toBe(true);
     const m = MANIFEST();
-    m.characters.default.idle.src = "./xiaojie_idle.png";                                    // the page's rule allows "./"; the host's does not
-    expect(refused({ manifest: m, files: { "office_bg.png": b64("office_bg.png"), "./xiaojie_idle.png": b64("xiaojie_idle.png") } })?.[1]).toBe("skin_file_name");
-    expect(refused({ ...UPLOAD(), files: { ...UPLOAD().files, "../../etc/passwd.png": b64("xiaojie_idle.png") } })?.[1]).toBe("skin_file_name");
+    m.characters.default.idle.src = "./fox_idle.png";                                    // the page's rule allows "./"; the host's does not
+    expect(refused({ manifest: m, files: { "office_bg.png": b64("office_bg.png"), "./fox_idle.png": b64("fox_idle.png") } })?.[1]).toBe("skin_file_name");
+    expect(refused({ ...UPLOAD(), files: { ...UPLOAD().files, "../../etc/passwd.png": b64("fox_idle.png") } })?.[1]).toBe("skin_file_name");
   });
   it("sizes: a picture over the per-file cap and a pack over its total are 413; so is a manifest over its cap", () => {
     const big = Buffer.concat([png(2, 2).subarray(0, 33), Buffer.alloc(SKIN_LIMITS.fileBytes)]);
-    expect(refused({ ...UPLOAD(), files: { ...UPLOAD().files, "xiaojie_idle.png": big.toString("base64") } })?.slice(0, 2)).toEqual([413, "skin_file_too_large"]);
-    const m = MANIFEST(), files: Record<string, string> = { "office_bg.png": b64("office_bg.png"), "xiaojie_idle.png": b64("xiaojie_idle.png") };
+    expect(refused({ ...UPLOAD(), files: { ...UPLOAD().files, "fox_idle.png": big.toString("base64") } })?.slice(0, 2)).toEqual([413, "skin_file_too_large"]);
+    const m = MANIFEST(), files: Record<string, string> = { "office_bg.png": b64("office_bg.png"), "fox_idle.png": b64("fox_idle.png") };
     // Four furniture strips of just under 2 MiB each (padded with a private chunk): each passes alone, not all together.
     m.furniture = [0, 1, 2, 3].map(i => ({ id: `f${i}`, sprite: { src: `f${i}.png`, frames: 1, w: 1, h: 1 }, x: 10, y: 10 }));
     const pad = (i: number) => { const p = png(1, 1); const len = Buffer.alloc(4); const body = Buffer.alloc(SKIN_LIMITS.fileBytes - p.length - 100, i);
@@ -210,7 +210,7 @@ describe("the routes", () => {
       expect([token.status, parse(token).error]).toEqual([403, "skins_need_an_admin_session"]);
       expect(f.fm.officeSkins.list().packs).toEqual([]);
       const admin = f.session("admin").write;
-      const bad = await post(admin, { ...UPLOAD(), files: { ...UPLOAD().files, "xiaojie_idle.png": png(64, 48).toString("base64") } });
+      const bad = await post(admin, { ...UPLOAD(), files: { ...UPLOAD().files, "fox_idle.png": png(64, 48).toString("base64") } });
       expect([bad.status, parse(bad).error]).toEqual([400, "skin_strip_dimensions"]);
       expect(sent).toEqual([]);
       const ok = await post(admin, UPLOAD());

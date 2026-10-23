@@ -177,7 +177,7 @@
  "characters": {
   "default": {
    "idle": {
-    "src": "xiaojie_idle.png",
+    "src": "fox_idle.png",
     "frames": 4,
     "w": 32,
     "h": 48,
@@ -188,7 +188,7 @@
   },
   "fox": {
    "idle": {
-    "src": "xiaojie_idle.png",
+    "src": "fox_idle.png",
     "frames": 4,
     "w": 32,
     "h": 48,

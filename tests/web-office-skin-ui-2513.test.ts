@@ -19,7 +19,7 @@ import { fire } from "./helpers/mini-dom.js";
 
 const FIXTURE = join(process.cwd(), "tests", "fixtures", "office-skin-clinic");
 const MANIFEST = () => JSON.parse(readFileSync(join(FIXTURE, "manifest.json"), "utf8"));
-const FILES = { "office_bg.png": "a".repeat(32), "xiaojie_idle.png": "b".repeat(32) };
+const FILES = { "office_bg.png": "a".repeat(32), "fox_idle.png": "b".repeat(32) };
 
 const INSTANCES = [
   { name: "atlas", display_name: "Atlas", status: "running", backend: "claude-code" },
