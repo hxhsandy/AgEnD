@@ -449,8 +449,6 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
         g.fillStyle = env.pal.bg; g.fillRect(0, 0, L.width, L.height);
         if (zones) {
           skin.drawBackground(g, L, env);
-          // Who found no spot in an area: a count in its corner (never over its name).
-          for (const [a, n] of L.crowd || []) if (L.areas[a] && skin.drawCrowd) skin.drawCrowd(g, L.areas[a], n, env);
           return;
         }
         skin.drawFloor(g, L, env);
@@ -484,9 +482,12 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     blit(s.layers.back);
     T();
     const speakers = [], tags = [];
+    const up = still ? [] : flights.frame(ms, s.L);
     let walking = false;
     if (s.zones) {
-      // Furniture under the people, the people (nearest last), furniture over them, then their name tags.
+      // Furniture under the people; the people (nearest last) with the furniture whose depth is "y" among them, by base
+      // y (a tie: the item first, the person in front); furniture over them; things in the air; the pack's foreground
+      // (door frames, pillars, table fronts); then what must stay readable: crowd counts and name tags (bubbles below).
       const t = ms > 0 ? ms : now();
       const people = s.desks.map((d) => {
         const at = walkers.at(d.node.name, t) || { ...d.seat, walking: false };
@@ -494,13 +495,20 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
         return { d, at, look: s.looks.get(d.key) };
       }).sort((a, b) => a.at.y - b.at.y);
       const furniture = s.skin.pack.furniture;
-      for (const f of furniture) if (f.depth < CHAR_DEPTH) sk.drawFurniture(ctx, f, s.active.has(f.id), ms, env);
-      for (const p of people) {
+      const band = [...furniture.filter((f) => f.depth === "y").map((f) => ({ y: f.y, k: 0, f })), ...people.map((p) => ({ y: p.at.y, k: 1, p }))]
+        .sort((a, b) => a.y - b.y || a.k - b.k);
+      for (const f of furniture) if (f.depth !== "y" && f.depth < CHAR_DEPTH) sk.drawFurniture(ctx, f, s.active.has(f.id), ms, env);
+      for (const { f, p } of band) {
+        if (f) { sk.drawFurniture(ctx, f, s.active.has(f.id), ms, env); continue; }
         const box = { ...p.d, x: p.at.x - 44, y: p.at.y - 53, w: 88, h: 53, seat: { x: p.at.x, y: p.at.y } };
         sk.drawCharacter(ctx, box, p.at.walking ? { ...p.look, pose: "walk", heading: p.at.heading } : p.look, ms, env);
         if (!p.at.walking) speakers.push({ look: p.look, x: p.at.x + 10, y: p.at.y - 50, area: p.d.area });
       }
-      for (const f of furniture) if (f.depth >= CHAR_DEPTH) sk.drawFurniture(ctx, f, s.active.has(f.id), ms, env);
+      for (const f of furniture) if (f.depth !== "y" && f.depth >= CHAR_DEPTH) sk.drawFurniture(ctx, f, s.active.has(f.id), ms, env);
+      for (const it of up) sk.drawProp(ctx, it, ms, env);
+      if (sk.drawForeground) sk.drawForeground(ctx, s.L, env);
+      // Who found no spot in an area: a count in its corner (never over its name).
+      for (const [a, n] of s.L.crowd || []) if (s.L.areas[a] && sk.drawCrowd) sk.drawCrowd(ctx, s.L.areas[a], n, env);
       // In an area over capacity the name tags show on hover or focus only (#2513: a crowd's tags covered each other).
       const over = s.L.over || new Set(), hot = tipNow.current;
       for (const p of people) {
@@ -511,9 +519,8 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     } else {
       for (const d of s.desks) { const look = s.looks.get(d.key); sk.drawCharacter(ctx, d, look, ms, env); speakers.push({ look, x: d.x + 58, y: d.y + 12 }); }
       blit(s.layers.front);
+      for (const it of up) sk.drawProp(ctx, it, ms, env);
     }
-    const up = still ? [] : flights.frame(ms, s.L);
-    for (const it of up) sk.drawProp(ctx, it, ms, env);
     // Speech bubbles: a short line for the state, now and then (typed out; whole at once when still), placed so no two
     // overlap (placeBubbles; #2431).
     const bubbles = [];

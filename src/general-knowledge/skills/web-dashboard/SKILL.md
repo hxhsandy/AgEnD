@@ -283,6 +283,10 @@ when that would be tiny, e.g. on a phone). The zoom and centre are kept per devi
 the 16:9 scene is a matte: a pack's own `matte` (`#rrggbb`), else its background's edge colour, else the
 dashboard's background. Hover, click, name tags and Edit layout all work at any zoom: a drag on a handle moves it,
 anywhere else pans; zoom and pan are never animated.
+A pack may add a `foreground` (a 16:9 PNG over the whole scene, zones packs only): drawn above the people, furniture
+and items in the air, below name tags, bubbles and "+N" — door frames, pillars, table fronts that hide whoever walks
+behind them. A furniture item's `depth` may be `"y"`: drawn among the people by base y (whoever stands lower is in
+front). Numeric depths keep their meaning (under 1000 under the people, 1000 and up over them).
 
 **Live traffic** (**Live** switch, on by default; **Key** in the toolbar explains it, as a strip above the canvas): a line for each message between instances.
 Colour by kind — task (delegate_task) purple, send/query/update teal, report pink, broadcast orange; between teams

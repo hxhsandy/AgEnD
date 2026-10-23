@@ -23,6 +23,8 @@
 // @property {(ctx, desk, look, env) => void} drawDeskFront   desks: in front — the desk's front, its sign, folders, name tag
 // @property {(ctx, L, env) => void} [drawBackground]     zones: the whole 1280×720 background, areas and their names
 // @property {(ctx, item, active, ms, env) => void} [drawFurniture]   zones: one furniture item (active: activeWhen holds)
+// @property {(ctx, L, env) => void} [drawForeground]     zones: a pack's foreground over the whole 1280×720 scene, above
+//   the people, furniture and items in the air, below the crowd counts, name tags and bubbles
 // @property {(ctx, x, y, look, env) => void} [drawTag]   zones: a name tag under feet at (x, y)
 // @property {(ctx, area, n, env) => void} [drawCrowd]    zones: an area's "+n" (who found no spot in it)
 // @property {(ctx, desk, look, ms, env) => void} drawCharacter   the occupant in its pose at time `ms` (0: still); in
@@ -36,7 +38,8 @@
 // @property {object|null} [backdrop]  a pack's loaded background picture (the page samples its edges for the matte)
 // The desks layout's back and front layers change only when the fleet (or the zoom) does: the renderer keeps them as
 // pictures and draws the characters, props and bubbles each frame. In zones the background is kept; furniture, people (walking
-// along the pack's waypoints), tags, props and bubbles are drawn each frame, furniture by depth around the people.
+// along the pack's waypoints), tags, props and bubbles are drawn each frame, furniture by depth around the people (depth "y":
+// among them by base y), then the foreground, then the crowd counts, tags and bubbles.
 import { frameAt, nameHash } from "./fleet-office-model.js";
 import { CHAR_DEPTH, LOGICAL, checkSkinPack, own, packImages, poseStrip, stripBox } from "./fleet-office-pack.js";
 
@@ -497,6 +500,11 @@ export function spriteSkin(pack, images, base = pixelSkin) {
     drawBackground(ctx, L, env) {
       const im = img(pack.background);
       if (!im) { drawBackground(ctx, L, env); return; }
+      ctx.save(); ctx.imageSmoothingEnabled = false; ctx.drawImage(im, 0, 0, LOGICAL.w, LOGICAL.h); ctx.restore();
+    },
+    drawForeground(ctx, L, env) {
+      const im = img(pack.foreground);
+      if (!im) return;
       ctx.save(); ctx.imageSmoothingEnabled = false; ctx.drawImage(im, 0, 0, LOGICAL.w, LOGICAL.h); ctx.restore();
     },
     drawFurniture(ctx, f, active, ms, env) {

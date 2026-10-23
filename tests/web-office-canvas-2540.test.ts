@@ -7,6 +7,9 @@
  *   scene in reach, the kept view (per device, per office and style) and its restore, the layers' resolution, the matte
  *   from a background's edge pixels.
  * - The pack's `matte`: checked by the page's module and by the host (the same rules), lower-cased.
+ * - The pack's `foreground` (a file in the pack, with stateZones) and furniture `depth: "y"` (sorted among the people);
+ *   on the page a "y" item is drawn between the people by base y, and the foreground after people, furniture and
+ *   props but before the name tags and bubbles.
  * - On the page: the canvas is the stage; + / − / 0 and the buttons zoom; a drag pans, a wheel and a pinch zoom; the
  *   overview shows the view; a click and a hover hit through the view; the view is kept and restored; Edit layout's
  *   overlay follows the view and a handle dragged under zoom lands on the logical point under the pointer, while a drag
@@ -52,7 +55,7 @@ beforeAll(async () => {
   K = await import("/ui/js/fleet-office-skin.js");
   SK = await import("/ui/js/fleet-office-store.js");
 });
-afterAll(() => { p.restore(); delete (globalThis as any).fetch; });
+afterAll(async () => { await p.unmount(); p.restore(); delete (globalThis as any).fetch; });   // unmounted first: no draw loop outlives the page
 beforeEach(async () => {
   await p.unmount();
   p.storage.clear();
@@ -176,6 +179,28 @@ describe("the pack's matte: the page's check and the host's are the same", () =>
       expect(PK.checkSkinPack({ ...m, matte: bad }), String(bad)).toEqual({ ok: false, error: "matte: a colour as #rrggbb" });
     }
     expect([PK.matteOk("#abcdef"), PK.matteOk("#ABCDEF"), PK.matteOk(" #abcdef")]).toEqual([true, true, false]);
+  });
+});
+
+describe("the pack's foreground and y-sorted furniture: the page's check", () => {
+  const item = (id: string, depth: unknown) => ({ id, sprite: { src: "fox_idle.png", frames: 4, w: 32, h: 48 }, x: 100, y: 100, ...(depth === undefined ? {} : { depth }) });
+  it("foreground: a file name in the pack, with stateZones only; listed among the pack's images", () => {
+    const m = MANIFEST();
+    const pk = PK.skinPackOk({ ...m, foreground: "front.png" });
+    expect(pk.foreground).toBe("front.png");
+    expect(PK.packImages(pk)).toContain("front.png");
+    expect(PK.skinPackOk(m).foreground).toBeUndefined();
+    for (const bad of ["../x.png", "/x.png", 7, ""]) expect(PK.checkSkinPack({ ...m, foreground: bad }), String(bad)).toEqual({ ok: false, error: "foreground: a file name in the pack" });
+    const { stateZones: _z, ...desks } = m;
+    expect(PK.checkSkinPack({ ...desks, foreground: "front.png" })).toEqual({ ok: false, error: "foreground: only with stateZones" });
+  });
+  it('depth "y" is kept (among the people, after the numbers under them); numbers keep their meaning; any other string is refused', () => {
+    const m = MANIFEST();
+    const pk = PK.skinPackOk({ ...m, furniture: [item("over", 1000), item("pillar", "y"), item("rug", 5), item("plain", undefined)] });
+    expect(pk.furniture.map((f: any) => [f.id, f.depth])).toEqual([["plain", 0], ["rug", 5], ["pillar", "y"], ["over", 1000]]);
+    for (const bad of ["Y", "x", "", "5", 1.5, true]) {
+      expect(PK.checkSkinPack({ ...m, furniture: [item("pillar", bad)] }), String(bad)).toEqual({ ok: false, error: 'furniture[0].depth: a whole number from -10000 to 10000, or "y"' });
+    }
   });
 });
 
@@ -394,6 +419,36 @@ describe("the Office canvas on the page", () => {
     expect(stage).not.toMatch(/border|border-radius|height: clamp/);
     const phone = css.slice(css.indexOf(".oc-office > .oc-bar { padding: var(--s-2) var(--s-3); }"));
     expect(phone.slice(0, 600)).toContain(".oo-mini { display: none; }");
+  });
+  it("draw order: a depth \"y\" item between the people by base y; the foreground after people, furniture and props, before the tags and bubbles", async () => {
+    const real = (globalThis as any).matchMedia, was = (globalThis as any).Image;
+    (globalThis as any).matchMedia = (q: string) => ({ matches: /reduce/.test(q), addEventListener() {}, removeEventListener() {} });
+    (globalThis as any).Image = class { onload: any = null; onerror: any = null; u = ""; set src(u: string) { this.u = u; setTimeout(() => this.onload && this.onload(), 0); } };
+    try {
+      const m = MANIFEST();
+      m.foreground = "front.png";
+      // People stand at y 208 (atlas, lounge), 240 (quill, desks) and 572 (sage, nap): the pillar at 400 goes between.
+      m.furniture = [{ id: "pillar", sprite: { src: "pillar.png", frames: 1, w: 16, h: 64 }, x: 640, y: 400, depth: "y" },
+        { id: "rug", sprite: { src: "pillar.png", frames: 1, w: 16, h: 64 }, x: 40, y: 700, depth: 3 }];
+      skins = { rev: "r", packs: [{ id: "clinic-sample", name: "Clinic", sha: "f".repeat(32) }] };
+      manifestAnswer = { manifest: m, files: { ...FILES, "front.png": "e".repeat(32), "pillar.png": "9".repeat(32) } };
+      localStorage.setItem("agend_org_office_skin", "clinic-sample");
+      await office(); await settle(6);
+      const c = p.root.querySelector(".oo-canvas")._ctx.calls, frame = c.slice(c.map(([k]: any) => k).lastIndexOf("clearRect"));
+      const img = (id: string) => (call: any) => call[0] === "drawImage" && String(call[1][0]?.u).endsWith(`/img/${id}.png`);
+      const at = (id: string) => frame.map((call: any, i: number) => (img(id)(call) ? i : -1)).filter((i: number) => i >= 0);
+      const fox = at("b".repeat(32)), [rug, pillar] = at("9".repeat(32)), [fg] = at("e".repeat(32));
+      const foot = (i: number) => frame[i][1][6] + 44 * 2;                // its box's top + ay·scale: where its feet are
+      expect(fox.map(foot).sort((a: number, b: number) => a - b)).toEqual([208, 240, 572]);
+      expect(rug).toBeLessThan(Math.min(...fox));                          // a number under 1000: under everyone
+      expect(fox.filter((i: number) => i < pillar).map(foot)).toEqual([208, 240]);
+      expect(fox.filter((i: number) => i > pillar).map(foot)).toEqual([572]);
+      expect(fg).toBeGreaterThan(Math.max(...fox, pillar));
+      expect(frame[fg][1].slice(1)).toEqual([0, 0, 1280, 720]);
+      const words = frame.map((call: any, i: number) => (call[0] === "fillText" ? i : -1)).filter((i: number) => i >= 0);
+      expect(words.length).toBeGreaterThan(0);                            // the name tags (and any bubble): all after it
+      expect(Math.min(...words)).toBeGreaterThan(fg);
+    } finally { (globalThis as any).matchMedia = real; (globalThis as any).Image = was; }
   });
   it("the matte: a built-in skin's is the page's background token; a pack's own `matte`; else its background's edge, sampled", async () => {
     const firstFill = () => { const c = p.root.querySelector(".oo-canvas")._ctx.calls; const i = c.map(([k]: any) => k).lastIndexOf("clearRect"); return c.slice(i).find(([k]: any) => k === "fillRect")[2]; };
