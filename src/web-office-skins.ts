@@ -23,7 +23,7 @@ import { checkSkinPack, own, packImages, packStrips, type CheckedPack } from "./
 
 const MiB = 1024 * 1024;
 export const SKIN_LIMITS = {
-  packs: 8, files: 64, fileBytes: 2 * MiB, packBytes: 6 * MiB, manifestBytes: 64 * 1024, side: 4096, pixels: 16 * MiB, name: 60, src: 200,
+  packs: 16, files: 64, fileBytes: 2 * MiB, packBytes: 6 * MiB, manifestBytes: 64 * 1024, side: 4096, pixels: 16 * MiB, name: 60, src: 200,
 } as const;
 /** The most an upload's body may be: every picture's base64 (4/3) plus the manifest and the envelope. */
 export const SKIN_WIRE_BYTES = Math.ceil((SKIN_LIMITS.packBytes * 4) / 3) + SKIN_LIMITS.manifestBytes + 64 * 1024;

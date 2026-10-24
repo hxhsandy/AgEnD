@@ -513,8 +513,9 @@ export function spriteSkin(pack, images, base = pixelSkin) {
     },
     drawFurniture(ctx, f, active, ms, env) {
       if (f.shape) { drawFurniture(ctx, f, active, ms, env); return; }
-      // Active: its strip (or activeSprite) plays; otherwise its first frame holds.
+      // Active: its activeSprite (or its strip) plays; otherwise its strip loops ("loop", #2570) or its first frame holds.
       if (active) strip(ctx, f.activeSprite || f.sprite, ms, f.x, f.y);
+      else if (f.loop) strip(ctx, f.sprite, ms, f.x, f.y);
       else strip(ctx, f.sprite, 0, f.x, f.y, 0);
     },
     drawCharacter(ctx, d, look, ms, env) {
@@ -530,7 +531,11 @@ export function spriteSkin(pack, images, base = pixelSkin) {
       const ps = shown({ ...look, heading: at.heading }, !!at.walking);
       return ps ? stripBox(ps.strip, at.x, at.y, ps.mirror) : base.charBox(look, at);
     },
-    drawProp(ctx, it, ms, env) { if (!strip(ctx, own(pack.props, it.hue), ms, it.x, it.y)) base.drawProp(ctx, it, ms, env); },
+    // An item in the air: its sender's own (their set's "prop", #2562), else the pack's for its kind, else the built-in one.
+    drawProp(ctx, it, ms, env) {
+      const mine = it.from ? own(setOf({ name: it.from }) || {}, "prop") : null;
+      if (!strip(ctx, mine || own(pack.props, it.hue), ms, it.x, it.y)) base.drawProp(ctx, it, ms, env);
+    },
   };
 }
 
@@ -541,7 +546,8 @@ export const BUILT_IN_SKINS = ["pixel", "studio"];
 export const skinFor = (id, packs = null) => SKINS.get(id) || (packs && packs.get(id)) || pixelSkin;
 
 const loaded = new Map();                                 // `${id}@${sha}` → Promise<OfficeSkin | null>
-const MAX_LOADED = 16;
+// Room for every pack the host keeps (web-office-skins.ts SKIN_LIMITS.packs) and a few replaced ones (each a new sha).
+const MAX_LOADED = 24;
 const defaultImage = (url) => new Promise((resolve) => {
   if (typeof Image !== "function") { resolve(null); return; }
   const im = new Image();
