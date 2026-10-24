@@ -214,6 +214,7 @@ import { OwnerCssStore } from "./web-owner-css-store.js";
 import { ThemeStore } from "./web-theme-store.js";
 import { OfficeStore, OfficeWriteLimiter } from "./web-office-store.js";
 import { OfficeSkinStore } from "./web-office-skins.js";
+import { OfficeActs } from "./web-office-acts.js";
 import { WebAppearance } from "./web-appearance.js";
 import { WebEffectLibrary } from "./web-effect-library.js";
 import { WebEffectTrials } from "./web-effect-trials.js";
@@ -1580,6 +1581,44 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
   readonly officeSkinWrites = new OfficeWriteLimiter(undefined, { perWindow: 10, windowMs: 60_000 });
   /** How often a person may save the offices (PUT /ui/offices); memory only, as the appearance limiter. */
   readonly officeWrites = new OfficeWriteLimiter();
+  private officeActsInstance?: OfficeActs;
+  /** #2578: the agents' acts in the Office view (office_view / office_set), memory only; every change is `office_acts`. */
+  get officeActs(): OfficeActs {
+    return (this.officeActsInstance ??= new OfficeActs({
+      offices: () => this.officeStore.list().offices,
+      pack: id => this.officeSkins.pack(id),
+      chart: () => { const c = this.orgChart(); return { names: Object.keys(c.instances), teams: c.teams }; },
+      people: () => this.officePeople(),
+      changed: acts => this.emitSseEvent("office_acts", { acts, now: Date.now() }),
+    }));
+  }
+  /**
+   * #2578: each instance's state as the org chart shows it (fleet-org.js orgState, from the same fields the status
+   * frame and the Needs-you list carry) and its display name (resolveInstanceIdentity, as getUiStatus) — read once.
+   */
+  private officePeople(): { stateOf(name: string): string; displayName(name: string): string | undefined } {
+    const needs = new Map<string, number>();
+    for (const item of this.needsYouItems()) needs.set(item.instance, (needs.get(item.instance) ?? 0) + 1);
+    const classicRooms = new Map((this.classicChannels?.getAll() ?? []).map(ch => [ch.instanceName, ch]));
+    let profiles: ReturnType<typeof profileIdentities> | null = null;
+    return {
+      stateOf: name => {
+        if (!this.isKnownInstance(name)) return "missing";
+        const p = this.instancePresentation(name), status = this.getInstanceStatus(name);
+        if (p.state === "awaiting_input" || (needs.get(name) ?? 0) > 0) return "needs";
+        if (p.startup_phase === "queued" || p.startup_phase === "starting") return p.startup_phase;
+        if (status === "crashed" || status === "paused") return status;
+        if (status !== "running") return "stopped";
+        return p.execution_state === "stuck" || p.execution_state === "working" ? p.execution_state : "idle";
+      },
+      displayName: name => {
+        try {
+          profiles ??= profileIdentities(this.dataDir);
+          return resolveInstanceIdentity({ cfg: this.fleetConfig?.instances[name], classic: classicRooms.get(name), profile: profiles.get(name) }).display_name || undefined;
+        } catch { return undefined; }
+      },
+    };
+  }
   /** #1629: the theme tools, a person's reset and lock, and the one appearance rate limiter (shared with effects). */
   get webAppearance(): WebAppearance {
     return (this.webAppearanceService ??= new WebAppearance(this.themeStore, () => this.fleetConfig?.web ?? null,
@@ -11193,7 +11232,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     const fleetRequestId = msg.fleetRequestId as string | undefined;
     if (!ipc || !fleetRequestId) return;
     const type = String(msg.type);
-    const responseType = isCanvasWorkerTool(type.replace(/^fleet_/, "")) ? "fleet_web_theme_response"
+    const responseType = isCanvasWorkerTool(type.replace(/^fleet_/, "")) || type === "fleet_office_view" || type === "fleet_office_set" ? "fleet_web_theme_response"
       : type.startsWith("fleet_schedule_") ? "fleet_schedule_response"
       : type.startsWith("fleet_decision_") ? "fleet_decision_response"
       : type === "fleet_task" ? "fleet_task_response"
@@ -11227,7 +11266,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       || type === "fleet_get_web_appearance" || type === "fleet_preview_web_appearance"
       || type === "fleet_set_web_widget" || type === "fleet_remove_web_widget"
       || type === "fleet_set_web_ambient" || type === "fleet_clear_web_ambient"
-      || type === "fleet_export_web_mod" || type === "fleet_propose_web_mod") {
+      || type === "fleet_export_web_mod" || type === "fleet_propose_web_mod"
+      || type === "fleet_office_view" || type === "fleet_office_set") {
       this.handleWebTheme(name, msg); return;
     }
   }
@@ -11247,6 +11287,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       const result = tool === "get_web_appearance" || tool === "preview_web_appearance"
         ? this.appearanceTools.handle(instanceName, tool, args)
         : tool === "export_web_mod" || tool === "propose_web_mod" ? this.agentMods.handle(instanceName, tool, args)
+        : tool === "office_view" || tool === "office_set" ? this.officeActs.handle(instanceName, tool, args)
         : this.webAppearance.handleTool(instanceName, tool, args);
       ipc.send({ type: "fleet_web_theme_response", fleetRequestId, result });
     } catch (err) {
@@ -11692,6 +11733,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     }
     if (tool === "get_web_appearance" || tool === "preview_web_appearance") return this.appearanceTools.handle(instance, tool, args);
     if (tool === "export_web_mod" || tool === "propose_web_mod") return this.agentMods.handle(instance, tool, args);
+    if (tool === "office_view" || tool === "office_set") return this.officeActs.handle(instance, tool, args);   // #2578
     return this.webAppearance.handleTool(instance, tool, args);
   }
 
@@ -12496,7 +12538,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     this.compactWatchService?.forget(name);
     // #1664: and it is nobody's favorite any more (every device sees that at its next status frame).
     try { this.webPrefs.forgetInstance(name); } catch (err) { this.logger.warn({ err: (err as Error).message, name }, "Dropping a removed instance from web favorites failed"); }
-    try { this.themeStore.forget(name); this.webAppearance.forget(name); this.appearanceTools.forget(name); this.effectToolsService?.forget(name); this.mods.forgetInstance(name); this.agentMods.forget(name); } catch (err) { this.logger.warn({ err: (err as Error).message, name }, "Dropping a removed instance's web theme failed"); }
+    try { this.themeStore.forget(name); this.webAppearance.forget(name); this.appearanceTools.forget(name); this.effectToolsService?.forget(name); this.mods.forgetInstance(name); this.agentMods.forget(name); this.officeActsInstance?.forget(name); } catch (err) { this.logger.warn({ err: (err as Error).message, name }, "Dropping a removed instance's web theme failed"); }
 
     // Clean up statusline watcher + instance directory
     this.statuslineWatcher.unwatch(name);

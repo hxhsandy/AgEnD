@@ -419,6 +419,9 @@ export async function dispatchAgentOperation(
   // CW1 effect ops use the token-resolved instance; internal byte parts, never a workspace path.
   const effectOps: Readonly<Record<string, string>> = { "effect-upload":"upload_web_effect", "effect-list":"list_web_effects", "effect-preview":"preview_web_effect", "effect-profile":"profile_web_effect", "effect-apply":"apply_web_effect", "effect-remove":"remove_web_effect", "effect-delete":"delete_web_effect" };
   if (Object.hasOwn(effectOps, op)) return ctx.handleWebThemeHttp(instance, effectOps[op]!, args);
+  // #2578: agend-agent office view|set — the token's instance's own character.
+  if (op === "office-view") return ctx.handleWebThemeHttp(instance, "office_view", args);
+  if (op === "office-set") return ctx.handleWebThemeHttp(instance, "office_set", args);
   if (op === "emoji-preview") {
     return ctx.handlePreviewEmojisHttp(instance, args);
   }

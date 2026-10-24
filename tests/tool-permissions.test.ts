@@ -57,6 +57,8 @@ const BEFORE: Record<string, string[]> = {
     // #1629 B2: the caller-scoped Canvas Worker effect tools.
     "upload_web_effect", "list_web_effects", "preview_web_effect", "profile_web_effect",
     "apply_web_effect", "remove_web_effect", "delete_web_effect",
+    // #2578: its own character in the Office view (no target; off until dashboard.office: true).
+    "office_view", "office_set",
     "validate_config", "get_fleet_status", "get_usage", "get_effort", "get_instance_logs", "get_fleet_config",
     // kiro engine move: read-only kiro engine facts.
     "kiro_engine_status",
@@ -96,6 +98,8 @@ const BEFORE: Record<string, string[]> = {
     "export_web_mod", "propose_web_mod",
     "upload_web_effect", "list_web_effects", "preview_web_effect", "profile_web_effect",
     "apply_web_effect", "remove_web_effect", "delete_web_effect",
+    // #2578: its own character in the Office view, as a worker's.
+    "office_view", "office_set",
     // kiro engine move: read-only kiro engine facts, for explaining a kiro incompatibility.
     "kiro_engine_status",
     // #2056: the user's Settings → Web appearance, through the page's own checks.
@@ -530,6 +534,7 @@ describe("the refusal explains itself", () => {
       "export_web_mod", "propose_web_mod",
       "upload_web_effect", "apply_web_effect", "remove_web_effect", "delete_web_effect",
       "get_web_theme", "set_web_theme", "set_web_theme_asset", "reset_web_theme",
+      "office_view", "office_set",
     ]) {
       const message = toolRefusedMessage("minimal", tool);
       expect(message, `${tool}: must not suggest coordinator`).not.toContain("tool_set: coordinator");

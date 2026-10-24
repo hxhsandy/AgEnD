@@ -61,6 +61,8 @@ const WORKER: readonly string[] = [
   "set_web_ambient", "clear_web_ambient",
   // Mods (#1629 r4-5b): its own look as a file, and proposing one for a person — never importing.
   "export_web_mod", "propose_web_mod",
+  // Its own character in the Office view (#2578): no target; off until a person switches dashboard.office on.
+  "office_view", "office_set",
   "upload_web_effect", "list_web_effects", "preview_web_effect", "profile_web_effect", "apply_web_effect", "remove_web_effect", "delete_web_effect",
   // Its own schedules. Present here, but not a free hand: scheduleOpRefusal
   // limits a non-coordinator to schedules that target itself and that it
@@ -125,6 +127,8 @@ export const TOOL_PROFILES: Readonly<Record<ToolSetName, readonly string[]>> = {
     "set_web_ambient", "clear_web_ambient",
     "export_web_mod", "propose_web_mod",
     "upload_web_effect", "list_web_effects", "preview_web_effect", "profile_web_effect", "apply_web_effect", "remove_web_effect", "delete_web_effect",
+    // Its own character in the Office view (#2578), as a worker's.
+    "office_view", "office_set",
     // #2056: Settings → Web appearance for the user (the page's own checks; a worker's are its own theme only).
     "get_web_settings", "set_web_settings",
   ],
@@ -136,6 +140,7 @@ export const TOOL_PROFILES: Readonly<Record<ToolSetName, readonly string[]>> = {
     "get_web_theme", "set_web_theme", "set_web_theme_asset", "reset_web_theme",
     "get_web_appearance", "preview_web_appearance", "set_web_widget", "remove_web_widget", "set_web_ambient", "clear_web_ambient", "export_web_mod", "propose_web_mod",
     "upload_web_effect", "list_web_effects", "preview_web_effect", "profile_web_effect", "apply_web_effect", "remove_web_effect", "delete_web_effect",
+    "office_view", "office_set",
     "validate_config", "get_fleet_status", "get_usage", "get_effort", "get_instance_logs", "get_fleet_config", "kiro_engine_status", "get_cache_report", "get_usage_report",
     // Self-scheduling, same scope as worker (#895).
     "create_schedule", "list_schedules", "update_schedule", "delete_schedule",
@@ -270,6 +275,8 @@ export const IPC_TYPE_TOOLS: Readonly<Record<string, string>> = {
   fleet_apply_web_effect: "apply_web_effect",
   fleet_remove_web_effect: "remove_web_effect",
   fleet_delete_web_effect: "delete_web_effect",
+  fleet_office_view: "office_view",
+  fleet_office_set: "office_set",
 };
 
 /**
@@ -319,6 +326,8 @@ export const EARLY_AGENT_OP_TOOLS: Readonly<Record<string, string>> = {
   "effect-apply": "apply_web_effect",
   "effect-remove": "remove_web_effect",
   "effect-delete": "delete_web_effect",
+  "office-view": "office_view",
+  "office-set": "office_set",
 };
 
 /**
@@ -340,6 +349,7 @@ const OWN_APPEARANCE_TOOLS: ReadonlySet<string> = new Set([
   "export_web_mod", "propose_web_mod",
   "upload_web_effect", "list_web_effects", "preview_web_effect", "profile_web_effect",
   "apply_web_effect", "remove_web_effect", "delete_web_effect",
+  "office_view", "office_set",
 ]);
 
 export function toolRefusedMessage(profile: ToolSetName, tool: string): string {
