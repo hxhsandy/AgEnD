@@ -513,8 +513,9 @@ export function spriteSkin(pack, images, base = pixelSkin) {
     },
     drawFurniture(ctx, f, active, ms, env) {
       if (f.shape) { drawFurniture(ctx, f, active, ms, env); return; }
-      // Active: its strip (or activeSprite) plays; otherwise its first frame holds.
+      // Active: its activeSprite (or its strip) plays; otherwise its strip loops ("loop", #2570) or its first frame holds.
       if (active) strip(ctx, f.activeSprite || f.sprite, ms, f.x, f.y);
+      else if (f.loop) strip(ctx, f.sprite, ms, f.x, f.y);
       else strip(ctx, f.sprite, 0, f.x, f.y, 0);
     },
     drawCharacter(ctx, d, look, ms, env) {
