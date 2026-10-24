@@ -284,6 +284,23 @@ describe("All offices on the page", () => {
       expect(set[1][0]).toBeCloseTo(v.k * lay.tiles[0].s, 6);
     } finally { (globalThis as any).Image = was; }
   });
+  it("#2574: a furniture item's label is a name tag under it, like a person's; one without a label gets none", async () => {
+    const was = (globalThis as any).Image;
+    (globalThis as any).Image = class { onload: any = null; onerror: any = null; u = ""; set src(u: string) { this.u = u; setTimeout(() => this.onload && this.onload(), 0); } };
+    try {
+      const m = MANIFEST();
+      m.furniture = [{ id: "keeper", sprite: { src: "fox_idle.png", frames: 1, w: 32, h: 48 }, x: 900, y: 400, depth: "y", label: "Shopkeeper" },
+        { id: "lamp", sprite: { src: "fox_idle.png", frames: 1, w: 32, h: 48 }, x: 1100, y: 200 }];
+      skins = { rev: "r", packs: [{ id: "clinic-sample", name: "Clinic", sha: "9".repeat(32) }] };   // its own sha: packs are kept per id and sha
+      manifestAnswer = { manifest: m, files: FILES };
+      offices = { rev: 2, offices: [{ id: "front", name: "Front desk", skin: "clinic-sample", members: ["atlas"] }, { id: "lab", name: "Lab", skin: "pixel", members: ["quill"] }] };
+      localStorage.setItem("agend_org_office", "front");
+      await office(); await settle(8);
+      const texts = lastFrame().filter(([k]: any) => k === "fillText").map(([, a]: any) => a);
+      expect(texts.filter((a: any) => a[0] === "Shopkeeper").map((a: any) => [a[1], a[2]])).toEqual([[900, 410.5]]);   // at its anchor, as a person's tag
+      expect(texts.some((a: any) => a[0] === "lamp")).toBe(false);
+    } finally { (globalThis as any).Image = was; }
+  });
   it("the lobby tile: whoever is in no office, in the whole fleet's style; off by its toggle (kept)", async () => {
     offices = { rev: 2, offices: TWO };
     localStorage.setItem("agend_org_office", "*all");
