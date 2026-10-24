@@ -307,6 +307,8 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
       sk.drawTag(ctx, q.at.x, q.at.y, q.look, env);
       tags.push(tagBox(ctx, q.at.x, q.at.y, q.look.label));
     }
+    // A furniture item's own name (#2574: an NPC drawn as furniture), tagged like a person; none on a tile too small to read.
+    if (!tagsOff) for (const f of furniture) if (f.label) { sk.drawTag(ctx, f.x, f.y, { label: f.label }, env); tags.push(tagBox(ctx, f.x, f.y, f.label)); }
   } else {
     for (const d of p.desks) { const look = p.looks.get(d.key); sk.drawCharacter(ctx, d, look, ms, env); speakers.push({ look, x: d.x + 58, y: d.y + 12 }); }
     blit(p.layers.front);
