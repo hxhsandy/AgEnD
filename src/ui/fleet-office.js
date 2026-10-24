@@ -62,7 +62,7 @@ import { hits, needle } from "./fleet-canvas-layout.js";
 import { AUTO_ID, LOBBY, autoLayout, backingScale, coatOf, createFlights, customLayout, deskAt, desksOf, filterOk, lampOf, layoutOk, lightOf, membersOf,
   officePose, officeRooms, signOf, workOn } from "./fleet-office-model.js";
 import { BUILT_IN_SKINS, CHAR_DEPTH, DEFAULT_PAL, bubbleBox, loadPackSkin, modeOf, skinFor, tagBox } from "./fleet-office-skin.js";
-import { CALLING, activeFurniture, bubbleAt, bubbleRank, NIGHT, WANDER, createMail, createWalkers, isNight, linesFor, personAt, placeBubbles, thinBubbles, walkTargets, zonesLayout } from "./fleet-office-zones.js";
+import { CALLING, activeFurniture, bubbleAt, bubbleRank, NIGHT, WANDER, createMail, createWalkers, isNight, linesFor, npcKey, personAt, placeBubbles, thinBubbles, walkTargets, zonesLayout } from "./fleet-office-zones.js";
 import { actsOk, createOfficeStore } from "./fleet-office-store.js";
 import { POLL_MS } from "./fleet-traffic.js";
 import { OfficeEditor, officeForSave } from "./fleet-office-editor.js";
@@ -208,6 +208,12 @@ function partOf(L, looks, skin, zones, walkers, flights) {
 }
 /** At bedtime (#2568): each item with a `night` drawn as it — its strip playing, at its night place (its own when none). */
 export const nightFurniture = (list) => list.map((f) => (f.night ? { ...f, sprite: f.night.sprite, activeSprite: null, x: f.night.x ?? f.x, y: f.night.y ?? f.y, asleep: true } : f));
+/** #2596: each NPC with a `walk` where its walker is now (`at(key)`): moved there — its tag and depth with it — and, while
+ * it walks, `walking` and its `heading` (its walk strip: walkStrip); asleep, or with no walker (not strolling), where it is. */
+export const strollFurniture = (list, at) => list.map((f) => {
+  const w = f.walk && !f.asleep ? at(npcKey(f)) : null;
+  return w ? { ...f, x: w.x, y: w.y, walking: !!w.walking, heading: w.heading || null } : f;
+});
 /** Where a seated person's bubble points: over the head of the picture drawn — a pack's figure can be taller than the
  * built-in one (#2558: a 134 px figure had its face under the bubble); never lower than the built-in spot. */
 export function speakerAt(sk, look, at) {
@@ -318,7 +324,8 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
       if (at.walking) walking = true;
       return { d, at, look: p.looks.get(d.key) };
     }).sort((x, y) => x.at.y - y.at.y);
-    const furniture = p.night ? nightFurniture(sk.pack.furniture) : sk.pack.furniture;
+    const furniture = strollFurniture(p.night ? nightFurniture(sk.pack.furniture) : sk.pack.furniture, (k) => p.walkers.at(k, t));
+    if (furniture.some((f) => f.walking)) walking = true;
     const band = [...furniture.filter((f) => f.depth === "y").map((f) => ({ y: f.y, k: 0, f })), ...people.map((q) => ({ y: q.at.y, k: 1, p: q })),
       ...(p.ghosts ? ghostsOf(sk.pack, people).map((g) => ({ y: g.y, k: 1, g })) : [])]
       .sort((x, y) => x.y - y.y || x.k - y.k);
@@ -634,12 +641,12 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   useEffect(() => { flights.sync(traffic || [], now(), still); if (zones && !overview && mail.sync(traffic || [], now(), L, still)) loop.current?.wake(); }, [traffic, mail]);
   // Zones: everyone's seat is where they walk to — an idle person now and then strolls near it and back (#2560; not
   // with reduced motion, nor while Edit layout is open: the seats are being placed); someone with mail from another
-  // office walks to it first (#2564).
+  // office walks to it first (#2564). An NPC drawn as furniture with a `walk` strolls near its spot alike (#2596).
   const wander = zones && !overview && !still && !layout;
   useEffect(() => {
     if (!zones || overview) return undefined;
     const go = () => {
-      const t = now(), to = walkTargets(desksOf(L), L, t, wander);
+      const t = now(), to = walkTargets(desksOf(L), L, t, wander, skin.pack.furniture, night);
       // An act's walk; not someone in bed for the night (#2568: bedtime wins, as for mail).
       for (const d of desksOf(L)) { const a = actsHere.get(d.node.name), at = !d.night && actLive(a, d.node.state, Date.now(), actSeen.current) ? actTarget(a, L, walkers, t) : null; if (at) to.set(d.node.name, at); }
       for (const [name, at] of mail.targets(L, t)) to.set(name, at);
@@ -651,7 +658,7 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     if (still) return undefined;
     const h = setInterval(go, WANDER.TICK);
     return () => clearInterval(h);
-  }, [L, wander, mail, actsHere]);
+  }, [L, wander, mail, skin, night, actsHere]);
   // …and in each tile on a zones style; the traffic within a tile is its own, between tiles the overview's.
   useEffect(() => {
     for (const tl of tiles) if (tl.zones) tl.walkers.sync(new Map(desksOf(tl.L).map((d) => [d.node.name, d.seat])), now(), tl.L, still);
@@ -1156,7 +1163,7 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
           : html`<button key=${tl.key} ref=${at} type="button" class="oo-tile-label" data-office=${tl.key} title=${to("openOffice", tl.name)} aria-label=${to("openOffice", tl.name)}
               onClick=${() => pick(tl.key)}>${text}</button>`;
       }) : null}
-      ${layout ? html`<${LayoutEditor} key=${layout.id} base=${layout.base} start=${layout.start} place=${placeOverlay}
+      ${layout ? html`<${LayoutEditor} key=${layout.id} base=${layout.base} start=${layout.start} place=${placeOverlay} dock=${!fs}
         stale=${layoutStale ? t("orgl.stale") : ""} onChange=${onDraft} onSave=${saveLayout} onClose=${closeLayout} />` : null}
       ${tipText ? html`<div ref=${tipRef} class="oo-tip" role="tooltip">
         <strong>${tipText.primary}</strong>${tipText.secondary ? html` <span class="muted mono">${tipText.secondary}</span>` : null}

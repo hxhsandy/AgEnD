@@ -269,7 +269,8 @@ desk to desk along the corridors in the Key's colours; a delegation in progress 
 desk. Hover (or tap once) a desk for its name, state and backend; click (or tap again) opens the chat. **Find** dims
 the rest. **Show** picks a team or the Lobby and **People** pins chosen instances (both kept per browser); the
 **Office** switcher lists offices kept on the host (`web-offices.json`, `GET`/`PUT /ui/offices`). An admin session
-(never a read-only one, a guest or the public link) gets **Edit offices**: add, rename and delete offices, pick who is
+(never a read-only one, a guest or the public link) gets **Edit offices** (≥1200 px: a panel docked on the right in the
+usage rail's place, the Office in use beside it, × or Esc closes it and the rail returns; narrower: a centred dialog): add, rename and delete offices, pick who is
 in each (whole teams or single instances; none = everyone) and its style, and upload or delete **skin packs** (an
 artist's pictures: `manifest.json` plus PNGs, format v1, kept in `web-office-skins/` in the AgEnD home; the host
 checks every rule — PNG only, each strip exactly frames·w × h, a 16:9 background, size caps — and never changes a
@@ -280,7 +281,10 @@ or an uploaded pack; one the page cannot load is drawn as Desks with a note. On 
 **Edit layout** (admin only) shows a 1280×720 coordinate grid and lets you drag seats, furniture, the door and
 waypoints (or Tab to one and use the arrow keys, Shift for 10), add or remove waypoints and join or unjoin
 corridors; **Save layout** keeps the moves as that office's overrides (the pack stays as uploaded), **Reset** goes
-back to the pack's own. While it is open the office picker and Edit offices wait (**Cancel** closes it); if someone
+back to the pack's own. On a screen ≥1200 px its controls sit in the right-hand panel (the canvas whole for the
+handles); narrower, or in fullscreen, they are the bar along the canvas's bottom. Esc is Cancel. While either editor
+is docked the page beside it works, Ctrl+K search included; leaving the page with unsaved changes asks first
+("Discard changes"). While it is open the office picker and Edit offices wait (**Cancel** closes it); if someone
 saved the offices meanwhile, Save says so and keeps your layout — Save again puts it on the current list. A crowded area packs extra people into a tighter grid, then shows "+N" in its corner; there
 only calls and work get bubbles (a few at most) and name tags show on hover or focus. **Hide paused and stopped**
 (per browser, off by default) leaves the sleepers out. Now and then someone says a short line for their state in a
