@@ -20,6 +20,7 @@ can shape how you look there — **only your own look, and only on the surfaces 
 | Your identity colour | the colour people find you by in the sidebar, and where it shows (name, bar, ring) | `set_web_theme` (`identity`) |
 | Your chat header strip and Details page | widgets: small panels of facts the dashboard draws | `set_web_widget`, `remove_web_widget` |
 | An ambient effect in your chat | falling petals, snow, rising lanterns, twinkles, stars where a person clicks — data only, drawn by the dashboard | `set_web_ambient`, `clear_web_ambient` |
+| Your character in Fleet → Org chart → Office | walk to a seat, a spot or a person, say a short line, hold a pose — for a few seconds (off until a person switches it on) | `office_view`, `office_set` |
 
 None of these tools takes a target: they always act on you. You can't change another instance, the dashboard's own
 chrome (beyond your colours on it while your chat is open), a person's sidebar widget, or a person's custom CSS.
@@ -265,6 +266,26 @@ needs no Try, no preview consent and no measurement — use it for petals, snow,
 
 Then stars on a click, alongside: `set_web_ambient { "preset": "burst-on-click", "glyphs": ["✦", "✧"] }`.
 
+## Your character in the Office view
+
+Fleet → Org chart → **Office** draws the fleet as an office, with a little character per agent placed by its state.
+When a person switches the **office** dashboard feature on for you (`dashboard.office: true`; off until then — the tools
+are not in your list), you can direct your own character for a moment:
+
+- `office_view { office? }`: the stored offices you are in — each `{ id, name, skin, members: [{ name, display_name?,
+  state }], spots: { seats: [{ area, index, x, y }], waypoints: [{ id, x, y }], npcs: [{ id, label, x, y }], door } }` —
+  your current `act` (or null) and `cooldown_ms` (0: you may act now). A built-in style (pixel, studio) has no spots.
+- `office_set { office?, go?, say?, pose?, seconds?, clear? }`: `go` is exactly one of `seat` (`"area:index"`, as
+  office_view lists it), `waypoint` (an id) or `person` (a member of the same office); `say` a line of 1..40 characters
+  (a speech bubble); `pose` one of idle, working, needs, paused; `seconds` 5..120 (default 30). `clear: true`, alone,
+  ends your act. `office` is needed only when you are in more than one.
+- Each call replaces your act. It ends when its seconds are up, or the moment your real state changes — real work
+  always shows. At most **6 calls a minute** and **60 an hour**: a refusal says `cooldown_ms`.
+
+```json
+{ "go": { "person": "atlas" }, "say": "Review's ready", "seconds": 20 }
+```
+
 ## Limits
 
 - At least **30 s** between changes, at most **10 changes an hour** — refused with `rate_limited` and
@@ -286,7 +307,7 @@ Then stars on a click, alongside: `set_web_ambient { "preset": "burst-on-click",
 From a shell: `agend-agent theme get|set key=value…|set --json '<patch>'|clear <path>…|asset <slot> <file>|reset`,
 `agend-agent appearance`, `agend-agent appearance preview [light|dark]`, and
 `agend-agent widget set <slot> '<spec json>' ['<data json>']|data <slot> '<data json>'|remove [slot]`,
-`agend-agent ambient set '<spec json>'|clear [loop|click]`.
+`agend-agent ambient set '<spec json>'|clear [loop|click]`, `agend-agent office view [office]|set '<json>'`.
 
 ## Files in your working directory
 

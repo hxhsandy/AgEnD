@@ -6,17 +6,23 @@
  *
  * - `appearance`: its own look on the dashboard — theme, pictures, widgets, ambient, effects, mods it proposes;
  * - `task_board`: the task board (`task`, and `agend task …`);
- * - `web_settings`: Settings → Web appearance for the person (`get_web_settings`, `set_web_settings`).
+ * - `web_settings`: Settings → Web appearance for the person (`get_web_settings`, `set_web_settings`);
+ * - `office` (#2578): its own character in Fleet → Org chart → Office — walking, a speech bubble, a pose
+ *   (`office_view`, `office_set`).
  *
  * Unset is allowed: a fleet that switches nothing off works as before, and the profile still decides what an agent
- * has. `false` takes the feature's tools away whatever the profile carries: refused at the fleet's checks
+ * has — except for a feature in OFF_UNLESS_ON (`office`), which is off until a person sets it true. `false` takes the feature's tools away whatever the profile carries: refused at the fleet's checks
  * (tool-permissions.ts's sinks, read at each call — no restart) and left out of the agent's tool menu from its next
  * start (AGEND_DASHBOARD_OFF, read by mcp-server). Like a profile, policy protection for the resolved identity, not
  * isolation between same-uid agents with a shell.
  */
-export const DASHBOARD_FEATURES = ["appearance", "task_board", "web_settings"] as const;
+export const DASHBOARD_FEATURES = ["appearance", "task_board", "web_settings", "office"] as const;
 export type DashboardFeature = typeof DASHBOARD_FEATURES[number];
-/** As written in fleet.yaml: each feature true (allowed), false (switched off) or absent (allowed). */
+/** The features a person switches on (#2578): absent (or null) is off for these, never allowed. */
+export const OFF_UNLESS_ON: ReadonlySet<DashboardFeature> = new Set<DashboardFeature>(["office"]);
+/** What a feature is when nothing (not the instance, not the defaults) says: allowed, or off for OFF_UNLESS_ON. */
+export const dashboardFeatureDefault = (feature: string): boolean => !OFF_UNLESS_ON.has(feature as DashboardFeature);
+/** As written in fleet.yaml: each feature true (allowed), false (switched off) or absent (allowed; off for OFF_UNLESS_ON). */
 export type DashboardAccess = Partial<Record<DashboardFeature, boolean>>;
 
 /**
@@ -39,6 +45,7 @@ export const DASHBOARD_FEATURE_TOOLS: Readonly<Record<DashboardFeature, readonly
   ],
   task_board: ["task"],
   web_settings: ["get_web_settings", "set_web_settings"],
+  office: ["office_view", "office_set"],
 };
 
 const FEATURE_OF: ReadonlyMap<string, DashboardFeature> = new Map(
@@ -52,16 +59,20 @@ export function dashboardFeatureOf(tool: string): DashboardFeature | null {
 
 const isFeature = (k: string): k is DashboardFeature => (DASHBOARD_FEATURES as readonly string[]).includes(k);
 
-/** The features switched off (`false`) in an instance's `dashboard` as resolved; anything else allows. */
+/** The features switched off in an instance's `dashboard` as resolved: `false`, and an OFF_UNLESS_ON one not `true`. */
 export function dashboardFeaturesOff(access: unknown): DashboardFeature[] {
-  if (!access || typeof access !== "object" || Array.isArray(access)) return [];
-  return DASHBOARD_FEATURES.filter((f) => (access as Record<string, unknown>)[f] === false);
+  const a = access && typeof access === "object" && !Array.isArray(access) ? access as Record<string, unknown> : {};
+  return DASHBOARD_FEATURES.filter((f) => (OFF_UNLESS_ON.has(f) ? a[f] !== true : a[f] === false));
 }
 
 /** The refusal for `tool` when its feature is in `off`, else null. */
 function refusalFor(off: readonly DashboardFeature[], tool: string): string | null {
   const feature = dashboardFeatureOf(tool);
   if (!feature || !off.includes(feature)) return null;
+  if (OFF_UNLESS_ON.has(feature)) {
+    return `${tool} is not available to this instance: its dashboard feature "${feature}" is off until the person switches it on (dashboard.${feature}: true). `
+      + "Do not retry it; tell the person if you need it.";
+  }
   return `${tool} is not available to this instance: the person switched its dashboard feature "${feature}" off (dashboard.${feature}: false). `
     + "Do not retry it; tell the person if you need it.";
 }
@@ -113,7 +124,7 @@ export function dashboardSwitches(value: unknown): DashboardAccess {
 
 /**
  * The features switched off in a fleet config for `name`: each feature's own switch where the instance has one, else
- * the default's, else allowed. `name` with no own `instances` entry (a ClassicBot identity) gets the defaults'.
+ * the default's, else allowed (off for OFF_UNLESS_ON). `name` with no own `instances` entry (a ClassicBot identity) gets the defaults'.
  */
 export function dashboardFeaturesOffIn(fleet: unknown, name: string): DashboardFeature[] {
   const f = fleet && typeof fleet === "object" ? fleet as { defaults?: { dashboard?: unknown }; instances?: Record<string, { dashboard?: unknown } | undefined> } : {};

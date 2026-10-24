@@ -7,7 +7,7 @@ import { quickLinkEffective } from "./authority/web-authority.js";
 import type { SettingsChangeAuthority } from "./settings-authority.js";
 import { LOCAL_SESSION_HOURS, localSessionPolicy } from "./web-session.js";
 import { APPEARANCE_BOUNDS, APPEARANCE_DEFAULTS } from "./web-appearance-limits.js";
-import { DASHBOARD_FEATURES } from "./dashboard-permissions.js";
+import { DASHBOARD_FEATURES, dashboardFeatureDefault } from "./dashboard-permissions.js";
 
 export const SETTINGS_DIFF_RECORDS = 32;
 export const SETTINGS_DIFF_UNITS = 4096;
@@ -267,8 +267,8 @@ const dashboardPath = (path: readonly string[]): boolean =>
 /**
  * What a change to the dashboard switches (dashboard-permissions.ts) opens up, as summary lines (none: it only switches
  * features off, or leaves them). Judged as what each agent gets per feature — its own value, else the default's, else
- * allowed — as bot-to-bot visibility is: switching off applies directly; switching on (or a value the validator would
- * refuse) waits for the confirmation.
+ * allowed (off for an OFF_UNLESS_ON feature, #2578) — as bot-to-bot visibility is: switching off applies
+ * directly; switching on (or a value the validator would refuse) waits for the confirmation.
  */
 function dashboardWidening(before: unknown, after: unknown): string[] {
   const b = fleetIn(before), a = fleetIn(after), out: string[] = [];
@@ -286,13 +286,13 @@ function dashboardWidening(before: unknown, after: unknown): string[] {
   // A value the validator would refuse (not a boolean, or no such feature) is never applied quietly.
   const odd = (v: unknown, feature: string) => v !== undefined && v !== null && (typeof v !== "boolean" || !(DASHBOARD_FEATURES as readonly string[]).includes(feature));
   for (const feature of features) {
-    const defA = fallback(a, feature), defB = fallback(b, feature);
+    const defA = fallback(a, feature), defB = fallback(b, feature), unset = dashboardFeatureDefault(feature);
     const inheritors: string[] = [];
     for (const name of Object.keys(object(a.instances) ? a.instances : {})) {
       if (!b || !object(b.instances) || !object(b.instances[name])) continue;          // a new agent is confirmed whole
       const raw = own(a, name, feature), ownChanged = !same(raw, own(b, name, feature));
       if (ownChanged && odd(raw, feature)) { line(`instances.${name}.${DASHBOARD}.${feature}`, own(b, name, feature) ?? "default", raw); continue; }
-      const was = on(own(b, name, feature), on(defB, true)), now = on(raw, on(defA, true));
+      const was = on(own(b, name, feature), on(defB, unset)), now = on(raw, on(defA, unset));
       if (was || !now) continue;
       if (ownChanged) line(`instances.${name}.${DASHBOARD}.${feature} (in effect)`, false, true);
       else inheritors.push(name);
@@ -300,7 +300,7 @@ function dashboardWidening(before: unknown, after: unknown): string[] {
     const shown = 5, more = inheritors.length > shown ? ` +${inheritors.length - shown} more` : "";
     const who = inheritors.length ? ` — ${inheritors.length} agent(s) inherit it: ${settingsDisplay(inheritors.slice(0, shown).join(", "))}${more}` : "";
     if (odd(defA, feature) && !same(defA, defB)) out.unshift(`${settingsDisplay(`defaults.${DASHBOARD}.${feature}`)}: ${settingsDisplay(defB ?? "default")} → ${settingsDisplay(defA)}${who}`);
-    else if ((on(defA, true) && !on(defB, true)) || inheritors.length) out.unshift(`${settingsDisplay(`defaults.${DASHBOARD}.${feature} (in effect)`)}: ${settingsDisplay(on(defB, true))} → ${settingsDisplay(on(defA, true))}${who}`);
+    else if ((on(defA, unset) && !on(defB, unset)) || inheritors.length) out.unshift(`${settingsDisplay(`defaults.${DASHBOARD}.${feature} (in effect)`)}: ${settingsDisplay(on(defB, unset))} → ${settingsDisplay(on(defA, unset))}${who}`);
   }
   return out;
 }

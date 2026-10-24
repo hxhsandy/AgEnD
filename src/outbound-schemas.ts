@@ -286,6 +286,23 @@ export const ProposeWebModArgs = z.object({
 export const RemoveWebWidgetArgs = z.object({
   slot: z.enum(["chat_header", "details"]).optional().describe("The slot to empty (default both). A widget a person placed stays."),
 });
+// #2578: your own character in Fleet → Org chart → Office — what you can see, and where it walks, what it says.
+// The fleet checks the rest (one go target, something to do, the office's spots): web-office-acts.ts.
+export const OfficeViewArgs = z.object({
+  office: z.string().min(1).max(40).optional().describe("One office's id (default: every stored office you are in)"),
+}).strict();
+export const OfficeSetArgs = z.object({
+  office: z.string().min(1).max(40).optional().describe("The office's id; needed only when you are in more than one (office_view lists them)"),
+  go: z.object({
+    seat: z.string().min(1).max(80).optional().describe("A seat as \"area:index\", as office_view lists it (e.g. \"desks:0\")"),
+    waypoint: z.string().min(1).max(64).optional().describe("A waypoint's id, as office_view lists it"),
+    person: z.string().min(1).max(200).optional().describe("Walk over to a member of the same office (an instance name)"),
+  }).strict().optional().describe("Where to walk: exactly one of seat, waypoint or person"),
+  say: z.string().min(1).max(40).optional().describe("A speech bubble over your character: 1..40 characters, one line"),
+  pose: z.enum(["idle", "working", "needs", "paused"]).optional().describe("How your character is drawn meanwhile"),
+  seconds: z.number().min(5).max(120).optional().describe("How long it lasts, 5..120 (default 30); then the dashboard puts you back by your state"),
+  clear: z.boolean().optional().describe("true: end your current act now (alone, with nothing else)"),
+}).strict();
 
 // #1629 CW1 effects: own caller only. Internal upload bytes are never public MCP args.
 export const UploadWebEffectArgs = z.object({

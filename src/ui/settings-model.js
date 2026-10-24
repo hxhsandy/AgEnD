@@ -40,13 +40,19 @@ export function changedFields(next, baseline) {
 
 /**
  * The dashboard features an agent may use (dashboard-permissions.ts): each "inherit" (the fleet default: `defaults.dashboard`,
- * else allowed), "on" or "off". The patch names only the features that changed: null follows the default again.
+ * else allowed — off for OFF_UNLESS_ON, `office`), "on" or "off". The patch names only the features that changed: null
+ * follows the default again.
  */
-export const DASHBOARD_FEATURES = ["appearance", "task_board", "web_settings"];
+export const DASHBOARD_FEATURES = ["appearance", "task_board", "web_settings", "office"];
+/** #2578: the features a person switches on — unset is off (dashboard-permissions.ts OFF_UNLESS_ON). */
+export const OFF_UNLESS_ON = ["office"];
 export const DASHBOARD_CHOICES = ["inherit", "on", "off"];
 const dashboardOf = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
-/** What a feature is for an agent with no setting of its own: the default's, else allowed. */
-export const dashboardDefault = (defaults, feature) => dashboardOf(defaults && defaults.dashboard)[feature] !== false;
+/** What a feature is for an agent with no setting of its own: the default's, else allowed (off for OFF_UNLESS_ON). */
+export const dashboardDefault = (defaults, feature) => {
+  const v = dashboardOf(defaults && defaults.dashboard)[feature];
+  return OFF_UNLESS_ON.includes(feature) ? v === true : v !== false;
+};
 export function dashboardForm(inst) {
   const own = dashboardOf(inst.dashboard);
   return Object.fromEntries(DASHBOARD_FEATURES.map((f) => [f, own[f] === true ? "on" : own[f] === false ? "off" : "inherit"]));

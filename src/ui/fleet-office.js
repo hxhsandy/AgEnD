@@ -1,6 +1,6 @@
 // Fleet → Org chart → Office: the fleet as a small pixel office, the third view beside Canvas and List
 // (fleet-canvas.js). The same data as theirs: the structure from /ui/org (buildOrgView), the live state from the app
-// store, the traffic from fleet-traffic.js's store — nothing new is read but the offices people made (/ui/offices).
+// store, the traffic from fleet-traffic.js's store — nothing new is read but the offices people made (/ui/offices) and what agents do in them (/ui/office-acts, #2578).
 //
 // - Two layouts, by skin. Desks (the built-in "pixel" skin, the default): each team is a room, each member a desk with a
 //   name tag; General and the instances in no team share the lobby; a grid that wraps at the stage's width
@@ -63,7 +63,8 @@ import { AUTO_ID, LOBBY, autoLayout, backingScale, coatOf, createFlights, custom
   officePose, officeRooms, signOf, workOn } from "./fleet-office-model.js";
 import { BUILT_IN_SKINS, CHAR_DEPTH, DEFAULT_PAL, bubbleBox, loadPackSkin, modeOf, skinFor, tagBox } from "./fleet-office-skin.js";
 import { CALLING, activeFurniture, bubbleAt, bubbleRank, NIGHT, WANDER, createMail, createWalkers, isNight, linesFor, personAt, placeBubbles, thinBubbles, walkTargets, zonesLayout } from "./fleet-office-zones.js";
-import { createOfficeStore } from "./fleet-office-store.js";
+import { actsOk, createOfficeStore } from "./fleet-office-store.js";
+import { POLL_MS } from "./fleet-traffic.js";
 import { OfficeEditor, officeForSave } from "./fleet-office-editor.js";
 import { LayoutEditor, handlesOf } from "./fleet-office-layout.js";
 import { applyOverrides } from "./fleet-office-pack.js";
@@ -230,6 +231,28 @@ export function ghostsOf(pack, people = []) {
 }
 /** All offices: the tile `name` is drawn in ({ tile, skin }), or null. */
 const senderTile = (parts, name) => (name ? parts.find((p) => desksOf(p.L).some((d) => d.node.name === name)) || null : null);
+/**
+ * Whether an agent's act (office_set, #2578) holds now: not past its end; its person not called (a call wins) nor
+ * asleep; and no new work begun since — `seen` (kept by the page) remembers each act whose person was seen not working,
+ * so working again after that (or after acting while idle) is new work, and the act gives way. The turn it acted in
+ * (working at the time) keeps it.
+ */
+export function actLive(a, state, at = Date.now(), seen = null) {
+  if (!a || at >= a.until || CALLING.has(state) || ASLEEP.has(state)) return false;
+  if (!seen) return true;
+  const k = `${a.instance}@${a.since ?? a.until}`;
+  if (state !== "working") { seen.add(k); return true; }
+  return !seen.has(k) && (!a.state || a.state === "working");
+}
+/** How far beside the person an agent going to them stands. */
+const ACT_BESIDE = 48;
+/** Where an agent's act sends it at `t`: its point, beside the person it goes to (where they are now), or null. */
+export function actTarget(a, L, walkers, t) {
+  if (a.x !== undefined) return { x: a.x, y: a.y };
+  if (!a.person) return null;
+  const d = desksOf(L).find((x) => x.node.name === a.person), there = (walkers && walkers.at(a.person, t)) || (d && d.seat);
+  return there ? { x: Math.round(Math.min(L.width, there.x + ACT_BESIDE)), y: Math.round(there.y) } : null;
+}
 /** The back and front layers: pictures of the scene at `ls` layer px per logical unit (`tagsOff`: no name tags but the Find box's matches). */
 function paintLayers(p, env, ls, tagsOff = false) {
   const { L, skin, zones, looks, all } = p;
@@ -297,7 +320,9 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
       if (f) { sk.drawFurniture(ctx, f, f.asleep || p.active.has(f.id), ms, env); continue; }
       if (g) { ctx.save(); ctx.globalAlpha = GHOST_ALPHA; sk.drawCharacter(ctx, { x: g.x - 44, y: g.y - 53, w: 88, h: 53, seat: g }, g.look, 0, env); ctx.restore(); continue; }
       const box = { ...q.d, x: q.at.x - 44, y: q.at.y - 53, w: 88, h: 53, seat: { x: q.at.x, y: q.at.y } };
-      const look = q.at.walking ? { ...q.look, pose: "walk", heading: q.at.heading } : q.look;
+      // An agent's own pose (office_set, #2578) while its act lasts and nothing calls it; walking is walking.
+      const act = p.acts && p.acts.get(q.d.node.name), posed = actLive(act, q.look.state, Date.now(), p.actSeen) && act.pose ? { ...q.look, pose: officePose(act.pose) } : q.look;
+      const look = q.at.walking ? { ...q.look, pose: "walk", heading: q.at.heading } : posed;
       sk.drawCharacter(ctx, box, look, ms, env);
       if (!q.at.walking) speakers.push({ look: q.look, ...speakerAt(sk, look, q.at), area: q.d.area });
     }
@@ -330,8 +355,10 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
   for (const sp of speakers) {
     if (sp.look.dim || sp.look.pose === "away") continue;
     const says = sp.look.night ? "paused" : sp.look.state;                // asleep at night: its "Zzz…" lines
-    const b = bubbleAt(sp.look.name, says, ms, linesFor(says, p.lang, sk.pack, p.lines));
-    if (b) bubbles.push({ key: sp.look.name, area: sp.area, state: sp.look.state, calling: CALLING.has(sp.look.state), rank: bubbleRank(sp.look.state), shown: b.shown,
+    // What an agent says itself (office_set, #2578): whole, kept over the area's thinning like a call.
+    const act = p.acts && p.acts.get(sp.look.name), own = actLive(act, sp.look.state, Date.now(), p.actSeen) && act.say ? act.say : null;
+    const b = own ? { text: own, shown: [...own].length } : bubbleAt(sp.look.name, says, ms, linesFor(says, p.lang, sk.pack, p.lines));
+    if (b) bubbles.push({ key: sp.look.name, area: sp.area, state: sp.look.state, calling: CALLING.has(sp.look.state), rank: own ? 0 : bubbleRank(sp.look.state), shown: b.shown,
       box: bubbleBox(ctx, sp.x, sp.y, b.text), tail: { x: sp.x, y: sp.y }, sp, b });
   }
   // A crowded area speaks less (thinBubbles: calls, then work, a few at most); no bubble covers a name tag. `defer`
@@ -446,6 +473,23 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     const sub = appStore.get().streamOn;
     const off = sub ? lease.hold(sub("offices", () => { void read(); })) : null;
     return () => { if (off) off(); };
+  }, [lease, store]);
+  // #2578: what agents do here by their own hand (office_set) — on opening, then as the stream brings it.
+  // A read the stream overtook is dropped (it is older); read again when the stream comes back, and — with no live stream
+  // (the public link, or a stream polling) — every POLL_MS while the page is shown.
+  const [acts, setActs] = useState([]);
+  const actSeen = useRef(new Set());
+  useEffect(() => {
+    if (!lease) return undefined;
+    let heard = 0;
+    const read = async () => { const at = heard, d = await store.acts(); if (lease.current() && d && at === heard) setActs(d); };
+    void read();
+    const sub = appStore.get().streamOn;
+    const polled = () => globalThis.document?.body?.dataset?.webTransport === "poll" || appStore.get().connection === "polling";
+    const offs = sub ? [lease.hold(sub("office_acts", (d) => { heard++; if (d && Array.isArray(d.acts)) setActs(actsOk(d.acts, d.now)); else void read(); })),
+      lease.hold(sub("connection", (c) => { if (c === "live") void read(); }))] : [];
+    const h = lease.interval(() => { if (polled() && !globalThis.document?.hidden) void read(); }, POLL_MS);
+    return () => { for (const off of offs) off(); lease.clear(h); };
   }, [lease, store]);
   // The skin packs: on opening, and again whenever the stream says one was uploaded or deleted.
   useEffect(() => {
@@ -573,6 +617,8 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   const looks = useMemo(() => looksOf(L, workOn(traffic), q, mode, zones), [L, traffic, q, mode, themeRev]);
   // #2564: what comes in from other offices — one office's and style's own: a letter's door and drop are that layout's,
   // so another office (or style) starts with none (one shown meanwhile is not carried over to a different room).
+  // #2578: the acts of the people in this stored zones office (by name); none elsewhere.
+  const actsHere = useMemo(() => new Map(zones && custom && !overview ? acts.filter((a) => a.office === custom.id).map((a) => [a.instance, a]) : []), [acts, zones, custom, overview]);
   const mailKey = `${custom ? custom.id : AUTO_ID}@${baseSkin.id}`;
   const mail = useMemo(() => { const m = createMail(); m.prime(traffic || []); return m; }, [mailKey]);
   useEffect(() => { flights.sync(traffic || [], now(), still); if (zones && !overview && mail.sync(traffic || [], now(), L, still)) loop.current?.wake(); }, [traffic, mail]);
@@ -584,6 +630,7 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     if (!zones || overview) return undefined;
     const go = () => {
       const t = now(), to = walkTargets(desksOf(L), L, t, wander);
+      for (const d of desksOf(L)) { const a = actsHere.get(d.node.name), at = actLive(a, d.node.state, Date.now(), actSeen.current) ? actTarget(a, L, walkers, t) : null; if (at) to.set(d.node.name, at); }
       for (const [name, at] of mail.targets(L, t)) to.set(name, at);
       walkers.sync(to, t, L, still); loop.current?.wake();
     };
@@ -591,7 +638,7 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     if (still) return undefined;
     const h = setInterval(go, WANDER.TICK);
     return () => clearInterval(h);
-  }, [L, wander, mail]);
+  }, [L, wander, mail, actsHere]);
   // …and in each tile on a zones style; the traffic within a tile is its own, between tiles the overview's.
   useEffect(() => {
     for (const tl of tiles) if (tl.zones) tl.walkers.sync(new Map(desksOf(tl.L).map((d) => [d.node.name, d.seat])), now(), tl.L, still);
@@ -837,10 +884,10 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
       const parts = tiles.map((tl, i) => ({ ...partOf(tl.L, tileLooks[i], tl.skin, tl.zones, tl.walkers, tl.flights), night, key: tl.key, prefix: tl.prefix, tile: arranged.tiles[i] }));
       scene.current = { ...base, overview: true, parts, lay: arranged };
     } else {
-      scene.current = { ...base, overview: false, part: { ...partOf(L, looks, skin, zones, walkers, flights), ghosts, night, mail } };
+      scene.current = { ...base, overview: false, part: { ...partOf(L, looks, skin, zones, walkers, flights), ghosts, night, mail, acts: actsHere, actSeen: actSeen.current } };
     }
     if (still) draw(0); else loop.current?.wake();
-  }, [L, looks, skin, pal, size.w, size.h, ratio, matte, overview, tiles, tileLooks, arranged, ghosts, night, mail]);
+  }, [L, looks, skin, pal, size.w, size.h, ratio, matte, overview, tiles, tileLooks, arranged, ghosts, night, mail, actsHere]);
 
   /** One frame at `ms` (0: still); whether anything is moving (in the air, or someone walking). */
   function draw(ms) {

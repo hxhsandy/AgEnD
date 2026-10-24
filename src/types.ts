@@ -189,8 +189,9 @@ export interface InstanceConfig {
   board_cards_at_once?: number;
   /**
    * Which dashboard features this instance may use, on top of its `tool_set` (dashboard-permissions.ts): `appearance`
-   * (its own look: theme, pictures, widgets, ambient, effects, mod proposals), `task_board` (the `task` tool) and
-   * `web_settings` (Settings → Web appearance for the person). `false` switches one off; unset allows. `defaults.dashboard`
+   * (its own look: theme, pictures, widgets, ambient, effects, mod proposals), `task_board` (the `task` tool),
+   * `web_settings` (Settings → Web appearance for the person) and `office` (its character in the Office view: office_view,
+   * office_set — #2578). `false` switches one off; unset allows, except `office`: off unless set true. `defaults.dashboard`
    * sets it for every instance and merges key by key with an instance's own. The fleet reads it at each tool call; the
    * daemon keeps it current, and an agent's tool menu follows from its next start.
    */

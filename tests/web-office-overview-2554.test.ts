@@ -322,6 +322,28 @@ describe("All offices on the page", () => {
       expect(texts.some((a: any) => a[0] === "lamp")).toBe(false);
     } finally { (globalThis as any).Image = was; }
   });
+  it("#2578: an agent's own line (office_set) is said in its office, whole; another office's act is not shown here", async () => {
+    const was = (globalThis as any).Image;
+    (globalThis as any).Image = class { onload: any = null; onerror: any = null; u = ""; set src(u: string) { this.u = u; setTimeout(() => this.onload && this.onload(), 0); } };
+    const on: Record<string, (x: any) => void> = {};
+    try {
+      skins = { rev: "r", packs: [{ id: "clinic-sample", name: "Clinic", sha: "b".repeat(32) }] };   // its own sha: packs are kept per id and sha
+      manifestAnswer = { manifest: MANIFEST(), files: FILES };
+      offices = { rev: 2, offices: [{ id: "front", name: "Front desk", skin: "clinic-sample", members: ["atlas"] }, { id: "lab", name: "Lab", skin: "clinic-sample", members: ["quill"] }] };
+      app.appStore.set({ ...STORE, streamOn: (name: string, cb: (x: any) => void) => { on[name] = cb; return () => {}; } });
+      localStorage.setItem("agend_org_office", "front");
+      await office(); await settle(8);
+      const said = (line: string) => lastFrame().some((c: any) => c[0] === "fillText" && c[1][0] === line);
+      on.office_acts({ acts: [{ instance: "atlas", office: "front", until: Date.now() + 60_000, since: Date.now(), state: "idle", say: "Tea, anyone?" },
+        { instance: "quill", office: "lab", until: Date.now() + 60_000, since: Date.now(), state: "idle", say: "Not here" }] });
+      await settle(6);
+      expect(said("Tea, anyone?")).toBe(true);
+      expect(said("Not here")).toBe(false);
+      on.office_acts({ acts: [] });                                          // cleared: the page's own lines again
+      await settle(6);
+      expect(said("Tea, anyone?")).toBe(false);
+    } finally { (globalThis as any).Image = was; }
+  });
   it("the lobby tile: whoever is in no office, in the whole fleet's style; off by its toggle (kept)", async () => {
     offices = { rev: 2, offices: TWO };
     localStorage.setItem("agend_org_office", "*all");

@@ -30,6 +30,20 @@ export function skinListOk(d) {
 }
 
 /** `fetch`: the caller's (a lease's, so an answer after the person moved on is dropped); `storage`: default localStorage. */
+/**
+ * Agents' acts as the host sends them (GET /ui/office-acts, the `office_acts` event), checked: the well-formed ones.
+ * `now`: the host's clock when it sent them — each end is moved onto this page's clock (they may differ).
+ */
+export function actsOk(list, now) {
+  const skew = typeof now === "number" && Number.isFinite(now) ? now - Date.now() : 0;
+  const str = (v) => typeof v === "string" && v.length > 0 && v.length <= 200, num = (v) => typeof v === "number" && Number.isFinite(v);
+  return (Array.isArray(list) ? list : []).filter((a) => a && typeof a === "object" && str(a.instance) && str(a.office) && num(a.until)
+    && (a.x === undefined || num(a.x)) && (a.y === undefined || num(a.y)) && (a.person === undefined || str(a.person))
+    && (a.say === undefined || (typeof a.say === "string" && a.say.length <= 40)) && (a.pose === undefined || ["idle", "working", "needs", "paused"].includes(a.pose)))
+    .map((a) => ({ instance: a.instance, office: a.office, until: a.until - skew, ...(num(a.since) ? { since: a.since } : {}), ...(str(a.state) ? { state: a.state } : {}),
+      ...(num(a.x) && num(a.y) ? { x: a.x, y: a.y } : {}),
+      ...(a.person ? { person: a.person } : {}), ...(a.say ? { say: a.say } : {}), ...(a.pose ? { pose: a.pose } : {}) }));
+}
 export function createOfficeStore({ fetch: get = globalThis.fetch, storage } = {}) {
   const st = () => { try { return storage || globalThis.localStorage || null; } catch { return null; } };
   const read = (k) => { try { const s = st(); return s ? s.getItem(k) : null; } catch { return null; } };
@@ -56,6 +70,15 @@ export function createOfficeStore({ fetch: get = globalThis.fetch, storage } = {
         const d = await r.json().catch(() => ({}));
         return r.ok ? { ok: true, rev: d.rev, offices: officesOk(d.offices) } : { ok: false, status: r.status, error: d.error || "offices_failed" };
       } catch { return { ok: false, status: 0, error: "offices_failed" }; }
+    },
+    /** #2578: what agents are doing in the offices now (office_set): their acts, or null when they could not be read. */
+    async acts() {
+      try {
+        const r = await get("/ui/office-acts", { method: "GET", headers });
+        if (!r || !r.ok) return null;
+        const d = await r.json();
+        return actsOk(d && d.acts, d && d.now);
+      } catch { return null; }
     },
     /** The skin packs the host keeps: { rev, packs: [{ id, name, sha }] }; null when they could not be read. */
     async skins() {

@@ -93,10 +93,11 @@ async function main(): Promise<void> {
   // #1629 r4 §1: `appearance` (get) and `appearance preview [light|dark]`.
   // r4-4: `widget set|data <slot> …` and `widget remove [slot]` (data is set_web_widget with values only).
   // #2117: `ambient set '<json spec>'` and `ambient clear [loop|click]`.
+  // #2578: `office view [office]` and `office set '<json>'` (office_set's arguments).
   const op = first === "theme" ? `theme-${given[0] ?? ""}` : first === "appearance" ? (given[0] === "preview" ? "appearance-preview" : given.length ? `appearance-${given[0]}` : "appearance-get")
     : first === "effect" ? `effect-${given[0] ?? ""}` : first === "widget" ? (given[0] === "data" ? "widget-set" : `widget-${given[0] ?? ""}`)
-    : first === "mod" ? `mod-${given[0] ?? ""}` : first === "ambient" ? `ambient-${given[0] ?? ""}` : first;
-  const rest = first === "theme" || first === "widget" || first === "effect" || first === "mod" || first === "ambient" || (first === "appearance" && given.length) ? given.slice(1) : given;
+    : first === "mod" ? `mod-${given[0] ?? ""}` : first === "ambient" ? `ambient-${given[0] ?? ""}` : first === "office" ? `office-${given[0] ?? "view"}` : first;
+  const rest = first === "theme" || first === "widget" || first === "effect" || first === "mod" || first === "ambient" || first === "office" || (first === "appearance" && given.length) ? given.slice(1) : given;
   const widgetData = first === "widget" && given[0] === "data";
   // #2163: `skill [name]` reads a skill AgEnD ships, locally (no fleet, no instance needed): the list, or one whole.
   if (first === "skill") {
@@ -292,6 +293,17 @@ async function main(): Promise<void> {
       if (!rest[0]) die("Usage: agend-agent ambient set '<json spec>'");
       try { v = JSON.parse(rest[0]); } catch { die("ambient: the spec is not JSON"); }
       if (!v || typeof v !== "object" || Array.isArray(v)) die("ambient: the spec must be a JSON object");
+      args = v as Record<string, unknown>;
+      break;
+    }
+    case "office-view":
+      args = rest[0] ? { office: rest[0] } : {};
+      break;
+    case "office-set": {
+      let v: unknown;
+      if (!rest[0]) die("Usage: agend-agent office set '<json>'   e.g. '{\"go\":{\"seat\":\"desks:0\"},\"say\":\"On it\"}'");
+      try { v = JSON.parse(rest[0]); } catch { die("office: the arguments are not JSON"); }
+      if (!v || typeof v !== "object" || Array.isArray(v)) die("office: the arguments must be a JSON object");
       args = v as Record<string, unknown>;
       break;
     }

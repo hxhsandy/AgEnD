@@ -1012,7 +1012,7 @@ function General({ ctx, part = "all" }) {
       backend: f.backend, model: f.model || undefined, locale: f.locale || null, auto_pause_after: num(f.auto),
       agent_mode: f.agent_mode, tool_set: f.tool_set || null, tool_progress: f.tool_progress, cross_instance_visibility: f.visibility,
       reply_completion_guard: f.reply, log_level: f.log_level,
-      // The dashboard features every agent may use unless its own setting says otherwise. All three go, because the write
+      // The dashboard features every agent may use unless its own setting says otherwise. All of them go, because the write
       // to the fleet's defaults merges top-level keys only (`dashboard` is replaced whole): the untouched ones as saved.
       dashboard: Object.fromEntries(DASHBOARD_FEATURES.map((k) => [k, f[`dash_${k}`]])),
       hang_detector: { enabled: f.hangOn, timeout_minutes: num(f.hang) },

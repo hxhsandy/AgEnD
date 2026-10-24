@@ -121,6 +121,8 @@ const WEB_THEME_IPC: Readonly<Record<string, string>> = Object.freeze({
   apply_web_effect: "fleet_apply_web_effect",
   remove_web_effect: "fleet_remove_web_effect",
   delete_web_effect: "fleet_delete_web_effect",
+  // #2578: its own character in the Office view — the args as they are (the fleet checks them).
+  office_view: "fleet_office_view", office_set: "fleet_office_set",
 });
 /** The largest picture any slot may take (a card slot's ceiling; the fleet checks the limit in force): read no more. */
 const WEB_THEME_ASSET_MAX_BYTES = ASSET_UPLOAD_MAX_BYTES;

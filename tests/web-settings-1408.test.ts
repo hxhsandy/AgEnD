@@ -266,8 +266,9 @@ describe("#2347: one save model — an edit is unsaved at once, the bar's Save w
     const first = puts().length;
     save().click(); await settle(2);
     await vi.waitFor(() => expect(puts().length).toBe(first + 1), { timeout: 6000 });
-    // All three go (the defaults write replaces `dashboard` whole): the edited one as edited, the others as now saved.
-    expect([before, back, puts().at(-1)]).toEqual([[true, false, true], [false, false, false], { dashboard: { appearance: false, task_board: false, web_settings: false } }]);
+    // All of them go (the defaults write replaces `dashboard` whole): the edited one as edited, the others as now saved
+    // (office, unset, is off: off unless set true, #2578).
+    expect([before, back, puts().at(-1)]).toEqual([[true, false, true, false], [false, false, false, false], { dashboard: { appearance: false, task_board: false, web_settings: false, office: false } }]);
   });
   it("after a Save that went through, the drafts go: the form shows what is saved, unmarked", async () => {
     let saved = false;

@@ -25,6 +25,7 @@ import { EFFECT_WIRE_LIMIT } from "./web-effect-upload.js";
 import type { ThemeStore } from "./web-theme-store.js";
 import type { OfficeStore, OfficeWriteLimiter } from "./web-office-store.js";
 import { SKIN_WIRE_BYTES, type OfficeSkinStore } from "./web-office-skins.js";
+import type { OfficeActs } from "./web-office-acts.js";
 import type { WebAppearance } from "./web-appearance.js";
 import { gatewayRequestContext } from "./web-request-context.js";
 import { crossInstanceVisibility } from "./cross-instance-notice.js";
@@ -431,6 +432,8 @@ export interface WebApiContext {
   readonly officeStore?: OfficeStore;
   /** How often a person may save the offices (absent: no limit, as in a test without it). */
   readonly officeWrites?: OfficeWriteLimiter;
+  /** #2578: the agents' live acts in the Office view (office_set); absent: /ui/office-acts is not offered. */
+  readonly officeActs?: Pick<OfficeActs, "live">;
   /** #2513: the Office view's uploaded skin packs (web-office-skins/); absent: /ui/office-skins is not offered. */
   readonly officeSkins?: OfficeSkinStore;
   /** How often a person may upload or delete a skin pack (absent: no limit). */
@@ -1857,6 +1860,15 @@ export function handleWebRequest(
       ctx.logger.error({ err: (err as Error).message }, "Saving offices failed");
       try { json(res, 500, { error: "Saving offices failed" }); } catch { /* already answered */ }
     });
+    return true;
+  }
+
+  // #2578: GET /ui/office-acts { acts }: the agents' live acts (office_set), read as the offices are (the public link
+  // too, which has no stream); every change also comes as `office_acts` on the stream. Nothing here writes one.
+  if (method === "GET" && path === "/ui/office-acts") {
+    const acts = ctx.officeActs;
+    if (!acts) { json(res, 404, { error: "Office acts are not kept on this fleet" }); return true; }
+    json(res, 200, { acts: acts.live(), now: Date.now() });              // now: the host's clock, for the page's offset
     return true;
   }
 
