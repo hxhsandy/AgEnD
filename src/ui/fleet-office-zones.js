@@ -3,7 +3,8 @@
 // changes it walks (along the pack's waypoints) to the new area. Pure — fleet-office.js draws it. Also here: what a
 // character says in its speech bubble, and which furniture is active.
 import { LOGICAL, own } from "./fleet-office-pack.js";
-import { nameHash, pathLength, along, routeVia } from "./fleet-office-model.js";
+import { FLIGHT, nameHash, pathLength, along, routeVia } from "./fleet-office-model.js";
+import { hue } from "./fleet-traffic.js";
 
 /** The area for a state: the pack's own, else its "default", else its first area. */
 export function zoneOf(pack, state) {
@@ -133,6 +134,98 @@ export function walkTargets(desks, graph, t, wander = true) {
     used.add(k);
     return [d.node.name, p];
   }));
+}
+
+// ── Mail from another office (#2564) ──
+
+/**
+ * Something sent to a person here by someone who is not (in another office, or in none): it flies in at the door and
+ * lands on the floor near the middle of the room; the person walks over, picks it up and walks back to their seat.
+ * MAX_WAIT: a letter no one picks up is gone after it; GAP: letters waiting side by side; SEARCH: how far from the
+ * middle a landing spot is looked for when no waypoint will do; ASLEEP: who does not get up
+ * for it (it waits for them to wake, up to MAX_WAIT).
+ */
+export const MAIL = { MAX_WAIT: 60000, GAP: 16, SEARCH: 320, ASLEEP: new Set(["paused", "stopped"]), MAX: 20 };
+/**
+ * Where the `n`th waiting letter lands: `n` GAPs along from the waypoint nearest the room's middle — the nearest whose
+ * spot (offset included) no seat of the office is on, taken or free (someone may sit there any moment; #2561 likewise);
+ * with none, the nearest point round the middle (rings GAP·2 apart, inside the room) that no seat is on; with none of
+ * those either, null — the letter is not delivered here (never on a seat).
+ */
+export function dropPoint(L, n = 0) {
+  const mid = { x: L.width / 2, y: L.height * 0.55 }, d = (p, q) => Math.hypot(p.x - q.x, p.y - q.y);
+  const seats = [...Object.values(L.areas || {}).flatMap((a) => a.seats || []), ...desksIn(L).map((q) => q.seat)];
+  const onSeat = (p) => seats.some((q) => d(p, q) < 4);
+  const spots = (L.waypoints || []).map((w) => ({ x: Math.round(w.x + n * MAIL.GAP), y: Math.round(w.y), from: w }))
+    .filter((p) => !onSeat(p.from) && !onSeat(p)).sort((p, q) => d(p.from, mid) - d(q.from, mid));
+  if (spots.length) return { x: spots[0].x, y: spots[0].y };
+  const inRoom = (p) => p.x >= 0 && p.y >= 0 && p.x <= L.width && p.y <= L.height;
+  for (let r = 0; r <= MAIL.SEARCH; r += 2 * MAIL.GAP) {
+    for (let k = 0, m = r ? 16 : 1; k < m; k++) {
+      const a = (2 * Math.PI * k) / m, p = { x: Math.round(mid.x + r * Math.cos(a) + n * MAIL.GAP), y: Math.round(mid.y + r * Math.sin(a)) };
+      if (inRoom(p) && !onSeat(p)) return p;
+    }
+  }
+  return null;
+}
+const desksIn = (L) => (L.rooms || []).flatMap((r) => r.desks || []).filter((d) => d.node);
+/**
+ * The letters of one office. `sync(items, now, L, still)`: each new traffic item to someone drawn here from someone
+ * who is not becomes a letter (none with reduced motion, nor for a stale delegation; a zones office only).
+ * `frame(now, L, walkers)` → what to draw, { id, hue, kind, from, x, y, t } (t: its flight, 0 on the floor), picking
+ * up the letters whose person stands on them, and dropping those gone too long or whose person left. `targets(L)`:
+ * name → where to walk to pick one up (the first waiting for them; none while they are asleep). `prime(items)`: mark as
+ * seen what was in the air before this office was shown (a new office's or style's mail starts empty). `size()`.
+ */
+export function createMail({ max = MAIL.MAX } = {}) {
+  const seen = new Set();
+  let letters = [];
+  const here = (L, name) => desksIn(L).find((d) => d.node.name === name) || null;
+  return {
+    sync(items, now, L, still = false) {
+      let started = 0;
+      for (const it of items || []) {
+        if (seen.has(it.id)) continue;
+        seen.add(it.id);
+        if (seen.size > 2000) seen.delete(seen.values().next().value);
+        if (still || it.phase === "stale" || !L || L.mode !== "zones" || !here(L, it.to) || here(L, it.from)) continue;
+        const drop = dropPoint(L, letters.filter((l) => l.to !== it.to).length % 4);
+        if (!drop) continue;                                          // nowhere off the seats: not delivered here
+        const pts = [{ x: L.door.x, y: L.door.y }, drop];
+        letters.push({ id: it.id, from: it.from, to: it.to, kind: it.kind, hue: hue(it.kind), start: now, drop, pts,
+          ms: Math.min(FLIGHT.MAX_MS, Math.max(FLIGHT.MIN_MS, pathLength(pts) / FLIGHT.SPEED)) });
+        started++;
+      }
+      if (letters.length > max) letters = letters.slice(letters.length - max);
+      return started;
+    },
+    frame(now, L, walkers) {
+      const out = [];
+      letters = letters.filter((l) => {
+        if (!here(L, l.to)) return false;
+        const t = (now - l.start) / l.ms;
+        if (t < 1) { if (t >= 0) { const p = along(l.pts, t); out.push({ id: l.id, hue: l.hue, kind: l.kind, from: l.from, x: p.x, y: p.y, t }); } return true; }
+        if (now - l.start - l.ms > MAIL.MAX_WAIT) return false;
+        const w = walkers && walkers.at(l.to, now);
+        if (w && !w.walking && Math.hypot(w.x - l.drop.x, w.y - l.drop.y) < 4) return false;   // picked up
+        out.push({ id: l.id, hue: l.hue, kind: l.kind, from: l.from, x: l.drop.x, y: l.drop.y, t: 0 });
+        return true;
+      });
+      return out;
+    },
+    targets(L, now) {
+      const out = new Map();
+      for (const l of letters) {
+        if (out.has(l.to) || now - l.start < l.ms) continue;
+        const d = here(L, l.to);
+        if (d && !MAIL.ASLEEP.has(d.node.state)) out.set(l.to, l.drop);
+      }
+      return out;
+    },
+    /** What is already in the traffic when this office's mail starts (#2564): seen, so it is not delivered again here. */
+    prime(items) { for (const it of items || []) seen.add(it.id); },
+    size: () => letters.length,
+  };
 }
 
 /**
