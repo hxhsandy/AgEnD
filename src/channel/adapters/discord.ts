@@ -23,6 +23,7 @@ import {
   PermissionFlagsBits,
   MessageFlags,
   MessageType,
+  MessageReferenceType,
   Events,
   Status,
   ActivityType,
@@ -628,7 +629,10 @@ export class DiscordAdapter extends EventEmitter implements ChannelAdapter {
       // limited to real attachments: ordinary URL auto-embeds must not become
       // downloads (the same policy as the outer message above).
       let replyToText: string | undefined, replyToAuthorId: string | undefined, replyToChain = false;
-      if (msg.reference?.messageId) {
+      // Discord specifies omitted type as Default; explicit Forward/unknown types never address.
+      // https://docs.discord.com/developers/resources/message#message-reference-structure
+      const replyReference = (msg.reference?.type === undefined || msg.reference.type === MessageReferenceType.Default) ? msg.reference : undefined;
+      if (replyReference?.messageId) {
         try {
           const ref = await msg.fetchReference();
           replyToText = ref.content || ref.embeds?.[0]?.description || undefined;
@@ -636,7 +640,7 @@ export class DiscordAdapter extends EventEmitter implements ChannelAdapter {
           // message itself answered a bot or this sender — then this is a chain of bots answering each other, not one
           // hop. Its own reply target: the user it pinged, else read once (a reply to a deleted message: not a chain).
           replyToAuthorId = ref.author?.id || undefined;
-          if (ref.reference?.messageId) {
+          if (ref.reference?.messageId && (ref.reference.type === undefined || ref.reference.type === MessageReferenceType.Default)) {
             let parent = ref.mentions?.repliedUser ?? null;
             if (!parent) { try { parent = (await ref.fetchReference()).author ?? null; } catch { parent = null; } }
             replyToChain = !!parent && (parent.bot === true || parent.id === userId);
@@ -703,7 +707,7 @@ export class DiscordAdapter extends EventEmitter implements ChannelAdapter {
         humanOriginalBody,
         humanOrigin,
         attachments: attachments.length > 0 ? attachments : undefined,
-        replyTo: msg.reference?.messageId ?? undefined,
+        replyTo: replyReference?.messageId ?? undefined,
         replyToText,
         ...(replyToAuthorId ? { replyToAuthorId } : {}),
         ...(replyToChain ? { replyToChain: true } : {}),
