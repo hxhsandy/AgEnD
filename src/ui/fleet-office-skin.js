@@ -542,7 +542,8 @@ export const BUILT_IN_SKINS = ["pixel", "studio"];
 export const skinFor = (id, packs = null) => SKINS.get(id) || (packs && packs.get(id)) || pixelSkin;
 
 const loaded = new Map();                                 // `${id}@${sha}` → Promise<OfficeSkin | null>
-const MAX_LOADED = 16;
+// Room for every pack the host keeps (web-office-skins.ts SKIN_LIMITS.packs) and a few replaced ones (each a new sha).
+const MAX_LOADED = 24;
 const defaultImage = (url) => new Promise((resolve) => {
   if (typeof Image !== "function") { resolve(null); return; }
   const im = new Image();
