@@ -139,7 +139,11 @@ export const npcKey = (f) => `furniture/${f.id}`;
  * (x, y), or a stroll near it as an idle person's (by npcKey) — none at `night` for one with a night place (asleep there). */
 export function walkTargets(desks, graph, t, wander = true, furniture = [], night = false) {
   // Every seat of the office (anyone's, taken or not: someone may sit down on it any moment), not only the ones in use.
-  const seats = [...Object.values(graph.areas || {}).flatMap((a) => a.seats || []), ...desks.map((d) => d.seat)], used = new Set();
+  // And each walking NPC's spot (#2596 review): its home, where it stands outside its stroll and goes back to whenever
+  // its stroll would collide, so nobody else's stroll may end there — no two walkers ever share a target.
+  const homes = wander ? furniture.filter((f) => f.walk && !(night && f.night)).map((f) => ({ x: f.x, y: f.y })) : [];
+  const seats = [...Object.values(graph.areas || {}).flatMap((a) => a.seats || []), ...desks.map((d) => d.seat), ...homes];
+  const used = new Set(homes.map((h) => `${h.x},${h.y}`));
   const stroll = (name, home) => {
     const p = wanderTarget(name, home, graph, t, seats), k = `${p.x},${p.y}`;
     if (p === home || used.has(k)) return home;

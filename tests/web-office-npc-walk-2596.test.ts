@@ -78,6 +78,32 @@ describe("walkTargets: an NPC strolls near its spot", () => {
   });
 });
 
+describe("walkTargets: an NPC's spot is its own (#2596 review)", () => {
+  const keeper = { id: "keeper", x: 300, y: 300, walk: { walk: STRIP("k.png") }, night: null };
+  const alice = { node: { name: "alice", state: "idle" }, seat: { x: 212, y: 240 } };
+  const ts = Array.from({ length: 80 }, (_, i) => i * 500);   // one PERIOD
+  const targets = (waypoints: any[], t: number) => Z.walkTargets([alice], { waypoints, edges: [], areas: {} }, t, true, [keeper]);
+  it("a waypoint on the keeper's spot: Alice never strolls onto it, and the two never share a target (Prism's case, t=3000)", () => {
+    const on = [{ id: "w", x: 300, y: 300 }];
+    for (const t of [3000, ...ts]) {
+      const m = targets(on, t), a = m.get("alice"), k = m.get("furniture/keeper");
+      expect(`${a.x},${a.y}`).not.toBe("300,300");
+      expect(`${a.x},${a.y}`).not.toBe(`${k.x},${k.y}`);
+    }
+  });
+  it("control: a waypoint off its spot is still strolled to, by each in turn, never by both at once", () => {
+    const off = [{ id: "w", x: 400, y: 300 }];
+    const seen = { alice: false, keeper: false };
+    for (const t of ts) {
+      const m = targets(off, t), a = m.get("alice"), k = m.get("furniture/keeper");
+      if (a.x === 400) seen.alice = true;
+      if (k.x === 400) seen.keeper = true;
+      expect(`${a.x},${a.y}`).not.toBe(`${k.x},${k.y}`);
+    }
+    expect(seen.alice || seen.keeper).toBe(true);
+  });
+});
+
 describe("drawn where it walks, by its walk strip", () => {
   const walk = { walk: STRIP("w.png"), walkDown: STRIP("d.png"), walkUp: STRIP("u.png"), walkSide: STRIP("s.png") };
   it("strollFurniture: moved to its walker, walking with the heading; asleep or no walker: where it is", () => {
