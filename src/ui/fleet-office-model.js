@@ -318,7 +318,8 @@ const MAX_SEEN = 2000;
  * The items in the air. `sync(items, now, still)` takes fleet-traffic.js's store items: each new one (a message, a
  * delegation's work, its report coming back) starts one trip from its sender's desk to its receiver's; a delegation with
  * no report (stale) and anything seen before start none; `still` (reduced motion) starts none. `frame(now, L)` the
- * trips under way on layout L: { id, hue, kind, x, y, t }, finished ones dropped; a trip whose desks are not drawn goes.
+ * trips under way on layout L: { id, hue, kind, from, x, y, t } (from: who sent it — a pack can draw it as theirs),
+ * finished ones dropped; a trip whose desks are not drawn goes.
  */
 export function createFlights({ max = FLIGHT.MAX } = {}) {
   const seen = new Set();
@@ -344,7 +345,7 @@ export function createFlights({ max = FLIGHT.MAX } = {}) {
         if (!f.pts) return false;
         const t = (now - f.start) / f.ms;
         if (t >= 1) return false;
-        if (t >= 0) { const p = along(f.pts, t); out.push({ id: f.id, hue: f.hue, kind: f.kind, x: p.x, y: p.y, t }); }
+        if (t >= 0) { const p = along(f.pts, t); out.push({ id: f.id, hue: f.hue, kind: f.kind, from: f.from, x: p.x, y: p.y, t }); }
         return true;
       });
       return out;

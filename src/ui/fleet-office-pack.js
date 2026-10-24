@@ -47,6 +47,9 @@
 //                                                     walkSide, drawn as it is when moving right and mirrored when moving
 //                                                     left (so draw it facing right). A missing one is "walk", then idle
 //                                                     ("walk" itself is never mirrored)
+//                                                     A set may also have "prop": STRIP (#2562) — what its people
+//                                                     send: their messages, work and reports fly as it, in place of
+//                                                     the pack's "props" (a set without one: the pack's props)
 //     "byInstance": { "atlas": "fox" },               optional: an instance name → its character set
 //     "props": { "task": STRIP, "send": STRIP, "report": STRIP, "broadcast": STRIP },   optional traffic items
 //     "bubbles": { "en": { "working": ["On it."] }, "zh-TW": { … } }   optional: short lines per state (≤ 12 a state,
@@ -96,6 +99,8 @@ export const LOGICAL = { w: 1280, h: 720 };
 export const CHAR_DEPTH = 1000;
 export const PACK_STATES = ["needs", "crashed", "stuck", "working", "idle", "paused", "stopped", "missing"];
 const POSES = ["working", "idle", "paused", "needs", "walk", "walkDown", "walkUp", "walkSide"], PROPS = ["task", "send", "report", "broadcast"];
+/** A character set's strips: its poses, and what its people send (#2562). */
+const SET_STRIPS = [...POSES, "prop"];
 const BUILT_IN = new Set(["pixel", "studio"]);
 const ID = /^[A-Za-z0-9_-]{1,40}$/;
 const SRC = /^[A-Za-z0-9._/-]{1,200}$/;
@@ -217,7 +222,7 @@ export function checkSkinPack(x) {
     const characters = {};
     for (const [k, v] of Object.entries(sets)) {
       if (!nameOk(k)) throw new Refused(`characters.${k}`, "a name of letters, digits, _ or - (not an inherited one)");
-      characters[k] = strips(v, POSES, `characters.${k}`, scale);
+      characters[k] = strips(v, SET_STRIPS, `characters.${k}`, scale);
       if (!characters[k].idle) throw new Refused(`characters.${k}.idle`, "required");
     }
     if (!own(characters, "default")) throw new Refused("characters.default", "required");
