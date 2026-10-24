@@ -31,14 +31,19 @@
 //     "waypoints": [{ "id": "hall", "x": 640, "y": 600 }, …], "edges": [["hall", "east"], …],
 //                                                     optional: the walkable graph (else people walk straight)
 //     "furniture": [ { "id": "rack", "sprite": STRIP, "x": 1020, "y": 140, "depth": 2,
-//                      "activeWhen": "crashed", "activeSprite": STRIP } ],
+//                      "activeWhen": "crashed", "activeSprite": STRIP, "activeFor": "atlas", "loop": true, "label": "Rack" } ],
+//                                                     "label" (#2574): a name tag under it, like a person's
+//                                                     (an NPC drawn as furniture)
 //                                                     drawn by depth: below 1000 under the people, 1000 and up over
 //                                                     them; "depth": "y" (the string) sorts it among the people by base
 //                                                     y — its anchor's y against each person's feet: someone whose feet
 //                                                     are lower down (a greater y; a tie too) is drawn after it, in
 //                                                     front. (x, y) is where the strip's anchor goes. `activeWhen` (a
 //                                                     state, or a list): while anyone shown is in it, the item plays its
-//                                                     strip (or `activeSprite`); otherwise it holds the first frame
+//                                                     strip (or `activeSprite`); otherwise it holds the first frame —
+//                                                     or, with "loop": true (#2570), plays its strip all along.
+//                                                     "activeFor" (an instance's name, or a list): only their state
+//                                                     counts, not anyone's (a room several people take turns in)
 //     "characters": { "default": { "working": STRIP, "idle": STRIP, "paused": STRIP, "needs": STRIP, "walk": STRIP,
 //                                  "walkDown": STRIP, "walkUp": STRIP, "walkSide": STRIP },
 //                     "fox": { … } },                 "default" with at least "idle" is required; a missing pose is idle.
@@ -47,6 +52,9 @@
 //                                                     walkSide, drawn as it is when moving right and mirrored when moving
 //                                                     left (so draw it facing right). A missing one is "walk", then idle
 //                                                     ("walk" itself is never mirrored)
+//                                                     A set may also have "prop": STRIP (#2562) — what its people
+//                                                     send: their messages, work and reports fly as it, in place of
+//                                                     the pack's "props" (a set without one: the pack's props)
 //     "byInstance": { "atlas": "fox" },               optional: an instance name → its character set
 //     "props": { "task": STRIP, "send": STRIP, "report": STRIP, "broadcast": STRIP },   optional traffic items
 //     "bubbles": { "en": { "working": ["On it."] }, "zh-TW": { … } }   optional: short lines per state (≤ 12 a state,
@@ -96,6 +104,8 @@ export const LOGICAL = { w: 1280, h: 720 };
 export const CHAR_DEPTH = 1000;
 export const PACK_STATES = ["needs", "crashed", "stuck", "working", "idle", "paused", "stopped", "missing"];
 const POSES = ["working", "idle", "paused", "needs", "walk", "walkDown", "walkUp", "walkSide"], PROPS = ["task", "send", "report", "broadcast"];
+/** A character set's strips: its poses, and what its people send (#2562). */
+const SET_STRIPS = [...POSES, "prop"];
 const BUILT_IN = new Set(["pixel", "studio"]);
 const ID = /^[A-Za-z0-9_-]{1,40}$/;
 const SRC = /^[A-Za-z0-9._/-]{1,200}$/;
@@ -137,6 +147,11 @@ export function checkStrip(v, at = "strip", scale = 2) {
   const dw = dw0 ?? (dh0 !== null ? (dh0 * w) / h : w * scale), dh = dh0 ?? (dw0 !== null ? (dw0 * h) / w : h * scale);
   return { src: src(v.src, `${at}.src`), frames: int(v.frames, 1, 32, `${at}.frames`), w, h, fps: v.fps === undefined ? 4 : num(v.fps, 0, 30, `${at}.fps`),
     ax: v.ax === undefined ? w / 2 : num(v.ax, 0, w, `${at}.ax`), ay: v.ay === undefined ? h : num(v.ay, 0, h, `${at}.ay`), dw, dh };
+}
+/** Whose state an item's activeWhen watches (#2570): an instance's name, or a list of up to 8. */
+function names(v, at) {
+  const one = (s, here) => { if (typeof s !== "string" || !s || s.length > 200 || inherited(s) || /[\u0000-\u001f\u007f]/.test(s)) throw new Refused(here, "an instance's name"); return s; };
+  return Array.isArray(v) ? list(v, 8, at).map((s, i) => one(s, `${at}[${i}]`)) : [one(v, at)];
 }
 function strips(v, names, at, scale) {
   obj(v, at);
@@ -204,20 +219,24 @@ export function checkSkinPack(x) {
     const fids = new Set();
     const furniture = list(x.furniture ?? [], LIMIT.furniture, "furniture").map((f, i) => {
       const at = `furniture[${i}]`;
-      obj(f, at); keys(f, ["id", "sprite", "x", "y", "depth", "activeWhen", "activeSprite"], at);
+      obj(f, at); keys(f, ["id", "sprite", "x", "y", "depth", "activeWhen", "activeSprite", "activeFor", "loop", "label"], at);
       if (!nameOk(f.id) || fids.has(f.id)) throw new Refused(`${at}.id`, "a new name of letters, digits, _ or - (not an inherited one)");
       fids.add(f.id);
       if (f.activeSprite !== undefined && f.activeWhen === undefined) throw new Refused(`${at}.activeSprite`, "only with activeWhen");
+      if (f.activeFor !== undefined && f.activeWhen === undefined) throw new Refused(`${at}.activeFor`, "only with activeWhen");
+      if (f.loop !== undefined && typeof f.loop !== "boolean") throw new Refused(`${at}.loop`, "true or false");
+      if (f.label !== undefined && (typeof f.label !== "string" || !f.label.trim() || [...f.label].length > LIMIT.line || /[\u0000-\u001f\u007f]/.test(f.label))) throw new Refused(`${at}.label`, `1–${LIMIT.line} characters`);
       return { id: f.id, sprite: checkStrip(f.sprite, `${at}.sprite`, scale), x: num(f.x, 0, LOGICAL.w, `${at}.x`), y: num(f.y, 0, LOGICAL.h, `${at}.y`),
         depth: f.depth === "y" ? "y" : depth(f.depth ?? 0, `${at}.depth`), activeWhen: f.activeWhen === undefined ? null : states(f.activeWhen, `${at}.activeWhen`),
-        activeSprite: f.activeSprite === undefined ? null : checkStrip(f.activeSprite, `${at}.activeSprite`, scale) };
+        activeSprite: f.activeSprite === undefined ? null : checkStrip(f.activeSprite, `${at}.activeSprite`, scale),
+        activeFor: f.activeFor === undefined ? null : names(f.activeFor, `${at}.activeFor`), loop: f.loop === true, label: f.label === undefined ? null : f.label.trim() };
     }).sort((a, b) => order(a) - order(b));
     const sets = obj(x.characters, "characters");
     if (Object.keys(sets).length > LIMIT.sets) throw new Refused("characters", `at most ${LIMIT.sets} sets`);
     const characters = {};
     for (const [k, v] of Object.entries(sets)) {
       if (!nameOk(k)) throw new Refused(`characters.${k}`, "a name of letters, digits, _ or - (not an inherited one)");
-      characters[k] = strips(v, POSES, `characters.${k}`, scale);
+      characters[k] = strips(v, SET_STRIPS, `characters.${k}`, scale);
       if (!characters[k].idle) throw new Refused(`characters.${k}.idle`, "required");
     }
     if (!own(characters, "default")) throw new Refused("characters.default", "required");
