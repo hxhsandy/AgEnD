@@ -115,4 +115,12 @@ describe("createMail", () => {
     n.sync([item("2", "xiaojie", "ran")], 0, L);
     expect(n.frame(10000, office([desk("dean", "paused", 200, 200)]), walkersAt({}))).toEqual([]);
   });
+  it("in bed for the night (#2568): an idle person drawn asleep is not sent either; the letter waits", () => {
+    const m = Z.createMail();
+    m.sync([item("1", "xiaojie", "ran")], 0, L);
+    m.frame(10000, L, walkersAt({}));
+    const bedtime = office([{ ...desk("ran", "idle", 640, 396), night: true }, desk("dean", "paused", 200, 200)]);
+    expect(m.targets(bedtime, 10000).size).toBe(0);
+    expect([...m.targets(L, 10000)]).toEqual([["ran", { x: 600, y: 400 }]]);   // morning: sent as usual
+  });
 });

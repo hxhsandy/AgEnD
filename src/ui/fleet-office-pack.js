@@ -31,9 +31,12 @@
 //     "waypoints": [{ "id": "hall", "x": 640, "y": 600 }, …], "edges": [["hall", "east"], …],
 //                                                     optional: the walkable graph (else people walk straight)
 //     "furniture": [ { "id": "rack", "sprite": STRIP, "x": 1020, "y": 140, "depth": 2,
-//                      "activeWhen": "crashed", "activeSprite": STRIP, "activeFor": "atlas", "loop": true, "label": "Rack" } ],
+//                      "activeWhen": "crashed", "activeSprite": STRIP, "activeFor": "atlas", "loop": true, "label": "Rack",
+//                      "night": { "sprite": STRIP, "x": 300, "y": 420 } } ],
 //                                                     "label" (#2574): a name tag under it, like a person's
-//                                                     (an NPC drawn as furniture)
+//                                                     (an NPC drawn as furniture). "night" (#2568), optional: at bedtime
+//                                                     (when the viewer has it on: 00:00–06:00 their time) drawn as this
+//                                                     strip, playing, at (x, y) — its own place for either left out
 //                                                     drawn by depth: below 1000 under the people, 1000 and up over
 //                                                     them; "depth": "y" (the string) sorts it among the people by base
 //                                                     y — its anchor's y against each person's feet: someone whose feet
@@ -148,6 +151,12 @@ export function checkStrip(v, at = "strip", scale = 2) {
   return { src: src(v.src, `${at}.src`), frames: int(v.frames, 1, 32, `${at}.frames`), w, h, fps: v.fps === undefined ? 4 : num(v.fps, 0, 30, `${at}.fps`),
     ax: v.ax === undefined ? w / 2 : num(v.ax, 0, w, `${at}.ax`), ay: v.ay === undefined ? h : num(v.ay, 0, h, `${at}.ay`), dw, dh };
 }
+/** A furniture item's night (#2568): { sprite, x, y } — at bedtime it is drawn as `sprite` (playing) at (x, y), its own place when left out. */
+function nightOf(v, at, scale) {
+  if (v === undefined) return null;
+  obj(v, at); keys(v, ["sprite", "x", "y"], at);
+  return { sprite: checkStrip(v.sprite, `${at}.sprite`, scale), x: v.x === undefined ? null : num(v.x, 0, LOGICAL.w, `${at}.x`), y: v.y === undefined ? null : num(v.y, 0, LOGICAL.h, `${at}.y`) };
+}
 /** Whose state an item's activeWhen watches (#2570): an instance's name, or a list of up to 8. */
 function names(v, at) {
   const one = (s, here) => { if (typeof s !== "string" || !s || s.length > 200 || inherited(s) || /[\u0000-\u001f\u007f]/.test(s)) throw new Refused(here, "an instance's name"); return s; };
@@ -219,7 +228,7 @@ export function checkSkinPack(x) {
     const fids = new Set();
     const furniture = list(x.furniture ?? [], LIMIT.furniture, "furniture").map((f, i) => {
       const at = `furniture[${i}]`;
-      obj(f, at); keys(f, ["id", "sprite", "x", "y", "depth", "activeWhen", "activeSprite", "activeFor", "loop", "label"], at);
+      obj(f, at); keys(f, ["id", "sprite", "x", "y", "depth", "activeWhen", "activeSprite", "activeFor", "loop", "label", "night"], at);
       if (!nameOk(f.id) || fids.has(f.id)) throw new Refused(`${at}.id`, "a new name of letters, digits, _ or - (not an inherited one)");
       fids.add(f.id);
       if (f.activeSprite !== undefined && f.activeWhen === undefined) throw new Refused(`${at}.activeSprite`, "only with activeWhen");
@@ -229,7 +238,7 @@ export function checkSkinPack(x) {
       return { id: f.id, sprite: checkStrip(f.sprite, `${at}.sprite`, scale), x: num(f.x, 0, LOGICAL.w, `${at}.x`), y: num(f.y, 0, LOGICAL.h, `${at}.y`),
         depth: f.depth === "y" ? "y" : depth(f.depth ?? 0, `${at}.depth`), activeWhen: f.activeWhen === undefined ? null : states(f.activeWhen, `${at}.activeWhen`),
         activeSprite: f.activeSprite === undefined ? null : checkStrip(f.activeSprite, `${at}.activeSprite`, scale),
-        activeFor: f.activeFor === undefined ? null : names(f.activeFor, `${at}.activeFor`), loop: f.loop === true, label: f.label === undefined ? null : f.label.trim() };
+        activeFor: f.activeFor === undefined ? null : names(f.activeFor, `${at}.activeFor`), loop: f.loop === true, label: f.label === undefined ? null : f.label.trim(), night: nightOf(f.night, `${at}.night`, scale) };
     }).sort((a, b) => order(a) - order(b));
     const sets = obj(x.characters, "characters");
     if (Object.keys(sets).length > LIMIT.sets) throw new Refused("characters", `at most ${LIMIT.sets} sets`);
@@ -280,13 +289,17 @@ export function checkSkinPack(x) {
 export const skinPackOk = (x) => { const r = checkSkinPack(x); return r.ok ? r.pack : null; };
 /** Every image a pack names (what a loader fetches before spriteSkin draws). */
 export const packImages = (pack) => [...new Set([pack.background, pack.foreground, pack.room.floor, pack.room.wall, pack.desk.back, pack.desk.front, pack.desk.lit,
-  ...pack.furniture.flatMap((f) => [f.sprite.src, f.activeSprite && f.activeSprite.src]),
+  ...pack.furniture.flatMap((f) => [f.sprite.src, f.activeSprite && f.activeSprite.src, f.night && f.night.sprite.src]),
   ...Object.values(pack.characters).flatMap((s) => Object.values(s).map((st) => st.src)), ...Object.values(pack.props).map((st) => st.src)].filter(Boolean))];
 
 /** Every frame strip a checked pack names, with where (the host checks each image is frames·w × h). */
 export function packStrips(pack) {
   const out = [];
-  for (const f of pack.furniture) { out.push({ at: `furniture.${f.id}.sprite`, strip: f.sprite }); if (f.activeSprite) out.push({ at: `furniture.${f.id}.activeSprite`, strip: f.activeSprite }); }
+  for (const f of pack.furniture) {
+    out.push({ at: `furniture.${f.id}.sprite`, strip: f.sprite });
+    if (f.activeSprite) out.push({ at: `furniture.${f.id}.activeSprite`, strip: f.activeSprite });
+    if (f.night) out.push({ at: `furniture.${f.id}.night.sprite`, strip: f.night.sprite });
+  }
   for (const [k, set] of Object.entries(pack.characters)) for (const [pose, st] of Object.entries(set)) out.push({ at: `characters.${k}.${pose}`, strip: st });
   for (const [k, st] of Object.entries(pack.props)) out.push({ at: `props.${k}`, strip: st });
   return out;

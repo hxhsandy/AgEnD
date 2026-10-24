@@ -10,7 +10,7 @@
 import { AUTO_ID, filterOk, officesOk } from "./fleet-office-model.js";
 import { fitModeOk, savedOk } from "./fleet-office-view.js";
 
-const CHOICE_KEY = "agend_org_office", FILTER_KEY = "agend_org_office_filter", SKIN_KEY = "agend_org_office_skin", ASLEEP_KEY = "agend_org_office_hide_asleep";
+const CHOICE_KEY = "agend_org_office", FILTER_KEY = "agend_org_office_filter", SKIN_KEY = "agend_org_office_skin", ASLEEP_KEY = "agend_org_office_hide_asleep", NIGHT_KEY = "agend_org_office_night";
 /** #2554: "0" when All offices leaves the lobby tile out (default: shown). */
 const LOBBY_KEY = "agend_org_office_lobby";
 /** #2540: { "<office>@<style>": [k, cx, cy] (and a 1 after them: a fit) } — the last VIEWS_MAX views, the most recent last. */
@@ -96,6 +96,9 @@ export function createOfficeStore({ fetch: get = globalThis.fetch, storage } = {
     /** Whether paused and stopped people are left out of the Office here (default: shown). */
     hideAsleep: () => read(ASLEEP_KEY) === "1",
     saveHideAsleep: (v) => write(ASLEEP_KEY, v ? "1" : "0"),
+    /** #2568: whether the idle go to bed at night (00:00–06:00 on this device's clock) here (default: off). */
+    nightOn: () => read(NIGHT_KEY) === "1",
+    saveNightOn: (v) => write(NIGHT_KEY, v ? "1" : "0"),
     /** #2554: whether All offices shows the lobby tile (the instances in no stored office) here (default: shown). */
     lobbyTile: () => read(LOBBY_KEY) !== "0",
     saveLobbyTile: (v) => write(LOBBY_KEY, v ? "1" : "0"),

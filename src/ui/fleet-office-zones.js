@@ -77,12 +77,16 @@ export function assignSeats(pack, wants, prev = new Map()) {
  * the desks layout (rooms → desks with a seat), in logical units, plus `mode: "zones"`, the pack's areas and graph, the
  * seats given (`seats`, the next call's `prev`), `crowd` and `over` (the areas over capacity).
  */
-export function zonesLayout(pack, nodes, prev = new Map()) {
-  const wants = nodes.filter((n) => n.state !== "missing").map((n) => ({ name: n.name, area: zoneOf(pack, n.state) }));
+export function zonesLayout(pack, nodes, prev = new Map(), { night = false } = {}) {
+  // At night (#2568) the idle go to bed: the area asleep people go to while it has a free seat; the rest doze where they are.
+  const bed = zoneOf(pack, "paused"), beds = (own(pack.areas, bed)?.seats || []).length, sleepers = new Set(), inBed = new Set();
+  let used = nodes.filter((n) => n.state !== "idle" && zoneOf(pack, n.state) === bed).length;
+  if (night) for (const n of nodes) if (n.state === "idle") { sleepers.add(n.name); if (used < beds) { used++; inBed.add(n.name); } }
+  const wants = nodes.filter((n) => n.state !== "missing").map((n) => ({ name: n.name, area: inBed.has(n.name) ? bed : zoneOf(pack, n.state) }));
   const { seats, crowd, over } = assignSeats(pack, wants, prev);
   const desks = nodes.filter((n) => seats.has(n.name)).map((n) => {
     const s = seats.get(n.name);
-    return { key: `zone/${n.name}`, node: n, x: s.x - 24, y: s.y - 52, w: 48, h: 66, seat: { x: s.x, y: s.y }, wp: null, area: s.area, slot: s.slot };
+    return { key: `zone/${n.name}`, node: n, x: s.x - 24, y: s.y - 52, w: 48, h: 66, seat: { x: s.x, y: s.y }, wp: null, area: s.area, slot: s.slot, night: sleepers.has(n.name) };
   });
   return { mode: "zones", rooms: [{ key: "\u0000zones", name: null, lobby: false, x: 0, y: 0, w: LOGICAL.w, h: LOGICAL.h, desks }], areas: pack.areas,
     waypoints: pack.waypoints || [], edges: pack.edges || [], door: pack.door, width: LOGICAL.w, height: LOGICAL.h, seats, crowd, over };
@@ -104,6 +108,12 @@ export function headingAt(pts, t) {
   }
   return null;
 }
+// ── Night (#2568) ──
+
+/** Bedtime on the viewer's clock: from FROM o'clock to TO o'clock the idle sleep (anyone with work still gets up for it). */
+export const NIGHT = { FROM: 0, TO: 6, TICK: 60000 };
+export const isNight = (d = new Date()) => { const h = d.getHours(); return NIGHT.FROM <= NIGHT.TO ? h >= NIGHT.FROM && h < NIGHT.TO : h >= NIGHT.FROM || h < NIGHT.TO; };
+
 // ── Wandering (#2560) ──
 
 /**
@@ -128,7 +138,7 @@ export function walkTargets(desks, graph, t, wander = true) {
   // Every seat of the office (anyone's, taken or not: someone may sit down on it any moment), not only the ones in use.
   const seats = [...Object.values(graph.areas || {}).flatMap((a) => a.seats || []), ...desks.map((d) => d.seat)], used = new Set();
   return new Map(desks.map((d) => {
-    if (!wander || d.node.state !== "idle") return [d.node.name, d.seat];
+    if (!wander || d.node.state !== "idle" || d.night) return [d.node.name, d.seat];
     const p = wanderTarget(d.node.name, d.seat, graph, t, seats), k = `${p.x},${p.y}`;
     if (p === d.seat || used.has(k)) return [d.node.name, d.seat];
     used.add(k);
@@ -218,7 +228,7 @@ export function createMail({ max = MAIL.MAX } = {}) {
       for (const l of letters) {
         if (out.has(l.to) || now - l.start < l.ms) continue;
         const d = here(L, l.to);
-        if (d && !MAIL.ASLEEP.has(d.node.state)) out.set(l.to, l.drop);
+        if (d && !MAIL.ASLEEP.has(d.node.state) && !d.night) out.set(l.to, l.drop);   // asleep, or in bed for the night (#2568)
       }
       return out;
     },
