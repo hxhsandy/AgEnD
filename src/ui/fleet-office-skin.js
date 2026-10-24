@@ -531,7 +531,11 @@ export function spriteSkin(pack, images, base = pixelSkin) {
       const ps = shown({ ...look, heading: at.heading }, !!at.walking);
       return ps ? stripBox(ps.strip, at.x, at.y, ps.mirror) : base.charBox(look, at);
     },
-    drawProp(ctx, it, ms, env) { if (!strip(ctx, own(pack.props, it.hue), ms, it.x, it.y)) base.drawProp(ctx, it, ms, env); },
+    // An item in the air: its sender's own (their set's "prop", #2562), else the pack's for its kind, else the built-in one.
+    drawProp(ctx, it, ms, env) {
+      const mine = it.from ? own(setOf({ name: it.from }) || {}, "prop") : null;
+      if (!strip(ctx, mine || own(pack.props, it.hue), ms, it.x, it.y)) base.drawProp(ctx, it, ms, env);
+    },
   };
 }
 
