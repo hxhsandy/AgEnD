@@ -200,9 +200,9 @@ function officeScene(office, nodes, skin, zones, deskW, prevSeats) {
 /** What drawPart needs of a scene; its layers are painted on first draw (and again at another resolution). */
 function partOf(L, looks, skin, zones, walkers, flights) {
   const all = L.rooms.flatMap((r) => r.desks);
-  const shown = new Set([...looks.values()].map((l) => l.state));
+  const shown = new Set([...looks.values()].map((l) => l.state)), byName = new Map([...looks.values()].filter((l) => l.name).map((l) => [l.name, l.state]));
   return { L, looks, skin, zones, walkers, flights, all, desks: all.filter((d) => d.node), layers: null,
-    active: zones ? activeFurniture(skin.pack, shown) : new Set(), lines: bubbleDefaults(), lang: lang() };
+    active: zones ? activeFurniture(skin.pack, shown, byName) : new Set(), lines: bubbleDefaults(), lang: lang() };
 }
 /** Where a seated person's bubble points: over the head of the picture drawn — a pack's figure can be taller than the
  * built-in one (#2558: a 134 px figure had its face under the bubble); never lower than the built-in spot. */
