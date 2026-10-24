@@ -130,7 +130,7 @@ export function crossPath(parts, from, to) {
 const MAX_SEEN = 2000;
 /**
  * The items in the air between tiles — fleet-office-model.js createFlights's lifecycle (each new item once; none for a
- * stale delegation or with reduced motion), on crossPath's straight line: `frame(now, parts)` → { id, hue, kind, x, y,
+ * stale delegation or with reduced motion), on crossPath's straight line: `frame(now, parts)` → { id, hue, kind, from, x, y,
  * t } in overview units; a trip with no crossing (both in one tile, or either gone) is dropped.
  */
 export function createCrossFlights({ max = FLIGHT.MAX } = {}) {
@@ -157,7 +157,7 @@ export function createCrossFlights({ max = FLIGHT.MAX } = {}) {
         if (!f.pts) return false;
         const t = (now - f.start) / f.ms;
         if (t >= 1) return false;
-        if (t >= 0) { const p = along(f.pts, t); out.push({ id: f.id, hue: f.hue, kind: f.kind, x: p.x, y: p.y, t }); }
+        if (t >= 0) { const p = along(f.pts, t); out.push({ id: f.id, hue: f.hue, kind: f.kind, from: f.from, x: p.x, y: p.y, t }); }
         return true;
       });
       return out;
