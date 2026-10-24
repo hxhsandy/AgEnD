@@ -22,10 +22,10 @@ import { fire } from "./helpers/mini-dom.js";
 const HOUR = 3_600_000, DAY = 86_400_000;
 const NOW = Date.UTC(2026, 9, 18, 12);
 const at = (daysAgo: number, hour = 9) => Date.UTC(2026, 9, 18 - daysAgo, hour);
-type T = Partial<{ uncached: number; read: number; write5m: number; write1h: number; write: number | null; output: number }>;
+type T = Partial<{ uncached: number; read: number; write5m: number; write1h: number; write: number | null; output: number; reasoning: number }>;
 function ledger(turns: Array<[number, string, T?]>, reader: "claude" | "codex" = "claude", profile = reader === "codex" ? "unrecorded" : "default"): Ledger {
   const l = emptyLedger(), c = { kind: reader, ino: 1, offset: 0 } as const;
-  for (const [t, model, o = {}] of turns) addTurn(l, { ...c }, { t, model, prompt: 1000, uncached: o.uncached ?? 1000, read: o.read ?? 8000, write5m: o.write5m ?? 0, write1h: o.write1h ?? 500, write: o.write ?? null, output: o.output ?? 200 }, 0, profile);
+  for (const [t, model, o = {}] of turns) addTurn(l, { ...c }, { t, model, prompt: 1000, uncached: o.uncached ?? 1000, read: o.read ?? 8000, write5m: o.write5m ?? 0, write1h: o.write1h ?? 500, write: o.write ?? null, output: o.output ?? 200, reasoning: o.reasoning }, 0, profile);
   return l;
 }
 const coverage = (from: number, to: number) => ({ ...emptyDays(), coverage: [[from, to]] as Array<[number, number]> });
@@ -142,6 +142,16 @@ describe("what it shows", () => {
     expect(old.querySelector(".us-flags").textContent).toBe("read before backend and profile were recorded");
     expect(cell(rows().find((r: any) => name(r) === "talker"), "Messages")).toBe("2");
   });
+  it("reasoning (#2122 §10.3): a Codex row shows it; a CLI that reports none reads —, never a measured 0", async () => {
+    answer = { status: 200, body: report({ messages: [], instances: [
+      inst("billing", "claude-code", ledger([[at(1), "claude-opus-4-5"]])),
+      inst("indexer", "codex", ledger([[at(1), "gpt-5.6-sol", { output: 900, reasoning: 600, write: 0 }]], "codex")),
+    ] }) };
+    await mount();
+    expect(cell(rows().find((r: any) => name(r) === "billing"), "Reasoning")).toBe("—");
+    const codex = rows().find((r: any) => name(r) === "indexer");
+    expect([cell(codex, "Output"), cell(codex, "Reasoning")]).toEqual(["300", "600"]);
+  });
   it("scanning: says totals may still grow, and Refresh reads again", async () => {
     answer = { status: 200, body: { ...report(), scanning: { active: true, caughtUp: false, pendingBytes: 5e6, pendingFiles: 2 } } };
     await mount();
@@ -216,14 +226,18 @@ describe("the CSV: this answer's daily rows", () => {
   it("columns, the basis on each token row, messages on their own rows; never a formula", () => {
     const r = report({ instances: [inst("billing", "claude-code", ledger([[at(1), "=HYPERLINK(\"x\")"], [at(1), "claude-opus-4-5"]]))] });
     const lines = U.usageCsv(r).trimEnd().split("\r\n");
-    expect(lines[0]).toBe("date,zone,instance,backend,model,tier,profile,input,output,cache_read,cache_write_5m,cache_write_1h,cache_write,requests,messages,amount,basis,flags");
+    expect(lines[0]).toBe("date,zone,instance,backend,model,tier,profile,input,output,reasoning,cache_read,cache_write_5m,cache_write_1h,cache_write,requests,messages,amount,basis,flags");
     const formula = lines.find((l: string) => l.includes("HYPERLINK"))!;
     expect(formula).toContain(`,"'=HYPERLINK(""x"")",`);
     const priced = lines.find((l: string) => l.includes("claude-opus-4-5"))!;
     expect(priced.split(",").slice(0, 7)).toEqual(["2026-10-17", "UTC", "billing", "claude-code", "claude-opus-4-5", "standard", "default"]);
     expect(priced).toContain(",API-equivalent at list price (checked ");
-    expect(lines.at(-1)).toBe(`2026-10-17,UTC,billing,,,,,,,,,,,,4,,${r.basis},`);          // every row carries the basis
+    expect(lines.at(-1)).toBe(`2026-10-17,UTC,billing,,,,,,,,,,,,,4,,${r.basis},`);          // every row carries the basis
     expect(U.csvField("-1")).toBe("'-1");
+    // #2122 §10.3: reasoning after output, output net of it (tokscale's daily-row units).
+    const thinker = U.usageCsv(report({ instances: [inst("indexer", "codex", ledger([[at(1), "gpt-5.6-sol", { output: 900, reasoning: 600, write: 0 }]], "codex"))], messages: [] }))
+      .trimEnd().split("\r\n")[1].split(",");
+    expect(thinker.slice(7, 10)).toEqual(["1000", "300", "600"]);
     expect(U.csvField("@x")).toBe("'@x");
   });
   it("the button downloads it, named for the range", async () => {

@@ -13,7 +13,7 @@
  *   cache_creation: { ephemeral_5m_input_tokens, ephemeral_1h_input_tokens }, output_tokens }. A message spans several
  *   lines (one per content block) carrying the same id and usage: counted once.
  * - Codex (0.160): `event_msg` `token_count` with `info.last_token_usage` { input_tokens (cached included),
- *   cached_input_tokens, cache_write_input_tokens, output_tokens }. The write field exists but was 0 in every one of
+ *   cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens (a part of output_tokens) }. The write field exists but was 0 in every one of
  *   38,551 real events on GPT-5.6+ models — so a write is estimated as the request's uncached input unless a real
  *   write count shows up. The model comes from the preceding `turn_context`.
  */
@@ -35,6 +35,8 @@ export interface Turn {
   /** An OpenAI cache write as recorded (null: not recorded, 0 included when the field is absent). */
   write: number | null;
   output: number;
+  /** The part of `output` the CLI reports as reasoning (Codex `reasoning_output_tokens`); absent or 0 where none is. */
+  reasoning?: number;
 }
 
 /** Gap histogram edges, seconds: ≤5 min, ≤30 min, ≤1 h, ≤2 h, ≤6 h, ≤24 h, longer. */
@@ -53,7 +55,15 @@ export type HourTotals = [number, number, number, number, number, number, number
  * holds beyond the sum of `src` was counted before #2122 and reads as unknown (hourSources) — never relabelled with
  * today's backend or profile.
  */
-export interface HourAgg { m: Record<string, HourTotals>; g: number[]; src?: Record<string, Record<string, HourTotals>> }
+export interface HourAgg {
+  m: Record<string, HourTotals>; g: number[]; src?: Record<string, Record<string, HourTotals>>;
+  /**
+   * #2122 §10.3: reasoning tokens, by source and model key — the part of `output` a CLI reports as reasoning (Codex). Kept
+   * beside the totals, never as an 8th entry: a published reader keeps only 7-entry totals and would drop the hour (Fable
+   * #2604 P1); an older version that rewrites the ledger drops only this.
+   */
+  rs?: Record<string, Record<string, number>>;
+}
 /** A source of an hour's totals: the reader that read them and the profile it read them under. */
 export const sourceKey = (reader: TranscriptKind, profile: string): string => `${reader}:${profile}`;
 /**
@@ -114,7 +124,14 @@ export function reviveLedger(raw: unknown): Ledger {
       for (const [mk, tot] of Object.entries(sm)) if (Array.isArray(tot) && tot.length === 7 && tot.every(n => Number.isFinite(n))) into[mk] = tot as HourTotals;
       src[sk] = into;
     }
-    l.hours[k] = { m, g: v.g, ...(Object.keys(src).length ? { src } : {}) };
+    const rs = dict<Record<string, number>>();
+    for (const [sk, sm] of Object.entries(v.rs ?? {})) {
+      if (!src[sk] || !sm || typeof sm !== "object") continue;
+      const into = dict<number>();
+      for (const [mk, n] of Object.entries(sm)) if (typeof n === "number" && Number.isFinite(n) && n > 0 && src[sk][mk]) into[mk] = n;
+      if (Object.keys(into).length) rs[sk] = into;
+    }
+    l.hours[k] = { m, g: v.g, ...(Object.keys(src).length ? { src } : {}), ...(Object.keys(rs).length ? { rs } : {}) };
   }
   if (Array.isArray(r.gaps)) l.gaps = r.gaps.filter((g) => Array.isArray(g) && g.length === 9);
   if (r.writesSeen) l.writesSeen = true;
@@ -157,8 +174,10 @@ export function addTurn(ledger: Ledger, file: FileCursor, turn: Turn, cutoff: nu
   };
   bump(hour.m[mk] ??= [0, 0, 0, 0, 0, 0, 0]);
   // #2122: and under its source — the reader that read it (this file's kind) and the profile it was read under.
-  const src = (hour.src ??= dict<Record<string, HourTotals>>())[sourceKey(file.kind, profile ?? "unknown")] ??= dict<HourTotals>();
+  const sk = sourceKey(file.kind, profile ?? "unknown");
+  const src = (hour.src ??= dict<Record<string, HourTotals>>())[sk] ??= dict<HourTotals>();
   bump(src[mk] ??= [0, 0, 0, 0, 0, 0, 0]);
+  if (turn.reasoning) { const rs = (hour.rs ??= dict<Record<string, number>>())[sk] ??= dict<number>(); rs[mk] = (rs[mk] ?? 0) + turn.reasoning; }
   if (!prev) return;
   const gap = (turn.t - prev.t) / 1000;
   if (!(gap >= 0)) return;
@@ -254,7 +273,8 @@ export function codexLine(line: ScanLine, file: FileCursor): Turn | null {
   if (total) file.total = total;
   const t = Date.parse(d.timestamp);
   if (!Number.isFinite(t)) return null;
-  const input = num(u.input_tokens), read = Math.min(num(u.cached_input_tokens), input);
+  const input = num(u.input_tokens), read = Math.min(num(u.cached_input_tokens), input), output = num(u.output_tokens);
   const write = typeof u.cache_write_input_tokens === "number" ? Math.min(num(u.cache_write_input_tokens), input - read) : null;
-  return { t, model: file.model ?? "unknown", prompt: input, uncached: input - read - (write ?? 0), read, write5m: 0, write1h: 0, write, output: num(u.output_tokens) };
+  // Reasoning is counted inside output_tokens (total_tokens = input + output): kept as its part, capped at output.
+  return { t, model: file.model ?? "unknown", prompt: input, uncached: input - read - (write ?? 0), read, write5m: 0, write1h: 0, write, output, reasoning: Math.min(num(u.reasoning_output_tokens), output) };
 }
