@@ -232,8 +232,13 @@ export function linesFor(state, lang, pack, defaults) {
 // ── Furniture ──
 
 /** The furniture active now: an item whose `activeWhen` names a state someone shown is in. */
-export function activeFurniture(pack, states) {
+export function activeFurniture(pack, states, byName = new Map()) {
   const on = new Set();
-  for (const f of (pack && pack.furniture) || []) if (f.activeWhen && f.activeWhen.some((s) => states.has(s))) on.add(f.id);
+  for (const f of (pack && pack.furniture) || []) {
+    if (!f.activeWhen) continue;
+    // activeFor (#2570): only those people's states count; else anyone's shown.
+    const hit = f.activeFor ? f.activeFor.some((n) => byName.has(n) && f.activeWhen.includes(byName.get(n))) : f.activeWhen.some((s) => states.has(s));
+    if (hit) on.add(f.id);
+  }
   return on;
 }

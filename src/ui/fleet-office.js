@@ -200,9 +200,9 @@ function officeScene(office, nodes, skin, zones, deskW, prevSeats) {
 /** What drawPart needs of a scene; its layers are painted on first draw (and again at another resolution). */
 function partOf(L, looks, skin, zones, walkers, flights) {
   const all = L.rooms.flatMap((r) => r.desks);
-  const shown = new Set([...looks.values()].map((l) => l.state));
+  const shown = new Set([...looks.values()].map((l) => l.state)), byName = new Map([...looks.values()].filter((l) => l.name).map((l) => [l.name, l.state]));
   return { L, looks, skin, zones, walkers, flights, all, desks: all.filter((d) => d.node), layers: null,
-    active: zones ? activeFurniture(skin.pack, shown) : new Set(), lines: bubbleDefaults(), lang: lang() };
+    active: zones ? activeFurniture(skin.pack, shown, byName) : new Set(), lines: bubbleDefaults(), lang: lang() };
 }
 /** The back and front layers: pictures of the scene at `ls` layer px per logical unit (`tagsOff`: no name tags but the Find box's matches). */
 function paintLayers(p, env, ls, tagsOff = false) {
