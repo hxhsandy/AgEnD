@@ -62,7 +62,7 @@ import { hits, needle } from "./fleet-canvas-layout.js";
 import { AUTO_ID, LOBBY, autoLayout, backingScale, coatOf, createFlights, customLayout, deskAt, desksOf, filterOk, lampOf, layoutOk, lightOf, membersOf,
   officePose, officeRooms, signOf, workOn } from "./fleet-office-model.js";
 import { BUILT_IN_SKINS, CHAR_DEPTH, DEFAULT_PAL, bubbleBox, loadPackSkin, modeOf, skinFor, tagBox } from "./fleet-office-skin.js";
-import { CALLING, activeFurniture, bubbleAt, bubbleRank, WANDER, createWalkers, linesFor, personAt, placeBubbles, thinBubbles, walkTargets, zonesLayout } from "./fleet-office-zones.js";
+import { CALLING, activeFurniture, bubbleAt, bubbleRank, WANDER, createMail, createWalkers, linesFor, personAt, placeBubbles, thinBubbles, walkTargets, zonesLayout } from "./fleet-office-zones.js";
 import { createOfficeStore } from "./fleet-office-store.js";
 import { OfficeEditor, officeForSave } from "./fleet-office-editor.js";
 import { LayoutEditor, handlesOf } from "./fleet-office-layout.js";
@@ -248,6 +248,8 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
   T();
   const speakers = [], tags = [];
   const up = still ? [] : p.flights.frame(ms, p.L);
+  // Mail from another office (#2564): flying in at the door, or on the floor until its person picks it up.
+  const post = still || !p.mail || !p.zones ? [] : p.mail.frame(ms > 0 ? ms : now(), p.L, p.walkers);
   let walking = false;
   if (p.zones) {
     // Furniture under the people; the people (nearest last) with the furniture whose depth is "y" among them, by base
@@ -263,6 +265,7 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
     const band = [...furniture.filter((f) => f.depth === "y").map((f) => ({ y: f.y, k: 0, f })), ...people.map((q) => ({ y: q.at.y, k: 1, p: q }))]
       .sort((x, y) => x.y - y.y || x.k - y.k);
     for (const f of furniture) if (f.depth !== "y" && f.depth < CHAR_DEPTH) sk.drawFurniture(ctx, f, p.active.has(f.id), ms, env);
+    for (const it of post) if (it.t === 0) sk.drawProp(ctx, it, ms, env);        // a letter on the floor: under the people
     for (const { f, p: q } of band) {
       if (f) { sk.drawFurniture(ctx, f, p.active.has(f.id), ms, env); continue; }
       const box = { ...q.d, x: q.at.x - 44, y: q.at.y - 53, w: 88, h: 53, seat: { x: q.at.x, y: q.at.y } };
@@ -271,6 +274,7 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
     }
     for (const f of furniture) if (f.depth !== "y" && f.depth >= CHAR_DEPTH) sk.drawFurniture(ctx, f, p.active.has(f.id), ms, env);
     for (const it of up) sk.drawProp(ctx, it, ms, env);
+    for (const it of post) if (it.t > 0) sk.drawProp(ctx, it, ms, env);
     if (sk.drawForeground) sk.drawForeground(ctx, p.L, env);
     // Who found no spot in an area: a count in its corner (never over its name).
     for (const [ar, n] of p.L.crowd || []) if (p.L.areas[ar] && sk.drawCrowd) sk.drawCrowd(ctx, p.L.areas[ar], n, env);
@@ -303,7 +307,7 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
   const placed = placeBubbles(thinBubbles(bubbles, p.zones ? p.L.over : null), 22, tags);
   const say = () => { T(); for (const { sp, b, dy } of placed) sk.drawBubble(ctx, sp.x, sp.y, [...b.text].slice(0, b.shown).join(""), env, -dy); };
   if (defer) defer.push(say); else say();
-  return walking || up.length > 0 || p.flights.size() > 0;
+  return walking || up.length > 0 || p.flights.size() > 0 || post.some((it) => it.t > 0);
 }
 /**
  * The person at (x, y) in a scene's units, as it draws them: on zones where they walk, in the box the skin draws them
@@ -375,6 +379,7 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   const ooRef = useRef(null), [fs, setFs] = useState(null), fsRef = useRef(null), fsAsked = useRef(false), fsTarget = useRef(null);
   fsRef.current = fs;
   const flights = useMemo(() => createFlights(), []);
+  const mail = useMemo(() => createMail(), []);                       // #2564: what comes in from other offices
   const walkers = useMemo(() => createWalkers(), []);
   const seatsRef = useRef(new Map());                                 // the zones layout's last seats: kept where they can be
   // #2554: All offices' tiles keep their own: seats (by tile and style), walkers and flights (by tile); and the items
@@ -527,15 +532,20 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   // The scene the view pans and zooms: the office's, or the overview of every tile.
   const L = useMemo(() => (overview ? { mode: "overview", rooms: [], width: arranged.width, height: arranged.height } : single), [overview, single, arranged]);
   const looks = useMemo(() => looksOf(L, workOn(traffic), q, mode, zones), [L, traffic, q, mode, themeRev]);
-  useEffect(() => { flights.sync(traffic || [], now(), still); }, [traffic]);
+  useEffect(() => { flights.sync(traffic || [], now(), still); if (zones && !overview && mail.sync(traffic || [], now(), L, still)) loop.current?.wake(); }, [traffic]);
   // Zones: everyone's seat is where they walk to — an idle person now and then strolls near it and back (#2560; not
-  // with reduced motion, nor while Edit layout is open: the seats are being placed).
+  // with reduced motion, nor while Edit layout is open: the seats are being placed); someone with mail from another
+  // office walks to it first (#2564).
   const wander = zones && !overview && !still && !layout;
   useEffect(() => {
     if (!zones || overview) return undefined;
-    const go = () => { walkers.sync(walkTargets(desksOf(L), L, now(), wander), now(), L, still); loop.current?.wake(); };
+    const go = () => {
+      const t = now(), to = walkTargets(desksOf(L), L, t, wander);
+      for (const [name, at] of mail.targets(L, t)) to.set(name, at);
+      walkers.sync(to, t, L, still); loop.current?.wake();
+    };
     go();
-    if (!wander) return undefined;
+    if (still) return undefined;
     const h = setInterval(go, WANDER.TICK);
     return () => clearInterval(h);
   }, [L, wander]);
@@ -784,7 +794,7 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
       const parts = tiles.map((tl, i) => ({ ...partOf(tl.L, tileLooks[i], tl.skin, tl.zones, tl.walkers, tl.flights), key: tl.key, prefix: tl.prefix, tile: arranged.tiles[i] }));
       scene.current = { ...base, overview: true, parts, lay: arranged };
     } else {
-      scene.current = { ...base, overview: false, part: partOf(L, looks, skin, zones, walkers, flights) };
+      scene.current = { ...base, overview: false, part: { ...partOf(L, looks, skin, zones, walkers, flights), mail } };
     }
     if (still) draw(0); else loop.current?.wake();
   }, [L, looks, skin, pal, size.w, size.h, ratio, matte, overview, tiles, tileLooks, arranged]);

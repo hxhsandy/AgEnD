@@ -3,7 +3,8 @@
 // changes it walks (along the pack's waypoints) to the new area. Pure — fleet-office.js draws it. Also here: what a
 // character says in its speech bubble, and which furniture is active.
 import { LOGICAL, own } from "./fleet-office-pack.js";
-import { nameHash, pathLength, along, routeVia } from "./fleet-office-model.js";
+import { FLIGHT, nameHash, pathLength, along, routeVia } from "./fleet-office-model.js";
+import { hue } from "./fleet-traffic.js";
 
 /** The area for a state: the pack's own, else its "default", else its first area. */
 export function zoneOf(pack, state) {
@@ -133,6 +134,78 @@ export function walkTargets(desks, graph, t, wander = true) {
     used.add(k);
     return [d.node.name, p];
   }));
+}
+
+// ── Mail from another office (#2564) ──
+
+/**
+ * Something sent to a person here by someone who is not (in another office, or in none): it flies in at the door and
+ * lands on the floor near the middle of the room; the person walks over, picks it up and walks back to their seat.
+ * MAX_WAIT: a letter no one picks up is gone after it; GAP: letters waiting side by side; ASLEEP: who does not get up
+ * for it (it waits for them to wake, up to MAX_WAIT).
+ */
+export const MAIL = { MAX_WAIT: 60000, GAP: 16, ASLEEP: new Set(["paused", "stopped"]), MAX: 20 };
+/** Where letters land: the waypoint nearest the room's middle that no seat is on (else the middle), `n` letters along. */
+export function dropPoint(L, n = 0) {
+  const mid = { x: L.width / 2, y: L.height * 0.55 }, seats = desksIn(L).map((d) => d.seat);
+  const free = (L.waypoints || []).filter((w) => !seats.some((q) => Math.hypot(w.x - q.x, w.y - q.y) < 4));
+  const at = free.length ? free.reduce((a, w) => (Math.hypot(w.x - mid.x, w.y - mid.y) < Math.hypot(a.x - mid.x, a.y - mid.y) ? w : a)) : mid;
+  return { x: Math.round(at.x + n * MAIL.GAP), y: Math.round(at.y) };
+}
+const desksIn = (L) => (L.rooms || []).flatMap((r) => r.desks || []).filter((d) => d.node);
+/**
+ * The letters of one office. `sync(items, now, L, still)`: each new traffic item to someone drawn here from someone
+ * who is not becomes a letter (none with reduced motion, nor for a stale delegation; a zones office only).
+ * `frame(now, L, walkers)` → what to draw, { id, hue, kind, from, x, y, t } (t: its flight, 0 on the floor), picking
+ * up the letters whose person stands on them, and dropping those gone too long or whose person left. `targets(L)`:
+ * name → where to walk to pick one up (the first waiting for them; none while they are asleep). `size()`.
+ */
+export function createMail({ max = MAIL.MAX } = {}) {
+  const seen = new Set();
+  let letters = [];
+  const here = (L, name) => desksIn(L).find((d) => d.node.name === name) || null;
+  return {
+    sync(items, now, L, still = false) {
+      let started = 0;
+      for (const it of items || []) {
+        if (seen.has(it.id)) continue;
+        seen.add(it.id);
+        if (seen.size > 2000) seen.delete(seen.values().next().value);
+        if (still || it.phase === "stale" || !L || L.mode !== "zones" || !here(L, it.to) || here(L, it.from)) continue;
+        const drop = dropPoint(L, letters.filter((l) => l.to !== it.to).length % 4);
+        const pts = [{ x: L.door.x, y: L.door.y }, drop];
+        letters.push({ id: it.id, from: it.from, to: it.to, kind: it.kind, hue: hue(it.kind), start: now, drop, pts,
+          ms: Math.min(FLIGHT.MAX_MS, Math.max(FLIGHT.MIN_MS, pathLength(pts) / FLIGHT.SPEED)) });
+        started++;
+      }
+      if (letters.length > max) letters = letters.slice(letters.length - max);
+      return started;
+    },
+    frame(now, L, walkers) {
+      const out = [];
+      letters = letters.filter((l) => {
+        if (!here(L, l.to)) return false;
+        const t = (now - l.start) / l.ms;
+        if (t < 1) { if (t >= 0) { const p = along(l.pts, t); out.push({ id: l.id, hue: l.hue, kind: l.kind, from: l.from, x: p.x, y: p.y, t }); } return true; }
+        if (now - l.start - l.ms > MAIL.MAX_WAIT) return false;
+        const w = walkers && walkers.at(l.to, now);
+        if (w && !w.walking && Math.hypot(w.x - l.drop.x, w.y - l.drop.y) < 4) return false;   // picked up
+        out.push({ id: l.id, hue: l.hue, kind: l.kind, from: l.from, x: l.drop.x, y: l.drop.y, t: 0 });
+        return true;
+      });
+      return out;
+    },
+    targets(L, now) {
+      const out = new Map();
+      for (const l of letters) {
+        if (out.has(l.to) || now - l.start < l.ms) continue;
+        const d = here(L, l.to);
+        if (d && !MAIL.ASLEEP.has(d.node.state)) out.set(l.to, l.drop);
+      }
+      return out;
+    },
+    size: () => letters.length,
+  };
 }
 
 /**
