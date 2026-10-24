@@ -7,12 +7,15 @@
  *
  * An act is kept in memory, one per instance (a new office_set replaces it; `clear` ends it; a fleet restart forgets
  * them all), and is live while `until` is ahead (wall clock, the page's): every change — set, clear, expiry — goes to
- * every page as the `office_acts` SSE event, and GET /ui/office-acts reads the same list. The page draws it and drops it
- * the moment the instance's state is no longer the one it was set in (`state`): an act never hides real work.
+ * every page as the `office_acts` SSE event, and GET /ui/office-acts reads the same list. The page draws it until new
+ * work begins (fleet-office.js actLive: the turn it was set in, and idle after it, keep it; working again after that, or
+ * after acting while idle, ends it), its instance is called or asleep, or bedtime puts it to bed: an act never hides real
+ * work.
  *
  * Spots come from the office's skin: a pack the host keeps (web-office-skins.ts), with the office's layout overrides on
- * it (applyOverrides — the page's own rule); a built-in style (pixel, studio) has none. A seat is "area:index", its index
- * in the area's seat list from 0, as office_view lists it.
+ * it (applyOverrides — the page's own rule); a built-in style (pixel, studio) or a pack without stateZones draws desks,
+ * with none: there the line and the pose show, and `go` is refused (nobody walks; review). A seat is "area:index", its
+ * index in the area's seat list from 0, as office_view lists it.
  *
  * office_set is limited per instance (OfficeActLimiter: 6 a minute, 60 an hour, monotonic, memory only), like the
  * appearance limiter: checked before anything is validated, counted only once the act is in place; a refusal says when
@@ -34,7 +37,7 @@ export interface OfficeAct {
   instance: string; office: string; x?: number; y?: number; person?: string; say?: string; pose?: OfficePose;
   /** Wall-clock ms: when it was set, and when it ends. */
   since: number; until: number;
-  /** The instance's dashboard state when it was set: the page drops the act once that changes. */
+  /** The instance's dashboard state when it was set: set while idle, working is new work and ends it (actLive). */
   state: string;
 }
 export interface OfficeSpots {
@@ -43,7 +46,8 @@ export interface OfficeSpots {
   npcs: Array<{ id: string; label: string | null; x: number; y: number }>;
   door: { x: number; y: number } | null;
 }
-export interface OfficeSeen { id: string; name: string; skin: string; members: Array<{ name: string; display_name?: string; state: string }>; spots: OfficeSpots }
+/** `walks`: a zones style, where characters walk; on desks (false) only say and pose show. */
+export interface OfficeSeen { id: string; name: string; skin: string; walks: boolean; members: Array<{ name: string; display_name?: string; state: string }>; spots: OfficeSpots }
 /** The chart an office's members are read against: every instance the dashboard lists, and fleet.yaml's teams. */
 export interface OfficeChart { names: readonly string[]; teams: ReadonlyArray<{ name: string; members: readonly string[] }> }
 export interface OfficeActsDeps {
@@ -77,9 +81,12 @@ export function officeMembers(office: Pick<Office, "members">, chart: OfficeChar
   return out;
 }
 
-/** The spots of an office's skin: a kept pack's, with the office's overrides on it; a built-in style's are none. */
+/** Whether an office's style walks its people (a pack with stateZones, as the page's `zones`); else it draws desks. */
+export const officeWalks = (pack: CheckedPack | null): boolean => !!pack?.stateZones;
+
+/** The spots of an office's skin: a kept zones pack's, with the office's overrides on it; a desks style's are none. */
 export function officeSpots(office: Pick<Office, "skin" | "overrides">, pack: CheckedPack | null): OfficeSpots {
-  if (!pack) return { seats: [], waypoints: [], npcs: [], door: null };
+  if (!pack || !officeWalks(pack)) return { seats: [], waypoints: [], npcs: [], door: null };
   const applied = applyOverrides(pack, office.overrides ?? null);
   const p = applied.ok ? applied.pack : pack;
   return {
@@ -166,7 +173,8 @@ export class OfficeActs {
       const display = people.displayName(name);
       return { name, ...(display ? { display_name: display } : {}), state: people.stateOf(name) };
     });
-    return { id: o.id, name: o.name, skin: o.skin, members, spots: officeSpots(o, this.deps.pack(o.skin)) };
+    const pack = this.deps.pack(o.skin);
+    return { id: o.id, name: o.name, skin: o.skin, walks: officeWalks(pack), members, spots: officeSpots(o, pack) };
   }
   /** The office a call names, or the only one it is in; else a refusal naming them. */
   private pick(wanted: string | undefined, mine: Office[]): { office: Office } | { refused: OfficeAnswer } {
@@ -228,7 +236,10 @@ export class OfficeActs {
     const o = picked.office;
     let point: { x: number; y: number } | undefined, person: string | undefined;
     if (a.go) {
-      const spots = officeSpots(o, this.deps.pack(o.skin));
+      const pack = this.deps.pack(o.skin);
+      // A desks style (a built-in one, or a pack without stateZones) walks nobody: refused, not accepted to do nothing (review).
+      if (!officeWalks(pack)) return refuse("go", `go: ${o.id} is drawn as desks (its style "${o.skin}"): nobody walks there. say and pose still show.`);
+      const spots = officeSpots(o, pack);
       if (a.go.seat !== undefined) {
         const m = /^([A-Za-z0-9_-]{1,40}):(\d{1,3})$/.exec(a.go.seat), seat = m ? spots.seats.find(s => s.area === m[1] && s.index === Number(m[2])) : undefined;
         if (!seat) return refuse("seat", spots.seats.length ? `go.seat: "${a.go.seat}" is not a seat of ${o.id}; office_view lists them as "area:index".` : `go.seat: ${o.id} has no seats to walk to (its style "${o.skin}" has none).`);

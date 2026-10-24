@@ -282,13 +282,15 @@ are not in your list), you can direct your own character for a moment:
 
 - `office_view { office? }`: the stored offices you are in — each `{ id, name, skin, members: [{ name, display_name?,
   state }], spots: { seats: [{ area, index, x, y }], waypoints: [{ id, x, y }], npcs: [{ id, label, x, y }], door } }` —
-  your current `act` (or null) and `cooldown_ms` (0: you may act now). A built-in style (pixel, studio) has no spots.
+  your current `act` (or null) and `cooldown_ms` (0: you may act now). `walks: false`: the office is drawn as desks (a
+  built-in style such as pixel or studio, or a pack without zones) — no spots; `say` and `pose` show, `go` is refused.
 - `office_set { office?, go?, say?, pose?, seconds?, clear? }`: `go` is exactly one of `seat` (`"area:index"`, as
   office_view lists it), `waypoint` (an id) or `person` (a member of the same office); `say` a line of 1..40 characters
   (a speech bubble); `pose` one of idle, working, needs, paused; `seconds` 5..120 (default 30). `clear: true`, alone,
   ends your act. `office` is needed only when you are in more than one.
-- Each call replaces your act. It ends when its seconds are up, or the moment your real state changes — real work
-  always shows. At most **6 calls a minute** and **60 an hour**: a refusal says `cooldown_ms`.
+- Each call replaces your act. It ends when its seconds are up or you begin new work (the turn you set it in, and being
+  idle after, keep it; working again after that, or after setting it while idle, ends it); it is not shown while you
+  need a person (needs, crashed, stuck), are paused or stopped, or are asleep at bedtime — real work always shows. At most **6 calls a minute** and **60 an hour**: a refusal says `cooldown_ms`.
 
 ```json
 { "go": { "person": "atlas" }, "say": "Review's ready", "seconds": 20 }

@@ -1,5 +1,5 @@
 /**
- * #2578, the page's side: what an agent does by its own hand (office_set) in a stored zones office.
+ * #2578, the page's side: what an agent does by its own hand (office_set) in a stored office (mounted: web-office-overview-2554).
  * - actsOk: the host's acts checked (GET /ui/office-acts, the `office_acts` event) — the well-formed ones, nothing else;
  *   each end moved onto the page's clock by the host's `now`.
  * - actLive: an act holds until its end, unless its person is called (a call wins) or asleep; with the page's `seen`

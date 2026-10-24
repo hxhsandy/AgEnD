@@ -4,7 +4,8 @@
  * - office_view: the stored offices the caller is in — members and states, a pack's spots with the office's overrides
  *   on it (a built-in style: none) — its act and cooldown_ms.
  * - office_set: seat / waypoint / person resolved, every refusal (a bad seat, a person elsewhere, say too long, seconds
- *   out of range, nothing to do, two targets, office needed, no office), 6 a minute (cooldown_ms), clear, expiry.
+ *   out of range, nothing to do, two targets, office needed, no office), 6 a minute (cooldown_ms), clear, expiry; an
+ *   office drawn as desks (`walks: false`) refuses go at no cost and takes say and pose.
  * - Live: every change is the `office_acts` SSE event; GET /ui/office-acts reads the live ones (signed in, the public
  *   link too; never a guest).
  *
@@ -173,9 +174,9 @@ describe("office_view", () => {
     const view = a.view("beta", {});
     expect(view).toEqual({
       offices: [
-        { id: "ops", name: "Ops", skin: "cozy", members: [{ name: "alpha", display_name: "Alpha Fox", state: "working" }, { name: "beta", state: "idle" }, { name: "gamma", state: "needs" }],
+        { id: "ops", name: "Ops", skin: "cozy", walks: true, members: [{ name: "alpha", display_name: "Alpha Fox", state: "working" }, { name: "beta", state: "idle" }, { name: "gamma", state: "needs" }],
           spots: officeSpots(offices()[0]!, PACK) },
-        { id: "lab", name: "Lab", skin: "pixel", members: [{ name: "beta", state: "idle" }], spots: { seats: [], waypoints: [], npcs: [], door: null } },
+        { id: "lab", name: "Lab", skin: "pixel", walks: false, members: [{ name: "beta", state: "idle" }], spots: { seats: [], waypoints: [], npcs: [], door: null } },
       ],
       act: null, cooldown_ms: 0,
     });
@@ -226,9 +227,22 @@ describe("office_set", () => {
     expect([a.live(), sent, a.limiter.waitMs("alpha")]).toEqual([[], [], 0]);
   });
 
-  it("a built-in style has no seats to go to", () => {
-    const { a } = acts();
-    expect(a.set("beta", { office: "lab", go: { seat: "desks:0" } })).toMatchObject({ error: "seat", message: expect.stringContaining("no seats") });
+  it("an office drawn as desks (a built-in style, a pack without stateZones): go refused at no cost; say and pose accepted (review)", () => {
+    const { a, sent } = acts();
+    for (const go of [{ seat: "desks:0" }, { waypoint: "hall" }, { person: "gamma" }]) {
+      expect(a.set("beta", { office: "lab", go, say: "hi" })).toMatchObject({ error: "go", message: expect.stringContaining("drawn as desks") });
+    }
+    expect([a.live(), sent, a.limiter.waitMs("beta")]).toEqual([[], [], 0]);
+    expect(a.set("beta", { office: "lab", say: "Desk hello", pose: "working" })).toMatchObject({ act: { office: "lab", say: "Desk hello", pose: "working" } });
+    // A pack without stateZones draws desks too: no spots, walks false, go refused.
+    const { stateZones: _z, ...flat } = MANIFEST;
+    const DESKS = (() => { const r = checkSkinPack({ ...flat, id: "flat" }); if (!r.ok) throw new Error(r.error); return r.pack; })();
+    const list = (() => { const r = checkOffices([{ id: "den", name: "Den", skin: "flat", members: ["alpha"] }], id => (id === "flat" ? DESKS : null)); if (!r.ok) throw new Error(r.detail); return r.offices; })();
+    const b = new OfficeActs({ offices: () => list, pack: id => (id === "flat" ? DESKS : null), chart: () => CHART,
+      people: () => ({ stateOf: () => "idle", displayName: () => undefined }), changed: () => {} }, { limiter: new OfficeActLimiter(() => 0) });
+    expect(b.view("alpha", {})).toMatchObject({ offices: [{ id: "den", walks: false, spots: { seats: [], waypoints: [], npcs: [], door: null } }] });
+    expect(b.set("alpha", { go: { seat: "desks:0" } })).toMatchObject({ error: "go" });
+    expect(b.set("alpha", { say: "Here" })).toMatchObject({ act: { office: "den", say: "Here" } });
   });
 
   it("office is needed only in more than one (the refusal lists them); none at all is refused", () => {

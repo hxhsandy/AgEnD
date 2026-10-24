@@ -11,10 +11,12 @@
  *   tile (toggle); hover and click hit people across tiles; a tile's label (or a double-click on the tile) opens that
  *   office; tiles off screen are not drawn; reduced motion draws each change at once; the view is kept under its own
  *   key; Edit offices and Edit layout wait.
+ * - #2578 (review): agents' acts — a read a newer read or the stream overtook is dropped; a stored desks office draws
+ *   an act's line and pose; at bedtime an idle sleeper keeps its bed and sleeps, saying no act line (by day the act shows).
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { page, settle, h, type AppPage } from "./helpers/app-harness.js";
 import { fire, MiniElement } from "./helpers/mini-dom.js";
 
@@ -343,6 +345,84 @@ describe("All offices on the page", () => {
       await settle(6);
       expect(said("Tea, anyone?")).toBe(false);
     } finally { (globalThis as any).Image = was; }
+  });
+  it("#2578 review: a read a newer read overtook is dropped (a held opening GET brings no cleared act back); a read the stream overtook too", async () => {
+    const held: Array<(d: any) => void> = [];
+    const was = (globalThis as any).fetch, on: Record<string, (x: any) => void> = {};
+    (globalThis as any).fetch = async (url: string, o: any = {}) => (url === "/ui/office-acts"
+      ? new Promise((done) => held.push((d: any) => done({ ok: true, status: 200, json: async () => d }))) : was(url, o));
+    try {
+      offices = { rev: 2, offices: [{ id: "front", name: "Front desk", skin: "pixel", members: ["atlas"] }] };
+      app.appStore.set({ ...STORE, streamOn: (name: string, cb: (x: any) => void) => { on[name] = cb; return () => {}; } });
+      localStorage.setItem("agend_org_office", "front");
+      await office(); await settle(4);
+      const said = (line: string) => lastFrame().some((c: any) => c[0] === "fillText" && c[1][0] === line);
+      const act = (say: string) => ({ acts: [{ instance: "atlas", office: "front", until: Date.now() + 60_000, since: Date.now(), state: "idle", say }] });
+      expect(held).toHaveLength(1);                                          // the opening read, held
+      on.connection("live"); await settle(2);                                // the stream back: a second read
+      expect(held).toHaveLength(2);
+      held[1]!({ acts: [] }); await settle(4);
+      held[0]!(act("Old line")); await settle(6);                            // the older answer, last
+      expect(said("Old line")).toBe(false);
+      // The stream's control: a read the stream overtook is dropped too; the event's own list stands.
+      on.connection("live"); await settle(2);
+      on.office_acts(act("Fresh line")); await settle(4);
+      held[2]!({ acts: [] }); await settle(6);
+      expect(said("Fresh line")).toBe(true);
+      // A newer read's answer still lands.
+      on.connection("live"); await settle(2);
+      held[3]!(act("Newest line")); await settle(6);
+      expect([said("Newest line"), said("Fresh line")]).toEqual([true, false]);
+    } finally { (globalThis as any).fetch = was; }
+  });
+  it("#2578 review: an office drawn as desks (a stored pixel office) shows an agent's line and pose", async () => {
+    const on: Record<string, (x: any) => void> = {};
+    const px = K.skinFor("pixel"), draw = px.drawCharacter, poses: string[] = [];
+    px.drawCharacter = (ctx: any, d: any, look: any, ...rest: any[]) => { if (look && look.name === "atlas") poses.push(look.pose); return draw(ctx, d, look, ...rest); };
+    try {
+      offices = { rev: 2, offices: [{ id: "front", name: "Front desk", skin: "pixel", members: ["atlas"] }] };
+      app.appStore.set({ ...STORE, streamOn: (name: string, cb: (x: any) => void) => { on[name] = cb; return () => {}; } });
+      localStorage.setItem("agend_org_office", "front");
+      await office(); await settle(6);
+      const said = (line: string) => lastFrame().some((c: any) => c[0] === "fillText" && c[1][0] === line);
+      expect(poses.at(-1)).toBe("idle");
+      on.office_acts({ acts: [{ instance: "atlas", office: "front", until: Date.now() + 60_000, since: Date.now(), state: "idle", say: "At my desk", pose: "needs" }] });
+      await settle(6);
+      expect([said("At my desk"), poses.at(-1)]).toEqual([true, "needs"]);
+      on.office_acts({ acts: [] }); await settle(6);
+      expect([said("At my desk"), poses.at(-1)]).toEqual([false, "idle"]);
+    } finally { px.drawCharacter = draw; }
+  });
+  it("#2578 review: bedtime wins over an act (as over mail, #2569) — at 01:00 an idle agent in bed keeps its bed, sleeps, says no act line; by day the act shows", async () => {
+    const was = (globalThis as any).Image, mm = (globalThis as any).matchMedia;
+    (globalThis as any).Image = class { onload: any = null; onerror: any = null; u = ""; set src(u: string) { this.u = u; setTimeout(() => this.onload && this.onload(), 0); } };
+    (globalThis as any).matchMedia = () => ({ matches: true, addEventListener() {}, removeEventListener() {} });   // still: a walk lands at once
+    const m = MANIFEST(), strip = (src: string) => ({ src, frames: 1, w: 32, h: 48, fps: 0, ax: 16, ay: 44 });
+    m.characters = { default: { idle: strip("fox_idle.png"), working: strip("work.png"), paused: strip("sleep.png") } };
+    const files = { ...FILES, "work.png": "d".repeat(32), "sleep.png": "e".repeat(32) };
+    const on: Record<string, (x: any) => void> = {};
+    const run = async (hour: number, sha: string) => {
+      await p.unmount();
+      vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date(2026, 9, 24, hour, 0));
+      skins = { rev: "r", packs: [{ id: "clinic-sample", name: "Clinic", sha }] };
+      manifestAnswer = { manifest: m, files };
+      offices = { rev: 2, offices: [{ id: "front", name: "Front desk", skin: "clinic-sample", members: ["atlas"] }] };
+      app.appStore.set({ ...STORE, streamOn: (name: string, cb: (x: any) => void) => { on[name] = cb; return () => {}; } });
+      localStorage.setItem("agend_org_office", "front"); localStorage.setItem("agend_org_office_night", "1");
+      await office(); await settle(8);
+      on.office_acts({ acts: [{ instance: "atlas", office: "front", until: Date.now() + 60_000, since: Date.now(), state: "idle", say: "Night act", pose: "working", x: 640, y: 424 }] });
+      await settle(8);
+      const f = lastFrame(), img = (h: string) => f.some((c: any) => c[0] === "drawImage" && String(c[1][0]?.u).endsWith(`/img/${h.repeat(32)}.png`));
+      const tag = f.find((c: any) => c[0] === "fillText" && c[1][0] === "Atlas");
+      return { said: f.some((c: any) => c[0] === "fillText" && c[1][0] === "Night act"), asleep: img("e"), working: img("d"), at: tag ? [tag[1][1], Math.round(tag[1][2] - 10.5)] : null };
+    };
+    try {
+      const night = await run(1, "f".repeat(32));
+      expect([night.said, night.asleep, night.working]).toEqual([false, true, false]);
+      expect(night.at).toEqual([936, 572]);                                 // in bed (nap's first seat), not sent to the act's point
+      const day = await run(13, "0".repeat(32));
+      expect([day.said, day.asleep, day.working, day.at]).toEqual([true, false, true, [640, 424]]);
+    } finally { vi.useRealTimers(); (globalThis as any).Image = was; (globalThis as any).matchMedia = mm; }
   });
   it("the lobby tile: whoever is in no office, in the whole fleet's style; off by its toggle (kept)", async () => {
     offices = { rev: 2, offices: TWO };

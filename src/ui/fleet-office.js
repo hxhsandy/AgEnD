@@ -253,6 +253,14 @@ export function actTarget(a, L, walkers, t) {
   const d = desksOf(L).find((x) => x.node.name === a.person), there = (walkers && walkers.at(a.person, t)) || (d && d.seat);
   return there ? { x: Math.round(Math.min(L.width, there.x + ACT_BESIDE)), y: Math.round(there.y) } : null;
 }
+/**
+ * A look in its agent's own pose (office_set, #2578) while its act holds, else as it is. In bed for the night (#2568,
+ * `look.night`) it is asleep, as for mail (#2569): bedtime wins over an act.
+ */
+function actPosed(p, look) {
+  const act = look && p.acts && p.acts.get(look.name);
+  return act && act.pose && actLive(act, look.night ? "paused" : look.state, Date.now(), p.actSeen) ? { ...look, pose: officePose(act.pose) } : look;
+}
 /** The back and front layers: pictures of the scene at `ls` layer px per logical unit (`tagsOff`: no name tags but the Find box's matches). */
 function paintLayers(p, env, ls, tagsOff = false) {
   const { L, skin, zones, looks, all } = p;
@@ -321,7 +329,7 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
       if (g) { ctx.save(); ctx.globalAlpha = GHOST_ALPHA; sk.drawCharacter(ctx, { x: g.x - 44, y: g.y - 53, w: 88, h: 53, seat: g }, g.look, 0, env); ctx.restore(); continue; }
       const box = { ...q.d, x: q.at.x - 44, y: q.at.y - 53, w: 88, h: 53, seat: { x: q.at.x, y: q.at.y } };
       // An agent's own pose (office_set, #2578) while its act lasts and nothing calls it; walking is walking.
-      const act = p.acts && p.acts.get(q.d.node.name), posed = actLive(act, q.look.state, Date.now(), p.actSeen) && act.pose ? { ...q.look, pose: officePose(act.pose) } : q.look;
+      const posed = actPosed(p, q.look);
       const look = q.at.walking ? { ...q.look, pose: "walk", heading: q.at.heading } : posed;
       sk.drawCharacter(ctx, box, look, ms, env);
       if (!q.at.walking) speakers.push({ look: q.look, ...speakerAt(sk, look, q.at), area: q.d.area });
@@ -342,7 +350,7 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
     // A furniture item's own name (#2574: an NPC drawn as furniture), tagged like a person; none on a tile too small to read.
     if (!tagsOff) for (const f of furniture) if (f.label) { sk.drawTag(ctx, f.x, f.y, { label: f.label }, env); tags.push(tagBox(ctx, f.x, f.y, f.label)); }
   } else {
-    for (const d of p.desks) { const look = p.looks.get(d.key); sk.drawCharacter(ctx, d, look, ms, env); speakers.push({ look, x: d.x + 58, y: d.y + 12 }); }
+    for (const d of p.desks) { const look = p.looks.get(d.key); sk.drawCharacter(ctx, d, actPosed(p, look), ms, env); speakers.push({ look, x: d.x + 58, y: d.y + 12 }); }
     blit(p.layers.front);
     // Tags left out of the layer: the hovered desk's front again, with its tag.
     const hd = tagsOff && hot ? p.desks.find((d) => d.key === hot) : null;
@@ -356,7 +364,7 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
     if (sp.look.dim || sp.look.pose === "away") continue;
     const says = sp.look.night ? "paused" : sp.look.state;                // asleep at night: its "Zzz…" lines
     // What an agent says itself (office_set, #2578): whole, kept over the area's thinning like a call.
-    const act = p.acts && p.acts.get(sp.look.name), own = actLive(act, sp.look.state, Date.now(), p.actSeen) && act.say ? act.say : null;
+    const act = p.acts && p.acts.get(sp.look.name), own = actLive(act, says, Date.now(), p.actSeen) && act.say ? act.say : null;
     const b = own ? { text: own, shown: [...own].length } : bubbleAt(sp.look.name, says, ms, linesFor(says, p.lang, sk.pack, p.lines));
     if (b) bubbles.push({ key: sp.look.name, area: sp.area, state: sp.look.state, calling: CALLING.has(sp.look.state), rank: own ? 0 : bubbleRank(sp.look.state), shown: b.shown,
       box: bubbleBox(ctx, sp.x, sp.y, b.text), tail: { x: sp.x, y: sp.y }, sp, b });
@@ -475,14 +483,15 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     return () => { if (off) off(); };
   }, [lease, store]);
   // #2578: what agents do here by their own hand (office_set) — on opening, then as the stream brings it.
-  // A read the stream overtook is dropped (it is older); read again when the stream comes back, and — with no live stream
-  // (the public link, or a stream polling) — every POLL_MS while the page is shown.
+  // A read a newer one or the stream overtook is dropped (it is older: review — an opening read answered after the one
+  // the stream's return began brought a cleared act back); read again when the stream comes back, and — with no live
+  // stream (the public link, or a stream polling) — every POLL_MS while the page is shown.
   const [acts, setActs] = useState([]);
   const actSeen = useRef(new Set());
   useEffect(() => {
     if (!lease) return undefined;
-    let heard = 0;
-    const read = async () => { const at = heard, d = await store.acts(); if (lease.current() && d && at === heard) setActs(d); };
+    let heard = 0;                                                   // reads begun and events heard: the newest wins
+    const read = async () => { const at = ++heard, d = await store.acts(); if (lease.current() && d && at === heard) setActs(d); };
     void read();
     const sub = appStore.get().streamOn;
     const polled = () => globalThis.document?.body?.dataset?.webTransport === "poll" || appStore.get().connection === "polling";
@@ -617,8 +626,9 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   const looks = useMemo(() => looksOf(L, workOn(traffic), q, mode, zones), [L, traffic, q, mode, themeRev]);
   // #2564: what comes in from other offices — one office's and style's own: a letter's door and drop are that layout's,
   // so another office (or style) starts with none (one shown meanwhile is not carried over to a different room).
-  // #2578: the acts of the people in this stored zones office (by name); none elsewhere.
-  const actsHere = useMemo(() => new Map(zones && custom && !overview ? acts.filter((a) => a.office === custom.id).map((a) => [a.instance, a]) : []), [acts, zones, custom, overview]);
+  // #2578: the acts of the people in this stored office (by name); none elsewhere. On a desks style (review: accepted
+  // acts drew nothing there) the line and the pose show; nobody walks (the host refuses go there).
+  const actsHere = useMemo(() => new Map(custom && !overview ? acts.filter((a) => a.office === custom.id).map((a) => [a.instance, a]) : []), [acts, custom, overview]);
   const mailKey = `${custom ? custom.id : AUTO_ID}@${baseSkin.id}`;
   const mail = useMemo(() => { const m = createMail(); m.prime(traffic || []); return m; }, [mailKey]);
   useEffect(() => { flights.sync(traffic || [], now(), still); if (zones && !overview && mail.sync(traffic || [], now(), L, still)) loop.current?.wake(); }, [traffic, mail]);
@@ -630,9 +640,12 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     if (!zones || overview) return undefined;
     const go = () => {
       const t = now(), to = walkTargets(desksOf(L), L, t, wander);
-      for (const d of desksOf(L)) { const a = actsHere.get(d.node.name), at = actLive(a, d.node.state, Date.now(), actSeen.current) ? actTarget(a, L, walkers, t) : null; if (at) to.set(d.node.name, at); }
+      // An act's walk; not someone in bed for the night (#2568: bedtime wins, as for mail).
+      for (const d of desksOf(L)) { const a = actsHere.get(d.node.name), at = !d.night && actLive(a, d.node.state, Date.now(), actSeen.current) ? actTarget(a, L, walkers, t) : null; if (at) to.set(d.node.name, at); }
       for (const [name, at] of mail.targets(L, t)) to.set(name, at);
-      walkers.sync(to, t, L, still); loop.current?.wake();
+      walkers.sync(to, t, L, still);
+      // Reduced motion has no loop: drawn again here, or an act's walk (set after the scene was drawn) never shows.
+      if (still) { if (scene.current && !globalThis.document?.hidden) draw(0); } else loop.current?.wake();
     };
     go();
     if (still) return undefined;
