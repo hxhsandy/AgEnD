@@ -62,7 +62,7 @@ import { hits, needle } from "./fleet-canvas-layout.js";
 import { AUTO_ID, LOBBY, autoLayout, backingScale, coatOf, createFlights, customLayout, deskAt, desksOf, filterOk, lampOf, layoutOk, lightOf, membersOf,
   officePose, officeRooms, signOf, workOn } from "./fleet-office-model.js";
 import { BUILT_IN_SKINS, CHAR_DEPTH, DEFAULT_PAL, bubbleBox, loadPackSkin, modeOf, skinFor, tagBox } from "./fleet-office-skin.js";
-import { CALLING, activeFurniture, bubbleAt, bubbleRank, WANDER, createWalkers, linesFor, personAt, placeBubbles, thinBubbles, walkTargets, zonesLayout } from "./fleet-office-zones.js";
+import { CALLING, activeFurniture, bubbleAt, bubbleRank, NIGHT, WANDER, createWalkers, isNight, linesFor, personAt, placeBubbles, thinBubbles, walkTargets, zonesLayout } from "./fleet-office-zones.js";
 import { createOfficeStore } from "./fleet-office-store.js";
 import { OfficeEditor, officeForSave } from "./fleet-office-editor.js";
 import { LayoutEditor, handlesOf } from "./fleet-office-layout.js";
@@ -83,7 +83,7 @@ register("orgo", {
     b_working: "On it.|Typing…|Almost there|In the zone|One more test", b_idle: "Tea time|Ready when you are|Stretching|Anything for me?",
     b_paused: "Zzz…|Back later", b_stopped: "Off duty|Zzz…", b_needs: "Need you!|A question for you|Over here!",
     b_crashed: "Ouch, crashed|Help!", b_stuck: "Hmm, stuck?|Still thinking…",
-    hideAsleep: "Hide paused and stopped", layoutIgnored: "Its saved layout does not fit this style: drawn as the style's own.",
+    hideAsleep: "Hide paused and stopped", nightOn: "Bedtime 0–6: the idle sleep", layoutIgnored: "Its saved layout does not fit this style: drawn as the style's own.",
     fit: "Fit the office", overview: "Overview: click to move there", fullscreen: "Fullscreen", exitFullscreen: "Exit fullscreen",
     fill: "Fill", fillTitle: "Fill the panel (the scene's overflow is cropped; drag to see it)", zoomLevel: "Zoom {0}",
     allOffices: "All offices", labelAll: "All offices: each office is a tile, drawn in its own style. Drag to pan; the wheel, a pinch, + and − zoom, 0 fits, F is fullscreen. Double-click a tile to open that office.",
@@ -99,7 +99,7 @@ register("orgo", {
     b_working: "處理中|打字中…|快好了|專心中|再測一次", b_idle: "喝茶中|隨時可以開工|伸個懶腰|有事找我嗎？",
     b_paused: "Zzz…|晚點回來", b_stopped: "下班了|Zzz…", b_needs: "需要你！|有個問題|在這裡！",
     b_crashed: "糟糕，當掉了|救命！", b_stuck: "嗯，卡住了？|還在想…",
-    hideAsleep: "隱藏暫停與停止的成員", layoutIgnored: "它儲存的配置不適用這個風格：以風格本身的配置顯示。",
+    hideAsleep: "隱藏暫停與停止的成員", nightOn: "0–6 點就寢：閒著的人去睡", layoutIgnored: "它儲存的配置不適用這個風格：以風格本身的配置顯示。",
     fit: "顯示整個辦公室", overview: "總覽：點一下移到那裡", fullscreen: "全螢幕", exitFullscreen: "結束全螢幕",
     fill: "填滿", fillTitle: "填滿整個面板（超出的部分會被裁切，拖曳即可看到）", zoomLevel: "縮放 {0}",
     allOffices: "所有辦公室", labelAll: "所有辦公室：每間辦公室是一格，以它自己的風格顯示。拖曳平移；滾輪、雙指、+ 和 − 縮放，0 顯示全部，F 切換全螢幕。雙擊一格即可開啟那間辦公室。",
@@ -180,7 +180,8 @@ function looksOf(L, work, q, mode, zones) {
     const n = d.node;
     if (!n) return [d.key, { name: "", label: "", state: "missing", pose: "away", light: null, lamp: false, sign: null, coat: "", work: 0, dim: !!q, match: false, free: zones }];
     const match = !!q && hits(n, q);
-    return [d.key, { name: n.name, label: nodeText(n).primary, state: n.state, pose: officePose(n.state), light: lightOf(n.state), lamp: lampOf(n.state),
+    // At night (#2568) the idle are drawn asleep (their state stays idle: the tooltip and the list say so).
+    return [d.key, { name: n.name, label: nodeText(n).primary, state: n.state, pose: officePose(d.night ? "paused" : n.state), night: !!d.night, light: lightOf(n.state), lamp: lampOf(n.state),
       sign: zones ? null : signOf(n.state), coat: coatOf(n.i, n.i ? identityOf(n.i) : null, mode), work: work.get(n.name) || 0, dim: !!q && !match, match, free: zones }];
   }));
 }
@@ -192,8 +193,8 @@ function withOverrides(baseSkin, zones, office) {
   return a.ok ? { skin: { ...baseSkin, pack: a.pack }, ignored: false } : { skin: baseSkin, ignored: true };
 }
 /** A stored office's scene (or the lobby tile's): seats in its style's areas, its own seats, or one room wrapping at `deskW`. */
-function officeScene(office, nodes, skin, zones, deskW, prevSeats) {
-  if (zones) return zonesLayout(skin.pack, nodes, prevSeats);
+function officeScene(office, nodes, skin, zones, deskW, prevSeats, night = false) {
+  if (zones) return zonesLayout(skin.pack, nodes, prevSeats, { night });
   const lay = office.layout || layoutOk(skin.layout);
   return lay ? customLayout({ ...office, layout: lay }, nodes) : autoLayout([{ key: office.id, name: office.name, lobby: !!office.lobby, nodes }], { width: deskW });
 }
@@ -204,6 +205,8 @@ function partOf(L, looks, skin, zones, walkers, flights) {
   return { L, looks, skin, zones, walkers, flights, all, desks: all.filter((d) => d.node), layers: null,
     active: zones ? activeFurniture(skin.pack, shown) : new Set(), lines: bubbleDefaults(), lang: lang() };
 }
+/** At bedtime (#2568): each item with a `night` drawn as it — its strip playing, at its night place (its own when none). */
+export const nightFurniture = (list) => list.map((f) => (f.night ? { ...f, sprite: f.night.sprite, activeSprite: null, x: f.night.x ?? f.x, y: f.night.y ?? f.y, asleep: true } : f));
 /** The back and front layers: pictures of the scene at `ls` layer px per logical unit (`tagsOff`: no name tags but the Find box's matches). */
 function paintLayers(p, env, ls, tagsOff = false) {
   const { L, skin, zones, looks, all } = p;
@@ -259,17 +262,17 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
       if (at.walking) walking = true;
       return { d, at, look: p.looks.get(d.key) };
     }).sort((x, y) => x.at.y - y.at.y);
-    const furniture = sk.pack.furniture;
+    const furniture = p.night ? nightFurniture(sk.pack.furniture) : sk.pack.furniture;
     const band = [...furniture.filter((f) => f.depth === "y").map((f) => ({ y: f.y, k: 0, f })), ...people.map((q) => ({ y: q.at.y, k: 1, p: q }))]
       .sort((x, y) => x.y - y.y || x.k - y.k);
-    for (const f of furniture) if (f.depth !== "y" && f.depth < CHAR_DEPTH) sk.drawFurniture(ctx, f, p.active.has(f.id), ms, env);
+    for (const f of furniture) if (f.depth !== "y" && f.depth < CHAR_DEPTH) sk.drawFurniture(ctx, f, f.asleep || p.active.has(f.id), ms, env);
     for (const { f, p: q } of band) {
-      if (f) { sk.drawFurniture(ctx, f, p.active.has(f.id), ms, env); continue; }
+      if (f) { sk.drawFurniture(ctx, f, f.asleep || p.active.has(f.id), ms, env); continue; }
       const box = { ...q.d, x: q.at.x - 44, y: q.at.y - 53, w: 88, h: 53, seat: { x: q.at.x, y: q.at.y } };
       sk.drawCharacter(ctx, box, q.at.walking ? { ...q.look, pose: "walk", heading: q.at.heading } : q.look, ms, env);
       if (!q.at.walking) speakers.push({ look: q.look, x: q.at.x + 10, y: q.at.y - 50, area: q.d.area });
     }
-    for (const f of furniture) if (f.depth !== "y" && f.depth >= CHAR_DEPTH) sk.drawFurniture(ctx, f, p.active.has(f.id), ms, env);
+    for (const f of furniture) if (f.depth !== "y" && f.depth >= CHAR_DEPTH) sk.drawFurniture(ctx, f, f.asleep || p.active.has(f.id), ms, env);
     for (const it of up) sk.drawProp(ctx, it, ms, env);
     if (sk.drawForeground) sk.drawForeground(ctx, p.L, env);
     // Who found no spot in an area: a count in its corner (never over its name).
@@ -294,7 +297,8 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
   const bubbles = [];
   for (const sp of speakers) {
     if (sp.look.dim || sp.look.pose === "away") continue;
-    const b = bubbleAt(sp.look.name, sp.look.state, ms, linesFor(sp.look.state, p.lang, sk.pack, p.lines));
+    const says = sp.look.night ? "paused" : sp.look.state;                // asleep at night: its "Zzz…" lines
+    const b = bubbleAt(sp.look.name, says, ms, linesFor(says, p.lang, sk.pack, p.lines));
     if (b) bubbles.push({ key: sp.look.name, area: sp.area, state: sp.look.state, calling: CALLING.has(sp.look.state), rank: bubbleRank(sp.look.state), shown: b.shown,
       box: bubbleBox(ctx, sp.x, sp.y, b.text), tail: { x: sp.x, y: sp.y }, sp, b });
   }
@@ -356,6 +360,11 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   const [filter, setFilter] = useState(() => store.filter());
   const [style, setStyle] = useState(() => store.skin());
   const [hideAsleep, setHideAsleep] = useState(() => store.hideAsleep());
+  // Bedtime (#2568), when it is on here: the idle sleep from NIGHT.FROM to NIGHT.TO on this device's clock (read every NIGHT.TICK).
+  const [nightOn, setNightOn] = useState(() => store.nightOn());
+  const [nightNow, setNightNow] = useState(() => isNight());
+  useEffect(() => { if (!nightOn) return undefined; setNightNow(isNight()); const h = setInterval(() => setNightNow(isNight()), NIGHT.TICK); return () => clearInterval(h); }, [nightOn]);
+  const night = nightOn && nightNow;
   const [lobbyOn, setLobbyOn] = useState(() => store.lobbyTile());       // #2554: All offices' lobby tile
   const [packs, setPacks] = useState([]);                             // the skin packs the host keeps: [{ id, name, sha }]
   const [packSkins, setPackSkins] = useState(() => new Map());        // id@sha → a loaded skin, or null (not a pack)
@@ -494,12 +503,12 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     if (overview) return { rooms: [], width: 1, height: 1 };            // All offices: the tiles below
     const all = custom ? membersOf(custom, view) : [...new Map(officeRooms(view, filter).flatMap((r) => r.nodes).map((n) => [n.name, n])).values()];
     const nodes = all.filter(keep);
-    if (zones) { const z = zonesLayout(skin.pack, nodes, seatsRef.current); seatsRef.current = z.seats; return z; }
+    if (zones) { const z = zonesLayout(skin.pack, nodes, seatsRef.current, { night }); seatsRef.current = z.seats; return z; }
     // The desks wrap at the stage's width at the scale they open on (desksK: a pixel level near one CSS px a unit).
     const deskW = Math.max(240, Math.floor(width / desksK(ratio)));
     if (!custom) return autoLayout(officeRooms(view, filter).map((r) => (hideAsleep ? { ...r, nodes: r.nodes.filter(keep) } : r)), { width: deskW });
     return officeScene(custom, nodes, skin, false, deskW);
-  }, [overview, view, filter, custom, width, ratio, skin, hideAsleep]);
+  }, [overview, view, filter, custom, width, ratio, skin, hideAsleep, night]);
   // ── #2554: All offices' tiles — each stored office (then the lobby: whoever is in no office) laid out as its own view
   // lays it out, in its own style (desks wrap at a cell's width), with its own seats, walkers and flights ──
   const lobbyAll = useMemo(() => (overview ? lobbyNodes(stored, view) : []), [overview, stored, view]);
@@ -516,12 +525,12 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
       const sk = withOverrides(base, z, sp.lobby ? null : sp.office).skin;
       const seatKey = `${sp.key}@${pk || base.id}`;
       // A desks office is as large as its rooms (cropped: no margins, no corridors outside them).
-      const TL0 = officeScene(sp.office, sp.nodes.filter(keep), sk, z, OV.CELL_W, tileSeats.current.get(seatKey)), TL = z ? TL0 : cropToRooms(TL0);
+      const TL0 = officeScene(sp.office, sp.nodes.filter(keep), sk, z, OV.CELL_W, tileSeats.current.get(seatKey), night), TL = z ? TL0 : cropToRooms(TL0);
       if (z) tileSeats.current.set(seatKey, TL0.seats);
       return { key: sp.key, name: sp.name, lobby: sp.lobby, count: sp.nodes.length, skin: sk, zones: z, L: TL, prefix: `${sp.key}\u0001`,
         walkers: mine(tileWalkers, sp.key, createWalkers), flights: mine(tileFlights, sp.key, createFlights) };
     });
-  }, [overview, stored, view, packs, packSkins, hideAsleep, lobbyOn, lobbyAll, style]);
+  }, [overview, stored, view, packs, packSkins, hideAsleep, lobbyOn, lobbyAll, style, night]);
   const arranged = useMemo(() => tileLayout(tiles.map((tl) => ({ key: tl.key, w: tl.L.width, h: tl.L.height })), size), [tiles, size.w, size.h]);
   const tileLooks = useMemo(() => { const work = workOn(traffic); return tiles.map((tl) => looksOf(tl.L, work, q, mode, tl.zones)); }, [tiles, traffic, q, mode, themeRev]);
   // The scene the view pans and zooms: the office's, or the overview of every tile.
@@ -781,13 +790,13 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     const base = { ctx, ratio, BW, BH, matte, env, dirty: true };
     if (overview) {
       // Each tile a scene of its own, where the overview puts it (arranged.tiles, in the same order).
-      const parts = tiles.map((tl, i) => ({ ...partOf(tl.L, tileLooks[i], tl.skin, tl.zones, tl.walkers, tl.flights), key: tl.key, prefix: tl.prefix, tile: arranged.tiles[i] }));
+      const parts = tiles.map((tl, i) => ({ ...partOf(tl.L, tileLooks[i], tl.skin, tl.zones, tl.walkers, tl.flights), night, key: tl.key, prefix: tl.prefix, tile: arranged.tiles[i] }));
       scene.current = { ...base, overview: true, parts, lay: arranged };
     } else {
-      scene.current = { ...base, overview: false, part: partOf(L, looks, skin, zones, walkers, flights) };
+      scene.current = { ...base, overview: false, part: { ...partOf(L, looks, skin, zones, walkers, flights), night } };
     }
     if (still) draw(0); else loop.current?.wake();
-  }, [L, looks, skin, pal, size.w, size.h, ratio, matte, overview, tiles, tileLooks, arranged]);
+  }, [L, looks, skin, pal, size.w, size.h, ratio, matte, overview, tiles, tileLooks, arranged, night]);
 
   /** One frame at `ms` (0: still); whether anything is moving (in the air, or someone walking). */
   function draw(ms) {
@@ -1017,6 +1026,7 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
         </select></label>
         <${People} nodes=${everyone} pinned=${f.pinned} onChange=${(pinned) => setF({ ...f, pinned })} />` : null}
       <label class="check oo-hide-asleep"><input type="checkbox" checked=${hideAsleep} onChange=${() => { const v = !hideAsleep; store.saveHideAsleep(v); setHideAsleep(v); setTip(null); }} /><span>${to("hideAsleep")}</span></label>
+      ${zones || overview ? html`<label class="check oo-night"><input type="checkbox" checked=${nightOn} onChange=${() => { const v = !nightOn; store.saveNightOn(v); setNightOn(v); }} /><span>${to("nightOn")}</span></label>` : null}
       ${overview ? html`<label class="check oo-lobby-tile" title=${lobbyAll.length ? undefined : to("lobbyEveryone")}><input type="checkbox" checked=${lobbyOn && lobbyAll.length > 0}
         disabled=${!lobbyAll.length} onChange=${() => { const v = !lobbyOn; store.saveLobbyTile(v); setLobbyOn(v); setTip(null); }} /><span>${to("lobbyTile")}</span></label>
         ${lobbyAll.length ? null : html`<span class="muted oo-note oo-lobby-none">${to("lobbyEveryone")}</span>`}` : null}
