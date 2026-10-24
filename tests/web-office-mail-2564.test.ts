@@ -1,10 +1,12 @@
 /**
  * #2564: mail from another office — something sent to a person in this (zones) office by someone not in it flies in at
  * the door, lands near the middle of the room, and waits; the person walks over, picks it up, and walks back.
- * - dropPoint: the waypoint nearest the room's middle that no seat is on (else the middle), letters side by side.
+ * - dropPoint: the waypoint nearest the room's middle that no seat of the office is on (taken or free), letters side by
+ *   side, the offset spot checked too (else the middle).
  * - createMail: only to someone here from someone not here; not with reduced motion, nor stale, nor seen before;
  *   flies door → drop, then waits on the floor (t 0); targets → the drop for its person (not while asleep);
- *   picked up when its person stands on it; gone after MAX_WAIT, or when its person leaves the office.
+ *   picked up when its person stands on it; gone after MAX_WAIT, or when its person leaves the office; `prime` marks
+ *   what was already in the air as seen (another office's or style's mail starts empty — the page makes one per office).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { page, type AppPage } from "./helpers/app-harness.js";
@@ -29,6 +31,18 @@ describe("dropPoint", () => {
     expect(Z.dropPoint(L)).toEqual({ x: 600, y: 400 });                       // on-seat is nearer but a seat is on it
     expect(Z.dropPoint(L, 2)).toEqual({ x: 600 + 2 * Z.MAIL.GAP, y: 400 });
     expect(Z.dropPoint({ ...L, waypoints: [] })).toEqual({ x: 640, y: 396 });
+  });
+});
+
+describe("dropPoint: never on a seat of the office (review of #2565)", () => {
+  it("a free seat (in the areas, nobody on it) is avoided too, not only taken ones", () => {
+    const withFree = { ...L, areas: { lounge: { seats: [{ x: 600, y: 400 }] } } };      // a seat on the nearest waypoint, nobody on it
+    expect(Z.dropPoint(withFree)).toEqual({ x: 640, y: 600 });                            // the next nearest: the hall
+  });
+  it("the offset spot is checked too: a letter n GAPs along that would land on a seat goes to the next waypoint", () => {
+    const n = 2, onOffset = { ...L, areas: { lounge: { seats: [{ x: 600 + n * Z.MAIL.GAP, y: 400 }] } } };
+    expect(Z.dropPoint(onOffset, 0)).toEqual({ x: 600, y: 400 });                         // the first letter is fine
+    expect(Z.dropPoint(onOffset, n)).toEqual({ x: 640 + n * Z.MAIL.GAP, y: 600 });         // the third moves on
   });
 });
 
@@ -59,6 +73,12 @@ describe("createMail", () => {
     expect(m.frame(11000, L, walkersAt({ ran: { x: 600, y: 400, walking: true } }))).toHaveLength(1);   // passing by
     expect(m.frame(12000, L, walkersAt({ ran: { x: 600, y: 400, walking: false } }))).toEqual([]);     // picked up
     expect(m.size()).toBe(0);
+  });
+  it("prime: what was already in the air when this office's mail started is not delivered here", () => {
+    const m = Z.createMail();
+    m.prime([item("1", "xiaojie", "ran")]);
+    expect(m.sync([item("1", "xiaojie", "ran"), item("2", "xiaojie", "ran")], 0, L)).toBe(1);
+    expect(m.frame(10000, L, walkersAt({})).map((x: any) => x.id)).toEqual(["2"]);
   });
   it("asleep: it waits (nobody is sent); gone after MAX_WAIT, or when its person leaves", () => {
     const m = Z.createMail();

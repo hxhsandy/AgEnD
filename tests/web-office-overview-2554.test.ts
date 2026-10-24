@@ -262,6 +262,27 @@ describe("All offices on the page", () => {
       expect(p.root.querySelectorAll(".oo-desk").map((d: any) => d.getAttribute("data-key"))).toEqual(["front\u0001front/atlas", "lab\u0001zone/quill", "lab\u0001zone/sage", "ward\u0001zone/loner"]);
     } finally { (globalThis as any).Image = was; }
   });
+  it("#2564: mail is its office's own — a letter waiting in one office is not carried to another when the page switches", async () => {
+    const was = (globalThis as any).Image;
+    (globalThis as any).Image = class { onload: any = null; onerror: any = null; u = ""; set src(u: string) { this.u = u; setTimeout(() => this.onload && this.onload(), 0); } };
+    const on: Record<string, (x: any) => void> = {};
+    try {
+      const m = MANIFEST();
+      m.props = { send: { src: "env.png", frames: 1, w: 16, h: 16 } };
+      skins = { rev: "r", packs: [{ id: "clinic-sample", name: "Clinic", sha: "a".repeat(32) }] };   // its own sha: packs are kept per id and sha
+      manifestAnswer = { manifest: m, files: { ...FILES, "env.png": "d".repeat(32) } };
+      offices = { rev: 2, offices: [{ id: "front", name: "Front desk", skin: "clinic-sample", members: ["atlas"] }, { id: "lab", name: "Lab", skin: "clinic-sample", members: ["atlas", "quill"] }] };
+      app.appStore.set({ ...STORE, streamOn: (name: string, cb: (x: any) => void) => { on[name] = cb; return () => {}; } });
+      localStorage.setItem("agend_org_office", "front");
+      await office(); await settle(8);
+      const envelope = () => lastFrame().some((c: any) => c[0] === "drawImage" && String(c[1][0]?.u).endsWith(`/img/${"d".repeat(32)}.png`));
+      on.traffic({ id: "e".repeat(16), from: "sage", to: "atlas", kind: "send", state: "delivering" });   // sage is in no office
+      await settle(4); await new Promise((r) => setTimeout(r, 1300)); await settle(4);
+      expect(envelope()).toBe(true);                                          // landed in the Front desk, waiting for atlas
+      await choose("lab"); await settle(4); await new Promise((r) => setTimeout(r, 300)); await settle(4);
+      expect(envelope()).toBe(false);                                         // the Lab (atlas there too) has none of it
+    } finally { (globalThis as any).Image = was; }
+  });
   it("the lobby tile: whoever is in no office, in the whole fleet's style; off by its toggle (kept)", async () => {
     offices = { rev: 2, offices: TWO };
     localStorage.setItem("agend_org_office", "*all");

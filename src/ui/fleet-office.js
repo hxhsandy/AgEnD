@@ -403,7 +403,6 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   const ooRef = useRef(null), [fs, setFs] = useState(null), fsRef = useRef(null), fsAsked = useRef(false), fsTarget = useRef(null);
   fsRef.current = fs;
   const flights = useMemo(() => createFlights(), []);
-  const mail = useMemo(() => createMail(), []);                       // #2564: what comes in from other offices
   const walkers = useMemo(() => createWalkers(), []);
   const seatsRef = useRef(new Map());                                 // the zones layout's last seats: kept where they can be
   // #2554: All offices' tiles keep their own: seats (by tile and style), walkers and flights (by tile); and the items
@@ -559,7 +558,11 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   // The scene the view pans and zooms: the office's, or the overview of every tile.
   const L = useMemo(() => (overview ? { mode: "overview", rooms: [], width: arranged.width, height: arranged.height } : single), [overview, single, arranged]);
   const looks = useMemo(() => looksOf(L, workOn(traffic), q, mode, zones), [L, traffic, q, mode, themeRev]);
-  useEffect(() => { flights.sync(traffic || [], now(), still); if (zones && !overview && mail.sync(traffic || [], now(), L, still)) loop.current?.wake(); }, [traffic]);
+  // #2564: what comes in from other offices — one office's and style's own: a letter's door and drop are that layout's,
+  // so another office (or style) starts with none (one shown meanwhile is not carried over to a different room).
+  const mailKey = `${custom ? custom.id : AUTO_ID}@${baseSkin.id}`;
+  const mail = useMemo(() => { const m = createMail(); m.prime(traffic || []); return m; }, [mailKey]);
+  useEffect(() => { flights.sync(traffic || [], now(), still); if (zones && !overview && mail.sync(traffic || [], now(), L, still)) loop.current?.wake(); }, [traffic, mail]);
   // Zones: everyone's seat is where they walk to — an idle person now and then strolls near it and back (#2560; not
   // with reduced motion, nor while Edit layout is open: the seats are being placed); someone with mail from another
   // office walks to it first (#2564).
@@ -575,7 +578,7 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     if (still) return undefined;
     const h = setInterval(go, WANDER.TICK);
     return () => clearInterval(h);
-  }, [L, wander]);
+  }, [L, wander, mail]);
   // …and in each tile on a zones style; the traffic within a tile is its own, between tiles the overview's.
   useEffect(() => {
     for (const tl of tiles) if (tl.zones) tl.walkers.sync(new Map(desksOf(tl.L).map((d) => [d.node.name, d.seat])), now(), tl.L, still);
@@ -824,7 +827,7 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
       scene.current = { ...base, overview: false, part: { ...partOf(L, looks, skin, zones, walkers, flights), ghosts, mail } };
     }
     if (still) draw(0); else loop.current?.wake();
-  }, [L, looks, skin, pal, size.w, size.h, ratio, matte, overview, tiles, tileLooks, arranged, ghosts]);
+  }, [L, looks, skin, pal, size.w, size.h, ratio, matte, overview, tiles, tileLooks, arranged, ghosts, mail]);
 
   /** One frame at `ms` (0: still); whether anything is moving (in the air, or someone walking). */
   function draw(ms) {

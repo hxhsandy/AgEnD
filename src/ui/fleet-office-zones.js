@@ -145,12 +145,18 @@ export function walkTargets(desks, graph, t, wander = true) {
  * for it (it waits for them to wake, up to MAX_WAIT).
  */
 export const MAIL = { MAX_WAIT: 60000, GAP: 16, ASLEEP: new Set(["paused", "stopped"]), MAX: 20 };
-/** Where letters land: the waypoint nearest the room's middle that no seat is on (else the middle), `n` letters along. */
+/**
+ * Where the `n`th waiting letter lands: `n` GAPs along from the waypoint nearest the room's middle — the nearest whose
+ * spot (offset included) no seat of the office is on, taken or free (someone may sit there any moment; #2561 likewise);
+ * else the middle.
+ */
 export function dropPoint(L, n = 0) {
-  const mid = { x: L.width / 2, y: L.height * 0.55 }, seats = desksIn(L).map((d) => d.seat);
-  const free = (L.waypoints || []).filter((w) => !seats.some((q) => Math.hypot(w.x - q.x, w.y - q.y) < 4));
-  const at = free.length ? free.reduce((a, w) => (Math.hypot(w.x - mid.x, w.y - mid.y) < Math.hypot(a.x - mid.x, a.y - mid.y) ? w : a)) : mid;
-  return { x: Math.round(at.x + n * MAIL.GAP), y: Math.round(at.y) };
+  const mid = { x: L.width / 2, y: L.height * 0.55 }, d = (p, q) => Math.hypot(p.x - q.x, p.y - q.y);
+  const seats = [...Object.values(L.areas || {}).flatMap((a) => a.seats || []), ...desksIn(L).map((q) => q.seat)];
+  const onSeat = (p) => seats.some((q) => d(p, q) < 4);
+  const spots = (L.waypoints || []).map((w) => ({ x: Math.round(w.x + n * MAIL.GAP), y: Math.round(w.y), from: w }))
+    .filter((p) => !onSeat(p.from) && !onSeat(p)).sort((p, q) => d(p.from, mid) - d(q.from, mid));
+  return spots.length ? { x: spots[0].x, y: spots[0].y } : { x: Math.round(mid.x), y: Math.round(mid.y) };
 }
 const desksIn = (L) => (L.rooms || []).flatMap((r) => r.desks || []).filter((d) => d.node);
 /**
@@ -158,7 +164,8 @@ const desksIn = (L) => (L.rooms || []).flatMap((r) => r.desks || []).filter((d) 
  * who is not becomes a letter (none with reduced motion, nor for a stale delegation; a zones office only).
  * `frame(now, L, walkers)` → what to draw, { id, hue, kind, from, x, y, t } (t: its flight, 0 on the floor), picking
  * up the letters whose person stands on them, and dropping those gone too long or whose person left. `targets(L)`:
- * name → where to walk to pick one up (the first waiting for them; none while they are asleep). `size()`.
+ * name → where to walk to pick one up (the first waiting for them; none while they are asleep). `prime(items)`: mark as
+ * seen what was in the air before this office was shown (a new office's or style's mail starts empty). `size()`.
  */
 export function createMail({ max = MAIL.MAX } = {}) {
   const seen = new Set();
@@ -204,6 +211,8 @@ export function createMail({ max = MAIL.MAX } = {}) {
       }
       return out;
     },
+    /** What is already in the traffic when this office's mail starts (#2564): seen, so it is not delivered again here. */
+    prime(items) { for (const it of items || []) seen.add(it.id); },
     size: () => letters.length,
   };
 }
