@@ -34,7 +34,7 @@ const TWO = [{ id: "front", name: "Front desk", skin: "studio", members: ["atlas
 
 let p: AppPage;
 let O: any, F: any, M: any, V: any, CV: any, Z: any, K: any, S: any, TR: any, app: any, nav: any, fleet: any, org: any;
-let offices: any = { rev: 0, offices: [] }, skins: any = { rev: "", packs: [] }, manifestAnswer: any = null;
+let offices: any = { rev: 0, offices: [] }, skins: any = { rev: "", packs: [] }, manifestAnswer: any = null, trafficAnswer: any = null;
 const fetched: string[] = [];
 beforeAll(async () => {
   p = page({ url: "http://127.0.0.1:19280/ui/fleet/org" });
@@ -42,7 +42,7 @@ beforeAll(async () => {
     fetched.push(url);
     if (url === "/ui/offices" && o.method === "PUT") return { ok: true, status: 200, json: async () => offices };
     if (url.startsWith("/ui/office-skins/")) return manifestAnswer ? { ok: true, status: 200, json: async () => manifestAnswer } : { ok: false, status: 404, json: async () => ({}) };
-    return { ok: true, status: 200, json: async () => (url === "/ui/org" ? ORG : url === "/ui/offices" ? offices : url === "/ui/office-skins" ? skins : {}) };
+    return { ok: true, status: 200, json: async () => (url === "/ui/org" ? ORG : url === "/ui/offices" ? offices : url === "/ui/office-skins" ? skins : url === "/ui/traffic" && trafficAnswer ? trafficAnswer : {}) };
   };
   app = await import("/assets/app-store.js");
   nav = await import("/assets/app-nav.js");
@@ -63,7 +63,7 @@ afterAll(async () => { await p.unmount(); p.restore(); delete (globalThis as any
 beforeEach(async () => {
   await p.unmount();
   p.storage.clear();
-  offices = { rev: 0, offices: [] }; skins = { rev: "", packs: [] }; manifestAnswer = null; fetched.length = 0;
+  offices = { rev: 0, offices: [] }; skins = { rev: "", packs: [] }; manifestAnswer = null; trafficAnswer = null; fetched.length = 0;
   nav.navigate("/ui/fleet/org");
   app.appStore.set(STORE);
 });
@@ -260,6 +260,28 @@ describe("All offices on the page", () => {
       expect(r0[1][0]).toBe(Math.round(v.x + lay.tiles[0].x * v.k));
       expect(r0[1][2]).toBeCloseTo(lay.tiles[0].w * v.k, 6);
       expect(p.root.querySelectorAll(".oo-desk").map((d: any) => d.getAttribute("data-key"))).toEqual(["front\u0001front/atlas", "lab\u0001zone/quill", "lab\u0001zone/sage", "ward\u0001zone/loner"]);
+    } finally { (globalThis as any).Image = was; }
+  });
+  it("#2562: an item flying between tiles is its sender's own (their set's prop, from their tile's pack), at that tile's scale", async () => {
+    const was = (globalThis as any).Image;
+    (globalThis as any).Image = class { onload: any = null; onerror: any = null; u = ""; set src(u: string) { this.u = u; setTimeout(() => this.onload && this.onload(), 0); } };
+    try {
+      const m = MANIFEST();
+      m.characters.fox = { ...m.characters.fox, prop: { src: "scissors.png", frames: 1, w: 16, h: 16 } };
+      m.byInstance = { atlas: "fox" };
+      skins = { rev: "r", packs: [{ id: "clinic-sample", name: "Clinic", sha: "7".repeat(32) }] };
+      manifestAnswer = { manifest: m, files: { ...FILES, "scissors.png": "c".repeat(32) } };
+      offices = { rev: 2, offices: [{ id: "front", name: "Front desk", skin: "clinic-sample", members: ["atlas"] }, { id: "lab", name: "Lab", skin: "clinic-sample", members: ["quill"] }] };
+      trafficAnswer = { now: new Date().toISOString(), items: [{ id: "a".repeat(16), from: "atlas", to: "quill", kind: "send", state: "delivering" }], delegations: [] };
+      localStorage.setItem("agend_org_office", "*all"); localStorage.setItem("agend_org_office_lobby", "0");
+      await office(); await settle(8);
+      const calls = p.root.querySelector(".oo-canvas")._ctx.calls;
+      const scissors = calls.map((c: any, i: number) => (c[0] === "drawImage" && String(c[1][0]?.u).endsWith(`/img/${"c".repeat(32)}.png`) ? i : -1)).filter((i: number) => i >= 0);
+      expect(scissors.length).toBeGreaterThan(0);                           // atlas's scissors, not the built-in envelope
+      // Drawn under the sender's tile's scale (the overview's × the tile's), after the last tile's frame.
+      const set = calls.slice(0, scissors[0]).reverse().find((c: any) => c[0] === "setTransform");
+      const v = shown(), lay = zonesLay(2);
+      expect(set[1][0]).toBeCloseTo(v.k * lay.tiles[0].s, 6);
     } finally { (globalThis as any).Image = was; }
   });
   it("the lobby tile: whoever is in no office, in the whole fleet's style; off by its toggle (kept)", async () => {

@@ -225,6 +225,8 @@ export function ghostsOf(pack, people = []) {
   }
   return out;
 }
+/** All offices: the tile `name` is drawn in ({ tile, skin }), or null. */
+const senderTile = (parts, name) => (name ? parts.find((p) => desksOf(p.L).some((d) => d.node.name === name)) || null : null);
 /** The back and front layers: pictures of the scene at `ls` layer px per logical unit (`tagsOff`: no name tags but the Find box's matches). */
 function paintLayers(p, env, ls, tagsOff = false) {
   const { L, skin, zones, looks, all } = p;
@@ -847,10 +849,12 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     }
     for (const say of said) say();
     const up = still ? [] : cross.frame(ms, s.parts);
-    if (up.length) {
-      ctx.setTransform(a, 0, 0, a, ox, oy);
-      const prop = skinFor("pixel").drawProp;
-      for (const it of up) prop(ctx, it, ms, env);
+    // Each drawn by its sender's tile's skin (#2562: their own prop, else that pack's for its kind), at that tile's scale;
+    // a sender in no tile drawn: the built-in item, in overview units.
+    for (const it of up) {
+      const from = senderTile(s.parts, it.from);
+      if (from) { ctx.setTransform(a * from.tile.s, 0, 0, a * from.tile.s, ox, oy); from.skin.drawProp(ctx, { ...it, x: it.x / from.tile.s, y: it.y / from.tile.s }, ms, env); }
+      else { ctx.setTransform(a, 0, 0, a, ox, oy); skinFor("pixel").drawProp(ctx, it, ms, env); }
     }
     return moving || up.length > 0 || cross.size() > 0;
   }
