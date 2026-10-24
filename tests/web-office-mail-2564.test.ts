@@ -2,7 +2,7 @@
  * #2564: mail from another office — something sent to a person in this (zones) office by someone not in it flies in at
  * the door, lands near the middle of the room, and waits; the person walks over, picks it up, and walks back.
  * - dropPoint: the waypoint nearest the room's middle that no seat of the office is on (taken or free), letters side by
- *   side, the offset spot checked too (else the middle).
+ *   side, the offset spot checked too; else the nearest point round the middle no seat is on; else none (not delivered).
  * - createMail: only to someone here from someone not here; not with reduced motion, nor stale, nor seen before;
  *   flies door → drop, then waits on the floor (t 0); targets → the drop for its person (not while asleep);
  *   picked up when its person stands on it; gone after MAX_WAIT, or when its person leaves the office; `prime` marks
@@ -30,7 +30,9 @@ describe("dropPoint", () => {
   it("the waypoint nearest the middle that no seat is on; letters side by side; no free waypoint: the middle", () => {
     expect(Z.dropPoint(L)).toEqual({ x: 600, y: 400 });                       // on-seat is nearer but a seat is on it
     expect(Z.dropPoint(L, 2)).toEqual({ x: 600 + 2 * Z.MAIL.GAP, y: 400 });
-    expect(Z.dropPoint({ ...L, waypoints: [] })).toEqual({ x: 640, y: 396 });
+    const fallback = Z.dropPoint({ ...L, waypoints: [] });                     // the middle is ran's seat (640, 396)
+    expect(fallback).not.toBeNull();
+    expect(Math.hypot(fallback.x - 640, fallback.y - 396)).toBeGreaterThanOrEqual(4);
   });
 });
 
@@ -43,6 +45,29 @@ describe("dropPoint: never on a seat of the office (review of #2565)", () => {
     const n = 2, onOffset = { ...L, areas: { lounge: { seats: [{ x: 600 + n * Z.MAIL.GAP, y: 400 }] } } };
     expect(Z.dropPoint(onOffset, 0)).toEqual({ x: 600, y: 400 });                         // the first letter is fine
     expect(Z.dropPoint(onOffset, n)).toEqual({ x: 640 + n * Z.MAIL.GAP, y: 600 });         // the third moves on
+  });
+});
+
+describe("dropPoint's fallback: off every seat too (review of #2565)", () => {
+  const off = (p: any, seats: any[]) => seats.every((q) => Math.hypot(p.x - q.x, p.y - q.y) >= 4);
+  it("no waypoints: an occupied seat at the middle → a point round it, off every seat", () => {
+    const p = Z.dropPoint({ ...L, waypoints: [] });
+    expect(off(p, [{ x: 640, y: 396 }, { x: 200, y: 200 }])).toBe(true);
+  });
+  it("every waypoint blocked, a free seat at the middle and one on the first ring → further out, off every seat", () => {
+    const seats = [{ x: 640, y: 396 }, { x: 640 + 2 * Z.MAIL.GAP, y: 396 }];
+    const blocked = { ...L, waypoints: seats.map((q, i) => ({ id: `w${i}`, ...q })), areas: { lounge: { seats } } };
+    const p = Z.dropPoint(blocked);
+    expect(p).not.toBeNull();
+    expect(off(p, [...seats, { x: 200, y: 200 }])).toBe(true);
+    expect(off(Z.dropPoint(blocked, 3), seats)).toBe(true);                               // with an offset too
+  });
+  it("nowhere off the seats (a room that is all seat): none — and no letter is delivered there", () => {
+    const tiny = { ...office([desk("ran", "idle", 4, 4)]), width: 8, height: 8, waypoints: [], door: { x: 4, y: 8 } };
+    expect(Z.dropPoint(tiny)).toBeNull();
+    const m = Z.createMail();
+    expect(m.sync([item("9", "xiaojie", "ran")], 0, tiny)).toBe(0);
+    expect(m.size()).toBe(0);
   });
 });
 
