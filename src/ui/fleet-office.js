@@ -62,7 +62,7 @@ import { hits, needle } from "./fleet-canvas-layout.js";
 import { AUTO_ID, LOBBY, autoLayout, backingScale, coatOf, createFlights, customLayout, deskAt, desksOf, filterOk, lampOf, layoutOk, lightOf, membersOf,
   officePose, officeRooms, signOf, workOn } from "./fleet-office-model.js";
 import { BUILT_IN_SKINS, CHAR_DEPTH, DEFAULT_PAL, bubbleBox, loadPackSkin, modeOf, skinFor, tagBox } from "./fleet-office-skin.js";
-import { CALLING, activeFurniture, bubbleAt, bubbleRank, createWalkers, linesFor, personAt, placeBubbles, thinBubbles, zonesLayout } from "./fleet-office-zones.js";
+import { CALLING, activeFurniture, bubbleAt, bubbleRank, WANDER, createWalkers, linesFor, personAt, placeBubbles, thinBubbles, walkTargets, zonesLayout } from "./fleet-office-zones.js";
 import { createOfficeStore } from "./fleet-office-store.js";
 import { OfficeEditor, officeForSave } from "./fleet-office-editor.js";
 import { LayoutEditor, handlesOf } from "./fleet-office-layout.js";
@@ -204,6 +204,27 @@ function partOf(L, looks, skin, zones, walkers, flights) {
   return { L, looks, skin, zones, walkers, flights, all, desks: all.filter((d) => d.node), layers: null,
     active: zones ? activeFurniture(skin.pack, shown) : new Set(), lines: bubbleDefaults(), lang: lang() };
 }
+/** Where a seated person's bubble points: over the head of the picture drawn — a pack's figure can be taller than the
+ * built-in one (#2558: a 134 px figure had its face under the bubble); never lower than the built-in spot. */
+export function speakerAt(sk, look, at) {
+  const top = sk.charBox ? sk.charBox(look, at).y + 2 : Infinity;
+  return { x: at.x + 10, y: Math.min(at.y - 50, top) };
+}
+/** The pose an area's seats are for: the first state (asleep, working, calling, idle) the pack sends there. */
+const GHOST_POSE = [["paused", "paused"], ["stopped", "paused"], ["working", "working"], ["needs", "needs"], ["crashed", "needs"], ["stuck", "needs"], ["idle", "idle"]];
+/** How faint Edit layout's figures are: seen through, yet readable over a busy picture (a dimmed person is 0.35). */
+const GHOST_ALPHA = 0.6;
+/** Edit layout's faint figures: one on each seat no one is on, { x, y, look } (the pack's default set; drawn at GHOST_ALPHA). */
+export function ghostsOf(pack, people = []) {
+  const taken = (s) => people.some((q) => Math.abs(q.at.x - s.x) < 2 && Math.abs(q.at.y - s.y) < 2);
+  const out = [];
+  for (const [name, a] of Object.entries(pack.areas)) {
+    const hit = GHOST_POSE.find(([st]) => pack.stateZones && pack.stateZones[st] === name);
+    const pose = hit ? hit[1] : "idle";
+    for (const s of a.seats) if (!taken(s)) out.push({ x: s.x, y: s.y, look: { key: `ghost:${name}`, name: "", label: "", state: pose, pose, coat: "#8a8f99", free: true } });
+  }
+  return out;
+}
 /** The back and front layers: pictures of the scene at `ls` layer px per logical unit (`tagsOff`: no name tags but the Find box's matches). */
 function paintLayers(p, env, ls, tagsOff = false) {
   const { L, skin, zones, looks, all } = p;
@@ -260,14 +281,17 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
       return { d, at, look: p.looks.get(d.key) };
     }).sort((x, y) => x.at.y - y.at.y);
     const furniture = sk.pack.furniture;
-    const band = [...furniture.filter((f) => f.depth === "y").map((f) => ({ y: f.y, k: 0, f })), ...people.map((q) => ({ y: q.at.y, k: 1, p: q }))]
+    const band = [...furniture.filter((f) => f.depth === "y").map((f) => ({ y: f.y, k: 0, f })), ...people.map((q) => ({ y: q.at.y, k: 1, p: q })),
+      ...(p.ghosts ? ghostsOf(sk.pack, people).map((g) => ({ y: g.y, k: 1, g })) : [])]
       .sort((x, y) => x.y - y.y || x.k - y.k);
     for (const f of furniture) if (f.depth !== "y" && f.depth < CHAR_DEPTH) sk.drawFurniture(ctx, f, p.active.has(f.id), ms, env);
-    for (const { f, p: q } of band) {
+    for (const { f, p: q, g } of band) {
       if (f) { sk.drawFurniture(ctx, f, p.active.has(f.id), ms, env); continue; }
+      if (g) { ctx.save(); ctx.globalAlpha = GHOST_ALPHA; sk.drawCharacter(ctx, { x: g.x - 44, y: g.y - 53, w: 88, h: 53, seat: g }, g.look, 0, env); ctx.restore(); continue; }
       const box = { ...q.d, x: q.at.x - 44, y: q.at.y - 53, w: 88, h: 53, seat: { x: q.at.x, y: q.at.y } };
-      sk.drawCharacter(ctx, box, q.at.walking ? { ...q.look, pose: "walk", heading: q.at.heading } : q.look, ms, env);
-      if (!q.at.walking) speakers.push({ look: q.look, x: q.at.x + 10, y: q.at.y - 50, area: q.d.area });
+      const look = q.at.walking ? { ...q.look, pose: "walk", heading: q.at.heading } : q.look;
+      sk.drawCharacter(ctx, box, look, ms, env);
+      if (!q.at.walking) speakers.push({ look: q.look, ...speakerAt(sk, look, q.at), area: q.d.area });
     }
     for (const f of furniture) if (f.depth !== "y" && f.depth >= CHAR_DEPTH) sk.drawFurniture(ctx, f, p.active.has(f.id), ms, env);
     for (const it of up) sk.drawProp(ctx, it, ms, env);
@@ -489,6 +513,9 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
     return withOverrides(baseSkin, zones, custom);
   }, [baseSkin, zones, custom, layout, layoutStale]);
   const skin = placed.skin;
+  // While Edit layout is open: a faint figure on every seat, in the pose its area is for (#2558), so a seat is placed by
+  // what will stand, sit or lie there, not by a dot.
+  const ghosts = zones && !!layout && !layoutStale;
   const keep = (n) => !(hideAsleep && ASLEEP.has(n.state));
   const single = useMemo(() => {
     if (overview) return { rooms: [], width: 1, height: 1 };            // All offices: the tiles below
@@ -528,12 +555,17 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
   const L = useMemo(() => (overview ? { mode: "overview", rooms: [], width: arranged.width, height: arranged.height } : single), [overview, single, arranged]);
   const looks = useMemo(() => looksOf(L, workOn(traffic), q, mode, zones), [L, traffic, q, mode, themeRev]);
   useEffect(() => { flights.sync(traffic || [], now(), still); }, [traffic]);
-  // Zones: everyone's seat is where they walk to.
+  // Zones: everyone's seat is where they walk to — an idle person now and then strolls near it and back (#2560; not
+  // with reduced motion, nor while Edit layout is open: the seats are being placed).
+  const wander = zones && !overview && !still && !layout;
   useEffect(() => {
-    if (!zones || overview) return;
-    walkers.sync(new Map(desksOf(L).map((d) => [d.node.name, d.seat])), now(), L, still);
-    loop.current?.wake();
-  }, [L]);
+    if (!zones || overview) return undefined;
+    const go = () => { walkers.sync(walkTargets(desksOf(L), L, now(), wander), now(), L, still); loop.current?.wake(); };
+    go();
+    if (!wander) return undefined;
+    const h = setInterval(go, WANDER.TICK);
+    return () => clearInterval(h);
+  }, [L, wander]);
   // …and in each tile on a zones style; the traffic within a tile is its own, between tiles the overview's.
   useEffect(() => {
     for (const tl of tiles) if (tl.zones) tl.walkers.sync(new Map(desksOf(tl.L).map((d) => [d.node.name, d.seat])), now(), tl.L, still);
@@ -779,10 +811,10 @@ export function Office({ view, traffic, q = "", lease, onOpen }) {
       const parts = tiles.map((tl, i) => ({ ...partOf(tl.L, tileLooks[i], tl.skin, tl.zones, tl.walkers, tl.flights), key: tl.key, prefix: tl.prefix, tile: arranged.tiles[i] }));
       scene.current = { ...base, overview: true, parts, lay: arranged };
     } else {
-      scene.current = { ...base, overview: false, part: partOf(L, looks, skin, zones, walkers, flights) };
+      scene.current = { ...base, overview: false, part: { ...partOf(L, looks, skin, zones, walkers, flights), ghosts } };
     }
     if (still) draw(0); else loop.current?.wake();
-  }, [L, looks, skin, pal, size.w, size.h, ratio, matte, overview, tiles, tileLooks, arranged]);
+  }, [L, looks, skin, pal, size.w, size.h, ratio, matte, overview, tiles, tileLooks, arranged, ghosts]);
 
   /** One frame at `ms` (0: still); whether anything is moving (in the air, or someone walking). */
   function draw(ms) {
