@@ -81,6 +81,14 @@ describe("furniture at night", () => {
     const bad = base(); (bad.furniture[0] as any).night.when = "always";
     expect(PK.checkSkinPack(bad)).toEqual({ ok: false, error: 'furniture[0].night: unknown key "when"' });
   });
+  it("with #2570's keys: loop, activeWhen/activeFor and night on one item all kept; at night its night strip plays", () => {
+    const m = base();
+    m.furniture = [{ ...m.furniture[0], loop: true, activeWhen: "needs", activeFor: "atlas", activeSprite: STRIP("look.png") } as any];
+    const f = PK.checkSkinPack(m).pack.furniture[0];
+    expect([f.loop, f.activeFor, f.activeSprite.src, f.night.sprite.src]).toEqual([true, ["atlas"], "look.png", "fox.png"]);
+    const n = F.nightFurniture([f])[0];
+    expect([n.sprite.src, n.activeSprite, n.asleep]).toEqual(["fox.png", null, true]);
+  });
   it("nightFurniture: its night strip, playing, at its night place (its own when none); the rest as they are", () => {
     const f = F.nightFurniture(PK.checkSkinPack(base()).pack.furniture);
     const by = Object.fromEntries(f.map((x: any) => [x.id, [x.sprite.src, x.x, x.y, !!x.asleep]]));
