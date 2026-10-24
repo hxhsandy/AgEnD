@@ -64,4 +64,9 @@ describe("walkTargets", () => {
       expect(new Set(spots).size).toBe(spots.length);
     }
   });
+  it("never onto a seat of the office, even a free one (someone may be about to sit there)", () => {
+    const g = { ...GRAPH, waypoints: [...GRAPH.waypoints, { id: "free", x: 450, y: 350 }], areas: { lounge: { seats: [SEAT, { x: 450, y: 350 }] } } };
+    const lone = [{ node: { name: "atlas", state: "idle" }, seat: SEAT }];
+    for (let t = 0; t < 4 * Z.WANDER.PERIOD; t += 500) { const q = Z.walkTargets(lone, g, t).get("atlas"); expect(`${q.x},${q.y}`).not.toBe("450,350"); }
+  });
 });

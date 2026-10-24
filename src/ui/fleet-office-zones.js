@@ -108,7 +108,7 @@ export function headingAt(pts, t) {
 /**
  * An idle person now and then strolls to a spot near their seat and back, so a quiet room is not a row of statues:
  * every PERIOD ms (each person's own phase, from their name) they are AWAY ms at a waypoint within REACH of the seat —
- * one no seat is on, picked anew each time — then walk back. Pure: the page asks every TICK ms and walks the change.
+ * one no seat of the office is on (taken or free), picked anew each time — then walk back. Pure: the page asks every TICK ms and walks the change.
  */
 export const WANDER = { PERIOD: 40000, AWAY: 8000, REACH: 220, TICK: 1000 };
 /** Where `name`, seated at `seat`, should be at `t` (ms) while idle: a spot near the seat, or the seat. */
@@ -124,7 +124,8 @@ export function wanderTarget(name, seat, graph, t, seats = []) {
 /** Everyone's walk target: their seat, or — idle and `wander` on — wanderTarget's spot (one person a spot: whoever
  * would share it stays seated this time). */
 export function walkTargets(desks, graph, t, wander = true) {
-  const seats = desks.map((d) => d.seat), used = new Set();
+  // Every seat of the office (anyone's, taken or not: someone may sit down on it any moment), not only the ones in use.
+  const seats = [...Object.values(graph.areas || {}).flatMap((a) => a.seats || []), ...desks.map((d) => d.seat)], used = new Set();
   return new Map(desks.map((d) => {
     if (!wander || d.node.state !== "idle") return [d.node.name, d.seat];
     const p = wanderTarget(d.node.name, d.seat, graph, t, seats), k = `${p.x},${p.y}`;
