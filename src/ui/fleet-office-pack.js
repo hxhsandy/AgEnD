@@ -31,10 +31,12 @@
 //     "waypoints": [{ "id": "hall", "x": 640, "y": 600 }, …], "edges": [["hall", "east"], …],
 //                                                     optional: the walkable graph (else people walk straight)
 //     "furniture": [ { "id": "rack", "sprite": STRIP, "x": 1020, "y": 140, "depth": 2,
-//                      "activeWhen": "crashed", "activeSprite": STRIP, "activeFor": "atlas", "loop": true,
-//                      "night": { "sprite": STRIP, "x": 300, "y": 420 } } ],   optional (#2568): at bedtime (when the
-//                                                     viewer has it on: 00:00–06:00 their time) drawn as this strip,
-//                                                     playing, at (x, y) — its own place for either left out
+//                      "activeWhen": "crashed", "activeSprite": STRIP, "activeFor": "atlas", "loop": true, "label": "Rack",
+//                      "night": { "sprite": STRIP, "x": 300, "y": 420 } } ],
+//                                                     "label" (#2574): a name tag under it, like a person's
+//                                                     (an NPC drawn as furniture). "night" (#2568), optional: at bedtime
+//                                                     (when the viewer has it on: 00:00–06:00 their time) drawn as this
+//                                                     strip, playing, at (x, y) — its own place for either left out
 //                                                     drawn by depth: below 1000 under the people, 1000 and up over
 //                                                     them; "depth": "y" (the string) sorts it among the people by base
 //                                                     y — its anchor's y against each person's feet: someone whose feet
@@ -226,16 +228,17 @@ export function checkSkinPack(x) {
     const fids = new Set();
     const furniture = list(x.furniture ?? [], LIMIT.furniture, "furniture").map((f, i) => {
       const at = `furniture[${i}]`;
-      obj(f, at); keys(f, ["id", "sprite", "x", "y", "depth", "activeWhen", "activeSprite", "activeFor", "loop", "night"], at);
+      obj(f, at); keys(f, ["id", "sprite", "x", "y", "depth", "activeWhen", "activeSprite", "activeFor", "loop", "label", "night"], at);
       if (!nameOk(f.id) || fids.has(f.id)) throw new Refused(`${at}.id`, "a new name of letters, digits, _ or - (not an inherited one)");
       fids.add(f.id);
       if (f.activeSprite !== undefined && f.activeWhen === undefined) throw new Refused(`${at}.activeSprite`, "only with activeWhen");
       if (f.activeFor !== undefined && f.activeWhen === undefined) throw new Refused(`${at}.activeFor`, "only with activeWhen");
       if (f.loop !== undefined && typeof f.loop !== "boolean") throw new Refused(`${at}.loop`, "true or false");
+      if (f.label !== undefined && (typeof f.label !== "string" || !f.label.trim() || [...f.label].length > LIMIT.line || /[\u0000-\u001f\u007f]/.test(f.label))) throw new Refused(`${at}.label`, `1–${LIMIT.line} characters`);
       return { id: f.id, sprite: checkStrip(f.sprite, `${at}.sprite`, scale), x: num(f.x, 0, LOGICAL.w, `${at}.x`), y: num(f.y, 0, LOGICAL.h, `${at}.y`),
         depth: f.depth === "y" ? "y" : depth(f.depth ?? 0, `${at}.depth`), activeWhen: f.activeWhen === undefined ? null : states(f.activeWhen, `${at}.activeWhen`),
         activeSprite: f.activeSprite === undefined ? null : checkStrip(f.activeSprite, `${at}.activeSprite`, scale),
-        activeFor: f.activeFor === undefined ? null : names(f.activeFor, `${at}.activeFor`), loop: f.loop === true, night: nightOf(f.night, `${at}.night`, scale) };
+        activeFor: f.activeFor === undefined ? null : names(f.activeFor, `${at}.activeFor`), loop: f.loop === true, label: f.label === undefined ? null : f.label.trim(), night: nightOf(f.night, `${at}.night`, scale) };
     }).sort((a, b) => order(a) - order(b));
     const sets = obj(x.characters, "characters");
     if (Object.keys(sets).length > LIMIT.sets) throw new Refused("characters", `at most ${LIMIT.sets} sets`);
