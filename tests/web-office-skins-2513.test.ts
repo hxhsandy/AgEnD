@@ -182,12 +182,14 @@ describe("checkSkinUpload: the manifest by the page's rules, then the pictures",
     const big = Buffer.concat([png(2, 2).subarray(0, 33), Buffer.alloc(SKIN_LIMITS.fileBytes)]);
     expect(refused({ ...UPLOAD(), files: { ...UPLOAD().files, "fox_idle.png": big.toString("base64") } })?.slice(0, 2)).toEqual([413, "skin_file_too_large"]);
     const m = MANIFEST(), files: Record<string, string> = { "office_bg.png": b64("office_bg.png"), "fox_idle.png": b64("fox_idle.png") };
-    // Four furniture strips of just under 2 MiB each (padded with a private chunk): each passes alone, not all together.
-    m.furniture = [0, 1, 2, 3].map(i => ({ id: `f${i}`, sprite: { src: `f${i}.png`, frames: 1, w: 1, h: 1 }, x: 10, y: 10 }));
+    // Furniture strips of just under 2 MiB each (padded with a private chunk), one more than the pack holds (#2632: 11 for
+    // 20 MiB): each passes alone, not all together.
+    const n = Math.floor(SKIN_LIMITS.packBytes / SKIN_LIMITS.fileBytes) + 1;
+    m.furniture = [...Array(n).keys()].map(i => ({ id: `f${i}`, sprite: { src: `f${i}.png`, frames: 1, w: 1, h: 1 }, x: 10, y: 10 }));
     const pad = (i: number) => { const p = png(1, 1); const len = Buffer.alloc(4); const body = Buffer.alloc(SKIN_LIMITS.fileBytes - p.length - 100, i);
       len.writeUInt32BE(body.length); const chunk = Buffer.concat([len, Buffer.from("prIv"), body, Buffer.alloc(4)]);
       return Buffer.concat([p.subarray(0, 33), chunk, p.subarray(33)]); };
-    for (const i of [0, 1, 2, 3]) files[`f${i}.png`] = pad(i).toString("base64");
+    for (let i = 0; i < n; i++) files[`f${i}.png`] = pad(i).toString("base64");
     expect(refused({ manifest: m, files })?.slice(0, 2)).toEqual([413, "skin_too_large"]);
     const fat = { ...MANIFEST(), bubbles: { en: Object.fromEntries(["working", "idle", "paused", "needs", "stuck", "crashed", "stopped", "missing"].map(s => [s, Array(12).fill("x".repeat(40))])) } };
     expect(checkSkinUpload({ manifest: fat, files: UPLOAD().files }, "me", 1).ok).toBe(true);                // well under 64 KiB
