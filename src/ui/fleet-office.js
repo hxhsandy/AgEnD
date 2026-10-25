@@ -2,11 +2,11 @@
 // (fleet-canvas.js). The same data as theirs: the structure from /ui/org (buildOrgView), the live state from the app
 // store, the traffic from fleet-traffic.js's store — nothing new is read but the offices people made (/ui/offices) and what agents do in them (/ui/office-acts, #2578).
 //
-// - Two layouts, by skin. Desks (the built-in "pixel" skin, the default): each team is a room, each member a desk with a
-//   name tag; General and the instances in no team share the lobby; a grid that wraps at the stage's width
-//   (fleet-office-model.js autoLayout). Zones (a skin whose pack maps states to areas — the built-in "studio", and
-//   "cozy" drawn from one picture, #2631): a 1280×720 scene; each instance takes a seat in the area for its state and
-//   walks there along the pack's waypoints when its state changes (fleet-office-zones.js).
+// - Two layouts, by skin. Desks (the built-in "pixel" skin; an unknown style, and a saved office with none): each team
+//   is a room, each member a desk with a name tag; General and the instances in no team share the lobby; a grid that
+//   wraps at the stage's width (fleet-office-model.js autoLayout). Zones (a skin whose pack maps states to areas — the
+//   built-in "studio", and "cozy" drawn from one picture, the default, #2631): a 1280×720 scene; each instance takes a
+//   seat in the area for its state and walks there along the pack's waypoints when its state changes (fleet-office-zones.js).
 // - #2540: the canvas fills the Fleet panel (no frame: the whole width of the Fleet area, down to the window's foot);
 //   the scene is panned and zoomed as the org chart's canvas is (fleet-canvas-view.js: drag, wheel, pinch, + / − / Fit
 //   and the `+ - 0` keys, an overview), Fit filling the panel (contain; Fill: cover), + and − in pixel levels, the zoom

@@ -864,6 +864,7 @@ describe("the Office view on the page", () => {
     proto.getContext = function () { return (this._ctx ??= fakeCtx()); };
     try {
       app.appStore.set({ ...STORE, awaiting: Object.fromEntries(INSTANCES.map((i) => [i.name, "a prompt"])) });
+      localStorage.setItem("agend_org_office_skin", "pixel");                   // Desks: everyone at a desk, side by side
       await office(); await settle(4);
       const all = p.root.querySelector(".oo-canvas")._ctx.calls as Array<[string, any[]]>;
       const calls = all.slice(all.map(([k]) => k).lastIndexOf("clearRect"));     // the last frame drawn
@@ -923,6 +924,7 @@ describe("the Office view on the page", () => {
     const made: any[] = [];
     proto.getContext = function () { return (this._ctx ??= (made.push(fakeCtx()), made[made.length - 1])); };
     try {
+      localStorage.setItem("agend_org_office_skin", "pixel");                   // Desks: its layers, its desks laid out
       await office();
       await settle(4);
       const main = p.root.querySelector(".oo-canvas")._ctx;

@@ -275,10 +275,11 @@ in each (whole teams or single instances; none = everyone) and its style, and up
 artist's pictures: `manifest.json` plus PNGs, format v1, kept in `web-office-skins/` in the AgEnD home; the host
 checks every rule — PNG only, each strip exactly frames·w × h, a 16:9 background, size caps — and never changes a
 pack; a strip may give its displayed size, `dw`/`dh`, apart from its pictures' size, and a character may walk four
-ways with `walkDown`, `walkUp` and `walkSide`, the side one mirrored for left). **Style** (per browser for the whole fleet, per office for a stored one): **Desks** (the default),
+ways with `walkDown`, `walkUp` and `walkSide`, the side one mirrored for left). **Style** (per browser for the whole fleet, per office for a stored one): **Desks**,
 **Studio** (one scene — Work, Lounge, Help desk, Nap corner — where each instance walks to the area for its state),
 **Cozy** (#2631: the same in a warm pixel-art office drawn as one picture; its notice board says a skin pack can
-restyle it) or an uploaded pack; one the page cannot load is drawn as Desks with a note. On a stored office in Studio,
+restyle it; the default for a browser that has not picked a style and for a new office — a saved office keeps its
+own) or an uploaded pack; one the page cannot load is drawn as Desks with a note. On a stored office in Studio,
 Cozy or a pack,
 **Edit layout** (admin only) shows a 1280×720 coordinate grid and lets you drag seats, furniture, the door and
 waypoints (or Tab to one and use the arrow keys, Shift for 10), add or remove waypoints and join or unjoin

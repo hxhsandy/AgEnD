@@ -168,7 +168,7 @@ export function OfficeEditor({ offices, rev, view, store, packs = [], ask = () =
   const add = () => {
     if (draft.length >= MAX_OFFICES) return;
     const id = newOfficeId(new Set(draft.map((o) => o.id)));
-    setDraft((d) => [...d, { id, name: te("newName"), skin: "pixel", members: [], layout: null }]);
+    setDraft((d) => [...d, { id, name: te("newName"), skin: "cozy", members: [], layout: null }]);   // #2631: a new office is cozy
     setOpen(id);
   };
   // Everything is frozen from Save until its answer (and a 409's re-read) is in (#2424 review): no edit made meanwhile

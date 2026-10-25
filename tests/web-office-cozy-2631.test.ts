@@ -1,8 +1,10 @@
 /**
  * #2631: a third built-in Office style, Cozy — the zones layout on a warm pixel-art office drawn as one picture
  * (src/ui/shared/office/cozy.png, served at /assets/office-cozy.png), the built-in pixel people in it.
- * - Built in: in BUILT_IN_SKINS and SKINS (skinFor), offered in the Style picker after Desks and Studio; Desks stays
- *   the default; an uploaded pack cannot take its id.
+ * - Built in: in BUILT_IN_SKINS and SKINS (skinFor), offered in the Style picker after Desks and Studio; an uploaded pack
+ *   cannot take its id.
+ * - The default: the style of a browser that has not picked one, and of a new office in Edit offices. A saved office
+ *   with no style of its own stays Desks (so no saved office changes), and an unknown id is drawn as Desks.
  * - Its pack passes the studio's structural checks: seats inside their areas, every seat reachable from the door through
  *   the graph and near its waypoint, every edge across or up/down, stateZones naming its areas; the notice board's tag
  *   (#2574) is the page's own words, in either language.
@@ -13,11 +15,12 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { page, settle, h, type AppPage } from "./helpers/app-harness.js";
 import { fire, MiniElement } from "./helpers/mini-dom.js";
 import { isServedAsset } from "../src/auth-api.js";
 import { officeShareStatic } from "../src/office-share-page.js";
+import { checkOffices } from "../src/web-office-store.js";
 
 const ROOT = process.cwd();
 const PICTURE = join(ROOT, "src", "ui", "shared", "office", "cozy.png");
@@ -59,7 +62,7 @@ function fakeCtx() {
 }
 
 describe("built in", () => {
-  it("a third built-in style after Desks and Studio, a zones one with the built-in people; Desks stays the default", () => {
+  it("a third built-in style after Desks and Studio, a zones one with the built-in people; an unknown id is Desks", () => {
     expect(K.BUILT_IN_SKINS).toEqual(["pixel", "studio", "cozy"]);
     const sk = K.skinFor("cozy");
     expect([sk.id, sk.pack.id, sk.pack === K.COZY_PACK, !!sk.pack.stateZones]).toEqual(["cozy", "cozy", true, true]);
@@ -169,22 +172,70 @@ describe("loading the picture", () => {
 
 describe("the Style picker", () => {
   const mount = async () => { await p.mount(h(fleet.FleetPanel, { route: { panel: "fleet", tab: "org" }, navKey: `fleet:org|${Math.random()}|en` })); await settle(6); };
-  it("offers Cozy after Desks and Studio; picked, it is kept per browser and everyone is in it", async () => {
-    const proto = MiniElement.prototype as any;
+  const office = async () => { await mount(); p.root.querySelectorAll(".oc-tools .seg-inline button")[2].click(); await settle(4); };
+  const style = () => p.root.querySelectorAll(".oo-bar select")[1];
+  const proto = MiniElement.prototype as any;
+  beforeEach(() => { proto.getContext = function () { return (this._ctx ??= fakeCtx()); }; });
+  afterEach(() => { delete proto.getContext; });
+  it("with nothing saved, the Office opens in Cozy: everyone in it, the notice board drawn; nothing kept until one is picked", async () => {
+    expect(localStorage.getItem("agend_org_office_skin")).toBeNull();
+    await office();
+    expect(style().value).toBe("cozy");                                                    // #2631: the default
+    expect(p.root.querySelectorAll(".oo-desk").map((b: any) => b.getAttribute("data-name")).sort()).toEqual(["atlas", "quill", "rook", "sage"]);
+    const texts = p.root.querySelector(".oo-canvas")._ctx.calls.filter(([k]: any) => k === "fillText").map(([, a]: any) => a[0]);
+    expect(texts).toContain("Add your skin");                                            // the notice board's tag
+    expect(localStorage.getItem("agend_org_office_skin")).toBeNull();
+  });
+  it("offers Cozy after Desks and Studio; picked, each is kept per browser (Desks too) and everyone is in it", async () => {
+    await office();
+    expect(style().querySelectorAll("option").map((o: any) => [o.value, o.textContent.trim()])).toEqual([["pixel", "Desks"], ["studio", "Studio"], ["cozy", "Cozy"]]);
+    const pick = async (v: string) => { const s = style(); s.value = v; fire(s, "change"); await settle(4); };
+    await pick("pixel");
+    expect(localStorage.getItem("agend_org_office_skin")).toBe("pixel");
+    await p.unmount(); await office();
+    expect(style().value).toBe("pixel");                                                   // a choice of Desks is kept over the default
+    await pick("cozy");
+    expect(localStorage.getItem("agend_org_office_skin")).toBe("cozy");
+    expect(p.root.querySelectorAll(".oo-desk").map((b: any) => b.getAttribute("data-name")).sort()).toEqual(["atlas", "quill", "rook", "sage"]);
+    await p.unmount(); await office();
+    expect(style().value).toBe("cozy");
+  });
+});
+
+describe("new offices are Cozy; saved ones keep theirs", () => {
+  const office = async () => {
+    await p.mount(h(fleet.FleetPanel, { route: { panel: "fleet", tab: "org" }, navKey: `fleet:org|${Math.random()}|en` })); await settle(6);
+    p.root.querySelectorAll(".oc-tools .seg-inline button")[2].click(); await settle(4);
+  };
+  const proto = MiniElement.prototype as any;
+  let base: any, puts: any[] = [], stored: any = { rev: 0, offices: [] };
+  beforeEach(() => {
+    puts = []; stored = { rev: 0, offices: [] }; base = (globalThis as any).fetch;
     proto.getContext = function () { return (this._ctx ??= fakeCtx()); };
-    try {
-      await mount();
-      p.root.querySelectorAll(".oc-tools .seg-inline button")[2].click(); await settle(4);
-      const style = p.root.querySelectorAll(".oo-bar select")[1];
-      expect(style.value).toBe("pixel");                                                   // the default is unchanged
-      expect(style.querySelectorAll("option").map((o: any) => [o.value, o.textContent.trim()])).toEqual([["pixel", "Desks"], ["studio", "Studio"], ["cozy", "Cozy"]]);
-      style.value = "cozy"; fire(style, "change"); await settle(4);
-      expect(localStorage.getItem("agend_org_office_skin")).toBe("cozy");
-      expect(p.root.querySelectorAll(".oo-desk").map((b: any) => b.getAttribute("data-name")).sort()).toEqual(["atlas", "quill", "rook", "sage"]);
-      const texts = p.root.querySelector(".oo-canvas")._ctx.calls.filter(([k]: any) => k === "fillText").map(([, a]: any) => a[0]);
-      expect(texts).toContain("Add your skin");                                            // the notice board's tag
-      await p.unmount(); await mount();
-      expect(p.root.querySelectorAll(".oo-bar select")[1].value).toBe("cozy");
-    } finally { delete proto.getContext; }
+    (globalThis as any).AgendAuth = { canWrite: async () => true }; (p.window as any).AgendAuth = (globalThis as any).AgendAuth;
+    (globalThis as any).fetch = async (url: string, o: any = {}) => {
+      if (url === "/ui/offices" && o.method === "PUT") { puts.push(JSON.parse(o.body)); return { ok: true, status: 200, json: async () => ({ rev: stored.rev + 1, offices: [] }) }; }
+      if (url === "/ui/offices") return { ok: true, status: 200, json: async () => stored };
+      return base(url, o);
+    };
+  });
+  afterEach(() => { (globalThis as any).fetch = base; delete proto.getContext; delete (globalThis as any).AgendAuth; delete (p.window as any).AgendAuth; });
+  it("a new office in Edit offices starts as Cozy and is saved so; the saved one without a style is Desks there", async () => {
+    stored = { rev: 4, offices: [{ id: "ops", name: "Ops room", members: [] }] };              // saved before #2631: no skin
+    await office();
+    p.root.querySelector(".oo-edit").click(); await settle(3);
+    p.root.querySelector("#oeAdd").click(); await settle(2);
+    const rows = p.root.querySelectorAll(".oe-row");
+    expect(rows.map((r: any) => r.querySelector(".oe-style").value)).toEqual(["pixel", "cozy"]);
+    const name = rows[1].querySelector(".oe-name"); name.value = "Den"; fire(name, "input"); await settle(1);
+    p.root.querySelector("#oeSave").click(); await settle(4);
+    expect(puts).toHaveLength(1);
+    expect(puts[0].offices.map((o: any) => [o.name, o.skin])).toEqual([["Ops room", "pixel"], ["Den", "cozy"]]);
+  });
+  it("a stored office record without a style still reads as Desks: on the page and on the host", () => {
+    expect(M.officeOk({ id: "ops", name: "Ops" }).skin).toBe("pixel");
+    expect(M.officeOk({ id: "ops", name: "Ops", skin: "cozy" }).skin).toBe("cozy");
+    const c: any = checkOffices([{ id: "ops", name: "Ops" }]);
+    expect([c.ok, c.offices[0].skin]).toEqual([true, "pixel"]);
   });
 });
