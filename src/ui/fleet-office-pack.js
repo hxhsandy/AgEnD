@@ -30,6 +30,10 @@
 //     "door": [640, 700],                             optional: where someone new walks in from (default: bottom middle)
 //     "waypoints": [{ "id": "hall", "x": 640, "y": 600 }, …], "edges": [["hall", "east"], …],
 //                                                     optional: the walkable graph (else people walk straight)
+//     "straight": true,                               optional (#2634): every walk goes across, then up or down — each
+//                                                     diagonal leg an L, so the walkSide / walkDown / walkUp strips
+//                                                     always fit (graph edges laid out across and up/down put the
+//                                                     corners on the aisles); default false
 //     "furniture": [ { "id": "rack", "sprite": STRIP, "x": 1020, "y": 140, "depth": 2,
 //                      "activeWhen": "crashed", "activeSprite": STRIP, "activeFor": "atlas", "loop": true, "label": "Rack",
 //                      "night": { "sprite": STRIP, "x": 300, "y": 420 },
@@ -190,12 +194,13 @@ function states(v, at) {
 export function checkSkinPack(x) {
   try {
     obj(x, "pack");
-    keys(x, ["format", "id", "scale", "background", "foreground", "matte", "areas", "stateZones", "door", "waypoints", "edges", "furniture", "characters", "byInstance", "props", "bubbles", "room", "desk"], "pack");
+    keys(x, ["format", "id", "scale", "background", "foreground", "matte", "areas", "stateZones", "door", "waypoints", "edges", "straight", "furniture", "characters", "byInstance", "props", "bubbles", "room", "desk"], "pack");
     if (x.format !== 1) throw new Refused("format", "1");
     if (typeof x.id !== "string" || !ID.test(x.id)) throw new Refused("id", "1–40 letters, digits, _ or -");
     if (BUILT_IN.has(x.id)) throw new Refused("id", "a built-in skin's id");
     const scale = x.scale === undefined ? 2 : int(x.scale, 1, 8, "scale");
     if (x.matte !== undefined && !matteOk(x.matte)) throw new Refused("matte", "a colour as #rrggbb");
+    if (x.straight !== undefined && typeof x.straight !== "boolean") throw new Refused("straight", "true or false");
     const areas = {};
     const rawAreas = x.areas === undefined ? {} : obj(x.areas, "areas");
     if (Object.keys(rawAreas).length > LIMIT.areas) throw new Refused("areas", `at most ${LIMIT.areas}`);
@@ -291,7 +296,7 @@ export function checkSkinPack(x) {
     const opt = (v, at) => (v === undefined ? undefined : src(v, at));
     return { ok: true, pack: {
       format: 1, id: x.id, scale, background: opt(x.background, "background"), foreground: opt(x.foreground, "foreground"), matte: x.matte === undefined ? undefined : x.matte.toLowerCase(), areas, stateZones,
-      door: x.door === undefined ? { x: LOGICAL.w / 2, y: LOGICAL.h - 10 } : point(x.door, "door"), waypoints, edges, furniture, characters, byInstance,
+      door: x.door === undefined ? { x: LOGICAL.w / 2, y: LOGICAL.h - 10 } : point(x.door, "door"), waypoints, edges, straight: x.straight === true, furniture, characters, byInstance,
       props: x.props === undefined ? {} : strips(x.props, PROPS, "props", scale), bubbles,
       room: { floor: opt(room.floor, "room.floor"), wall: opt(room.wall, "room.wall") }, desk: { back: opt(desk.back, "desk.back"), front: opt(desk.front, "desk.front"), lit: opt(desk.lit, "desk.lit") },
     } };
