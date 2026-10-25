@@ -11,6 +11,7 @@ import { t, register } from "/assets/app-i18n.js";
 import { SidePanel } from "/assets/side-panel.js";
 import { toast } from "/assets/ui-toast.js";
 import { nodeText } from "./fleet-org.js";
+import { BUILT_IN_SKINS } from "./fleet-office-skin.js";
 
 register("orge", {
   en: {
@@ -48,7 +49,7 @@ register("orge", {
 });
 const te = (k, ...v) => t(`orge.${k}`, ...v);
 export const MAX_OFFICES = 20;
-const STYLES = ["pixel", "studio"];
+const STYLES = BUILT_IN_SKINS;
 
 /** A file's bytes as base64 (in slices: a large picture never goes through one huge string call). */
 export function base64Of(bytes) {

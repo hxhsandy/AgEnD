@@ -113,7 +113,7 @@ export function createOfficeStore({ fetch: get = globalThis.fetch, storage } = {
     saveChoice: (id) => write(CHOICE_KEY, String(id)),
     filter: () => { const s = read(FILTER_KEY); try { return filterOk(s ? JSON.parse(s) : null); } catch { return filterOk(null); } },
     saveFilter: (f) => write(FILTER_KEY, JSON.stringify(filterOk(f))),
-    /** The whole fleet's style here: a skin id ("pixel": desks, "studio": zones); an unknown one is the default where used. */
+    /** The whole fleet's style here: a skin id ("pixel": desks, "studio" and "cozy": zones); an unknown one is the default where used. */
     skin: () => { const v = read(SKIN_KEY); return typeof v === "string" && /^[A-Za-z0-9_-]{1,40}$/.test(v) ? v : "pixel"; },
     saveSkin: (id) => write(SKIN_KEY, String(id)),
     /** Whether paused and stopped people are left out of the Office here (default: shown). */

@@ -264,8 +264,10 @@ artist's pictures: `manifest.json` plus PNGs, format v1, kept in `web-office-ski
 checks every rule — PNG only, each strip exactly frames·w × h, a 16:9 background, size caps — and never changes a
 pack; a strip may give its displayed size, `dw`/`dh`, apart from its pictures' size, and a character may walk four
 ways with `walkDown`, `walkUp` and `walkSide`, the side one mirrored for left). **Style** (per browser for the whole fleet, per office for a stored one): **Desks** (the default),
-**Studio** — one scene (Work, Lounge, Help desk, Nap corner) where each instance walks to the area for its state —
-or an uploaded pack; one the page cannot load is drawn as Desks with a note. On a stored office in Studio or a pack,
+**Studio** (one scene — Work, Lounge, Help desk, Nap corner — where each instance walks to the area for its state),
+**Cozy** (#2631: the same in a warm pixel-art office drawn as one picture; its notice board says a skin pack can
+restyle it) or an uploaded pack; one the page cannot load is drawn as Desks with a note. On a stored office in Studio,
+Cozy or a pack,
 **Edit layout** (admin only) shows a 1280×720 coordinate grid and lets you drag seats, furniture, the door and
 waypoints (or Tab to one and use the arrow keys, Shift for 10), add or remove waypoints and join or unjoin
 corridors; **Save layout** keeps the moves as that office's overrides (the pack stays as uploaded), **Reset** goes

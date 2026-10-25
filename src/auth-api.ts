@@ -103,6 +103,8 @@ const ASSETS: Readonly<Record<string, { file: string; type: string }>> = {
   // #1408: the design tokens every panel shares, and the font they name (Inter, SIL OFL 1.1: shared/fonts/OFL.txt).
   "tokens.css": { file: join("shared", "tokens.css"), type: "text/css; charset=utf-8" },
   "inter.woff2": { file: join("shared", "fonts", "inter.woff2"), type: "font/woff2" },
+  // #2631: the Office's built-in Cozy style is drawn on this picture (static, no data, like the font).
+  "office-cozy.png": { file: join("shared", "office", "cozy.png"), type: "image/png" },
   // #1408: the app shell's public closure — the entry module, everything it imports statically, and the vendored
   // Preact + htm (shared/vendor/vendor.json, byte-checked). Static code with no data, like signin.js; the panels that
   // need a session stay behind the gate under /ui/js/ and are reached only by a dynamic import.

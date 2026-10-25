@@ -328,7 +328,7 @@ describe("the skin seam", () => {
   });
   it("spriteSkin: the strip's frame for the pose, the instance's own set; the built-in skin for what the pack lacks", () => {
     const strip = { src: "idle.png", frames: 4, w: 24, h: 32, fps: 4, ax: 12, ay: 30 };
-    const pack = PK.skinPackOk({ format: 1, id: "cozy", characters: { default: { idle: strip }, fox: { idle: { ...strip, src: "fox.png" } } }, byInstance: { a: "fox" } });
+    const pack = PK.skinPackOk({ format: 1, id: "snug", characters: { default: { idle: strip }, fox: { idle: { ...strip, src: "fox.png" } } }, byInstance: { a: "fox" } });
     const img = (n: string) => ({ img: n });
     const skin = K.spriteSkin(pack, new Map([["idle.png", img("idle")], ["fox.png", img("fox")]]));
     const c = fakeCtx();
@@ -362,7 +362,7 @@ describe("the skin seam", () => {
 /** A small valid zones pack (format v1), with `o` over it. */
 const STRIP = { src: "idle.png", frames: 4, w: 32, h: 48, fps: 4, ax: 16, ay: 46 };
 const PACK = (o: Record<string, unknown> = {}) => ({
-  format: 1, id: "cozy", background: "office.png",
+  format: 1, id: "snug", background: "office.png",
   areas: { desks: { rect: [0, 0, 600, 400], seats: [[100, 100], [200, 100]] }, lounge: { rect: [700, 0, 500, 400], seats: [[800, 200]] }, alert: { rect: [700, 420, 500, 280], seats: [[800, 500]] } },
   stateZones: { working: "desks", idle: "lounge", needs: "alert", crashed: "alert", default: "lounge" },
   waypoints: [{ id: "a", x: 150, y: 150 }, { id: "b", x: 650, y: 150 }, { id: "c", x: 800, y: 250 }], edges: [["a", "b"], ["b", "c"]],
@@ -727,7 +727,7 @@ describe("the Office view on the page", () => {
       editBtn().click(); await settle(3);
       const style = p.root.querySelector(".oe-row .oe-style");
       expect([style.value, style.querySelectorAll("option").map((o: any) => o.textContent.trim())])
-        .toEqual(["neon-arcade", ["Desks", "Studio", "neon-arcade (not available here: drawn as Desks)"]]);
+        .toEqual(["neon-arcade", ["Desks", "Studio", "Cozy", "neon-arcade (not available here: drawn as Desks)"]]);
       answer = { status: 200, body: { rev: 5, offices: [] } };
       p.root.querySelector("#oeSave").click(); await settle(4);
       expect(puts[0].offices[0].skin).toBe("neon-arcade");
@@ -900,7 +900,7 @@ describe("the Office view on the page", () => {
     try {
       await office();
       const style = p.root.querySelectorAll(".oo-bar select")[1];
-      expect(style.querySelectorAll("option").map((o: any) => o.textContent.trim())).toEqual(["Desks", "Studio"]);
+      expect(style.querySelectorAll("option").map((o: any) => o.textContent.trim())).toEqual(["Desks", "Studio", "Cozy"]);
       style.value = "studio"; fire(style, "change"); await settle(4);
       expect(localStorage.getItem("agend_org_office_skin")).toBe("studio");
       expect(desks()).toEqual(["atlas", "loner", "pixel", "quill", "sage", "orbit", "nova", "tide"]);

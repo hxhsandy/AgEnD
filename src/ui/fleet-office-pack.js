@@ -120,7 +120,7 @@ const POSES = ["working", "idle", "paused", "needs", "walk", "walkDown", "walkUp
 const SET_STRIPS = [...POSES, "prop"];
 /** A furniture item's walking strips (#2596): a character set's walking poses. */
 const WALKS = ["walk", "walkDown", "walkUp", "walkSide"];
-const BUILT_IN = new Set(["pixel", "studio"]);
+const BUILT_IN = new Set(["pixel", "studio", "cozy"]);
 const ID = /^[A-Za-z0-9_-]{1,40}$/;
 const SRC = /^[A-Za-z0-9._/-]{1,200}$/;
 const HEX = /^#[0-9a-f]{6}$/i;

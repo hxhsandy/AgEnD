@@ -6,7 +6,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { OFFICE_SHARE_PAGE, OFFICE_SHARE_PAGE_CSP, SHARE_ASSETS, SHARE_MODULES, officeShareStatic } from "../src/office-share-page.js";
+import { OFFICE_SHARE_PAGE, OFFICE_SHARE_PAGE_CSP, SHARE_ASSETS, SHARE_ASSET_FILES, SHARE_MODULES, officeShareStatic } from "../src/office-share-page.js";
 import { page, settle, h, type AppPage } from "./helpers/app-harness.js";
 
 const UI = join(__dirname, "..", "src", "ui");
@@ -30,25 +30,26 @@ function closure(entry: string): Set<string> {
 }
 
 describe("the share page's static files (#2636)", () => {
-  it("are exactly the page module's import closure, and its stylesheets and font", () => {
+  it("are exactly the page module's import closure, and its stylesheets, font and the Cozy picture (#2631)", () => {
     const files = [...closure(join(UI, "office-share-page.js"))];
     const shared = files.filter(f => dirname(f) === join(UI, "shared")).map(f => f.slice(join(UI, "shared").length + 1)).sort();
     const own = files.filter(f => dirname(f) === UI).map(f => f.slice(UI.length + 1)).sort();
     expect(files.length).toBe(shared.length + own.length);
     expect(Object.keys(SHARE_ASSETS).filter(n => n.endsWith(".js")).sort()).toEqual(shared);
     expect([...SHARE_MODULES].sort()).toEqual(own);
-    expect(Object.keys(SHARE_ASSETS).filter(n => !n.endsWith(".js")).sort()).toEqual(["app.css", "inter.woff2", "tokens.css"]);
+    expect(Object.keys(SHARE_ASSETS).filter(n => !n.endsWith(".js")).sort()).toEqual(["app.css", "inter.woff2", "office-cozy.png", "tokens.css"]);
   });
 
   it("are served by name (the bytes on disk), and nothing else", () => {
     expect(officeShareStatic("/assets/app-html.js")?.body.equals(readFileSync(join(UI, "shared", "app-html.js")))).toBe(true);
     expect(officeShareStatic("/ui/js/fleet-office.js")?.type).toBe("text/javascript; charset=utf-8");
     expect(officeShareStatic("/assets/inter.woff2")?.type).toBe("font/woff2");
+    expect(officeShareStatic("/assets/office-cozy.png")?.body.equals(readFileSync(join(UI, "shared", "office", "cozy.png")))).toBe(true);
     expect(officeShareStatic("/assets/app.css")?.type).toBe("text/css; charset=utf-8");
     for (const no of ["/assets/app.js", "/assets/agend-auth.js", "/ui/js/panel-settings.js", "/ui/js/panel-fleet.js", "/assets/../web-api.js", "/ui/js/../shared/app.js", "/ui/js/office-share-page.js.map"]) {
       expect(officeShareStatic(no), no).toBeNull();
     }
-    for (const name of Object.keys(SHARE_ASSETS)) expect(existsSync(join(UI, "shared", name === "inter.woff2" ? join("fonts", name) : name)), name).toBe(true);
+    for (const name of Object.keys(SHARE_ASSETS)) expect(existsSync(join(UI, "shared", SHARE_ASSET_FILES[name] ?? name)), name).toBe(true);
     for (const name of SHARE_MODULES) expect(existsSync(join(UI, name)), name).toBe(true);
   });
 
