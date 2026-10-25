@@ -571,7 +571,9 @@ export function Office({ view, traffic, q = "", lease, onOpen, assetUrl, opening
   const custom = choice !== AUTO_ID && !overview ? stored.find((o) => o.id === choice) || null : null;
   // The style: a built-in one, or an uploaded pack once it is loaded (until then, and when it is not one, Desks).
   const wanted = custom ? custom.skin : style;
-  const packOf = (id) => (STYLES.includes(id) ? null : packs.find((pk) => pk.id === id) || null);
+  // A kept pack wins its id: one kept as "cozy" before it was built in (#2631) is still the style of the offices naming it.
+  const packOf = (id) => packs.find((pk) => pk.id === id) || null;
+  const styles = STYLES.filter((id) => !packOf(id));
   const packInfo = packOf(wanted);
   const packKey = packInfo ? `${packInfo.id}@${packInfo.sha}` : null;
   // The packs to load: this office's style; in All offices every tile's (each loaded once, shared by the tiles using it).
@@ -1121,7 +1123,7 @@ export function Office({ view, traffic, q = "", lease, onOpen, assetUrl, opening
     }
     return { ok: false, message: r.status === 429 ? t("orgl.rateLimited") : t("orgl.failed", r.error || r.status) };
   };
-  const styleName = (id) => (STYLES.includes(id) ? to(`style_${id}`) : (packs.find((pk) => pk.id === id) || { name: id }).name);
+  const styleName = (id) => (styles.includes(id) ? to(`style_${id}`) : (packs.find((pk) => pk.id === id) || { name: id }).name);
   const f = filterOk(filter);
   const opts = teamOptions(view);
   const teamValue = (opts.find((o) => o.team === f.team) || opts[0]).value;
@@ -1147,7 +1149,7 @@ export function Office({ view, traffic, q = "", lease, onOpen, assetUrl, opening
       <label class="oo-pick"><span class="oo-pick-label">${to("office")}</span>${officeSelect("oo-office")}</label>
       ${auto ? html`<label class="oo-pick"><span class="oo-pick-label">${to("styleLabel")}</span>
         <select class="tb-select" value=${STYLES.includes(style) || packs.some((pk) => pk.id === style) ? style : skin.id} onChange=${(e) => { store.saveSkin(e.target.value); setStyle(e.target.value); setTip(null); }}>
-          ${STYLES.map((id) => html`<option key=${id} value=${id}>${to(`style_${id}`)}</option>`)}
+          ${styles.map((id) => html`<option key=${id} value=${id}>${to(`style_${id}`)}</option>`)}
           ${packs.map((pk) => html`<option key=${`pack:${pk.id}`} value=${pk.id}>${pk.name}</option>`)}
         </select></label>` : null}
       ${auto ? html`<label class="oo-pick"><span class="oo-pick-label">${to("show")}</span>

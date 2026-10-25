@@ -636,7 +636,7 @@ export function loadPackSkin(id, sha, { fetch: get = globalThis.fetch, image = d
       const r = await get(`${base}?v=${encodeURIComponent(sha)}`, { method: "GET", headers: { "Content-Type": "application/json" } });
       if (!r || !r.ok) return null;
       const d = await r.json();
-      const c = checkSkinPack(d && d.manifest);
+      const c = checkSkinPack(d && d.manifest, { kept: true });
       if (!c.ok || c.pack.id !== id) return null;
       const files = d.files && typeof d.files === "object" ? d.files : {};
       const images = new Map();

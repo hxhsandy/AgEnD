@@ -206,7 +206,7 @@ export function OfficeEditor({ offices, rev, view, store, packs = [], ask = () =
           <input type="text" class="oe-name" maxlength="60" value=${o.name} onInput=${(e) => set(o.id, { name: e.target.value })} /></label>
         <label class="oe-field"><span class="oe-label">${te("styleLabel")}</span>
           <select class="tb-select oe-style" value=${o.skin} onChange=${(e) => set(o.id, { skin: e.target.value })}>
-            ${STYLES.map((s) => html`<option key=${s} value=${s}>${t(`orgo.style_${s}`)}</option>`)}
+            ${STYLES.filter((s) => !packs.some((pk) => pk.id === s)).map((s) => html`<option key=${s} value=${s}>${t(`orgo.style_${s}`)}</option>`)}
             ${packs.map((pk) => html`<option key=${`pack:${pk.id}`} value=${pk.id}>${pk.name}</option>`)}
             ${STYLES.includes(o.skin) || packs.some((pk) => pk.id === o.skin) ? null : html`<option key=${o.skin} value=${o.skin}>${te("styleUnknown", o.skin)}</option>`}</select></label>
         <button type="button" class="btn btn-sm oe-members-btn" aria-expanded=${open === o.id ? "true" : "false"} onClick=${() => setOpen(open === o.id ? null : o.id)}>

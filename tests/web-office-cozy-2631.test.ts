@@ -12,8 +12,12 @@
  *   on a share link's page (#2636).
  * - Until the picture loads it is drawn bare (the studio's floors); loadCozySkin puts the skin drawn from it in SKINS once
  *   (a failed load is tried again).
+ * - A pack kept as "cozy" before it was built in: still read back, listed, served and deletable on the host, read by the
+ *   page, and it wins the id — the offices and the browsers naming "cozy" keep drawing it; the built-in Cozy is not
+ *   offered beside it (one id, one option) and is again once it is deleted. A new upload as "cozy" is still refused.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { page, settle, h, type AppPage } from "./helpers/app-harness.js";
@@ -21,6 +25,7 @@ import { fire, MiniElement } from "./helpers/mini-dom.js";
 import { isServedAsset } from "../src/auth-api.js";
 import { officeShareStatic } from "../src/office-share-page.js";
 import { checkOffices } from "../src/web-office-store.js";
+import { OfficeSkinStore } from "../src/web-office-skins.js";
 
 const ROOT = process.cwd();
 const PICTURE = join(ROOT, "src", "ui", "shared", "office", "cozy.png");
@@ -237,5 +242,95 @@ describe("new offices are Cozy; saved ones keep theirs", () => {
     expect(M.officeOk({ id: "ops", name: "Ops", skin: "cozy" }).skin).toBe("cozy");
     const c: any = checkOffices([{ id: "ops", name: "Ops" }]);
     expect([c.ok, c.offices[0].skin]).toEqual([true, "pixel"]);
+  });
+});
+
+describe("a pack kept as \"cozy\" before it was built in", () => {
+  const man = () => JSON.parse(readFileSync(join(FIXTURE, "manifest.json"), "utf8"));
+  const b64 = (f: string) => readFileSync(join(FIXTURE, f)).toString("base64");
+  const upload = (id: string) => ({ manifest: { ...man(), id }, files: { "office_bg.png": b64("office_bg.png"), "fox_idle.png": b64("fox_idle.png") }, name: "Our cozy" });
+  const dirs: string[] = [];
+  afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+  /** A host whose skins directory has a "cozy" pack as an upload before #2631 left it (kept under another id, then moved). */
+  const oldHost = () => {
+    const dir = mkdtempSync(join(tmpdir(), "agend-cozy-kept-")); dirs.push(dir);
+    const s = new OfficeSkinStore(dir, () => 7);
+    expect(s.add(upload("was"), "admin").ok).toBe(true);
+    const root = join(dir, "web-office-skins");
+    renameSync(join(root, "was"), join(root, "cozy"));
+    const rec = JSON.parse(readFileSync(join(root, "cozy", "pack.json"), "utf8"));
+    writeFileSync(join(root, "cozy", "pack.json"), JSON.stringify({ ...rec, id: "cozy", manifest: { ...rec.manifest, id: "cozy" } }));
+    return { dir, rec };
+  };
+  it("the host still reads it back after a restart: listed, served, its pictures; deletable; a new upload as cozy is refused", () => {
+    const { dir, rec } = oldHost();
+    const s = new OfficeSkinStore(dir);                                                    // a cold load, as after the update
+    expect(s.list().packs.map((pk) => [pk.id, pk.name, pk.sha])).toEqual([["cozy", "Our cozy", rec.sha]]);
+    expect(s.get("cozy")?.manifest.id).toBe("cozy");
+    expect(s.pack("cozy")?.id).toBe("cozy");
+    const fid = Object.values(rec.files as Record<string, { id: string }>)[0]!.id;
+    expect(s.picture("cozy", fid)?.length).toBeGreaterThan(0);
+    expect(s.add(upload("cozy"), "admin")).toMatchObject({ ok: false, status: 400, error: "skin_manifest_invalid", detail: "id: a built-in skin's id" });
+    expect(s.remove("cozy").ok).toBe(true);
+    expect(new OfficeSkinStore(dir).list().packs).toEqual([]);
+    expect(PK.checkSkinPack({ ...man(), id: "cozy" }, { kept: true }).ok).toBe(true);    // read back, not uploaded
+    for (const id of ["pixel", "studio"]) expect(PK.checkSkinPack({ ...man(), id }, { kept: true }), id).toEqual({ ok: false, error: "id: a built-in skin's id" });
+  });
+  it("the page reads it as the pack it is (loadPackSkin), not refused as a built-in id", async () => {
+    const sha = "c".repeat(32);
+    const sk = await K.loadPackSkin("cozy", sha, {
+      fetch: async () => ({ ok: true, json: async () => ({ manifest: { ...man(), id: "cozy" }, files: { "office_bg.png": "a".repeat(32), "fox_idle.png": "b".repeat(32) } }) }),
+      image: async () => ({ width: 1280, height: 720 }),
+    });
+    expect(sk && [sk.pack.id, sk.pack === K.COZY_PACK]).toEqual(["cozy", false]);
+  });
+
+  describe("on the page: it wins the id", () => {
+    const proto = MiniElement.prototype as any;
+    const KEPT = { id: "cozy", name: "Our cozy", sha: "d".repeat(32), bytes: 1, files: 2, uploaded_at: 1 };
+    let base: any, asked: string[] = [], packs: any[] = [];
+    const mount = async () => {
+      await p.mount(h(fleet.FleetPanel, { route: { panel: "fleet", tab: "org" }, navKey: `fleet:org|${Math.random()}|en` })); await settle(6);
+      p.root.querySelectorAll(".oc-tools .seg-inline button")[2].click(); await settle(6);
+    };
+    const drawn = () => p.root.querySelector(".oo-canvas")._ctx.calls.filter(([k]: any) => k === "fillText").map(([, a]: any) => a[0]);
+    const options = (sel: any) => sel.querySelectorAll("option").map((o: any) => [o.value, o.textContent.trim()]);
+    beforeEach(() => {
+      asked = []; packs = [KEPT]; base = (globalThis as any).fetch;
+      proto.getContext = function () { return (this._ctx ??= fakeCtx()); };
+      (globalThis as any).AgendAuth = { canWrite: async () => true }; (p.window as any).AgendAuth = (globalThis as any).AgendAuth;
+      (globalThis as any).fetch = async (url: string, o: any = {}) => {
+        asked.push(url);
+        if (url === "/ui/office-skins") return { ok: true, status: 200, json: async () => ({ rev: "r", packs, readable: true }) };
+        if (url.startsWith("/ui/office-skins/cozy?")) return { ok: true, status: 200, json: async () => ({ id: "cozy", name: "Our cozy", sha: KEPT.sha, manifest: { ...man(), id: "cozy" }, files: { "office_bg.png": "a".repeat(32), "fox_idle.png": "b".repeat(32) } }) };
+        if (url === "/ui/offices") return { ok: true, status: 200, json: async () => ({ rev: 3, offices: [{ id: "den", name: "Den", members: [], skin: "cozy" }] }) };
+        return base(url, o);
+      };
+    });
+    afterEach(() => { (globalThis as any).fetch = base; delete proto.getContext; delete (globalThis as any).AgendAuth; delete (p.window as any).AgendAuth; });
+    it("an office naming cozy is drawn in the kept pack, not the built-in; Edit offices lists it once, by its name", async () => {
+      await mount();
+      const pick = p.root.querySelector(".oo-office"); pick.value = "den"; fire(pick, "change"); await settle(6);
+      expect(asked.some((u) => u.startsWith("/ui/office-skins/cozy?"))).toBe(true);        // the pack is what loads
+      expect(drawn()).not.toContain("Add your skin");                                     // the built-in's notice board is not drawn
+      p.root.querySelector(".oo-edit").click(); await settle(3);
+      const row = p.root.querySelector(".oe-row .oe-style");
+      expect(row.value).toBe("cozy");
+      expect(options(row)).toEqual([["pixel", "Desks"], ["studio", "Studio"], ["cozy", "Our cozy"]]);
+    });
+    it("a browser that picked it keeps it; the Style picker offers it once; deleted, the built-in Cozy is offered again", async () => {
+      localStorage.setItem("agend_org_office_skin", "cozy");
+      packs = [{ ...KEPT, sha: "e".repeat(32) }];                                         // another sha: loaded afresh, not from the cache
+      await mount();
+      const style = () => p.root.querySelectorAll(".oo-bar select")[1];
+      expect(style().value).toBe("cozy");
+      expect(options(style())).toEqual([["pixel", "Desks"], ["studio", "Studio"], ["cozy", "Our cozy"]]);
+      expect(asked.some((u) => u.startsWith("/ui/office-skins/cozy?"))).toBe(true);
+      expect(drawn()).not.toContain("Add your skin");
+      packs = [];
+      await p.unmount(); await mount();
+      expect(options(style())).toEqual([["pixel", "Desks"], ["studio", "Studio"], ["cozy", "Cozy"]]);
+      expect(drawn()).toContain("Add your skin");
+    });
   });
 });
