@@ -52,7 +52,7 @@ beforeAll(async () => {
   PK = await import("/ui/js/fleet-office-pack.js");
   Z = await import("/ui/js/fleet-office-zones.js");
 });
-afterAll(() => { p.restore(); delete (globalThis as any).fetch; });
+afterAll(async () => { await p.unmount(); p.restore(); delete (globalThis as any).fetch; });
 beforeEach(async () => {
   await p.unmount();
   p.storage.clear();
