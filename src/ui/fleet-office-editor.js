@@ -11,6 +11,7 @@ import { t, register } from "/assets/app-i18n.js";
 import { SidePanel } from "/assets/side-panel.js";
 import { toast } from "/assets/ui-toast.js";
 import { nodeText } from "./fleet-org.js";
+import { BUILT_IN_SKINS } from "./fleet-office-skin.js";
 
 register("orge", {
   en: {
@@ -48,7 +49,7 @@ register("orge", {
 });
 const te = (k, ...v) => t(`orge.${k}`, ...v);
 export const MAX_OFFICES = 20;
-const STYLES = ["pixel", "studio"];
+const STYLES = BUILT_IN_SKINS;
 
 /** A file's bytes as base64 (in slices: a large picture never goes through one huge string call). */
 export function base64Of(bytes) {
@@ -167,7 +168,7 @@ export function OfficeEditor({ offices, rev, view, store, packs = [], ask = () =
   const add = () => {
     if (draft.length >= MAX_OFFICES) return;
     const id = newOfficeId(new Set(draft.map((o) => o.id)));
-    setDraft((d) => [...d, { id, name: te("newName"), skin: "pixel", members: [], layout: null }]);
+    setDraft((d) => [...d, { id, name: te("newName"), skin: "cozy", members: [], layout: null }]);   // #2631: a new office is cozy
     setOpen(id);
   };
   // Everything is frozen from Save until its answer (and a 409's re-read) is in (#2424 review): no edit made meanwhile
@@ -205,7 +206,7 @@ export function OfficeEditor({ offices, rev, view, store, packs = [], ask = () =
           <input type="text" class="oe-name" maxlength="60" value=${o.name} onInput=${(e) => set(o.id, { name: e.target.value })} /></label>
         <label class="oe-field"><span class="oe-label">${te("styleLabel")}</span>
           <select class="tb-select oe-style" value=${o.skin} onChange=${(e) => set(o.id, { skin: e.target.value })}>
-            ${STYLES.map((s) => html`<option key=${s} value=${s}>${t(`orgo.style_${s}`)}</option>`)}
+            ${STYLES.filter((s) => !packs.some((pk) => pk.id === s)).map((s) => html`<option key=${s} value=${s}>${t(`orgo.style_${s}`)}</option>`)}
             ${packs.map((pk) => html`<option key=${`pack:${pk.id}`} value=${pk.id}>${pk.name}</option>`)}
             ${STYLES.includes(o.skin) || packs.some((pk) => pk.id === o.skin) ? null : html`<option key=${o.skin} value=${o.skin}>${te("styleUnknown", o.skin)}</option>`}</select></label>
         <button type="button" class="btn btn-sm oe-members-btn" aria-expanded=${open === o.id ? "true" : "false"} onClick=${() => setOpen(open === o.id ? null : o.id)}>

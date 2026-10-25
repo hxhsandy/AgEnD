@@ -141,7 +141,7 @@ export function checkSkinUpload(body: unknown, by: string, now: number): SkinChe
 /** A record read back: the same rules as an upload's (the pictures' sizes as recorded), or null. */
 function recordOk(raw: unknown, dirName: string): { record: SkinRecord; pack: CheckedPack } | null {
   if (!isObj(raw) || raw.version !== 1 || raw.id !== dirName || typeof raw.sha !== "string" || !FILE_ID.test(raw.sha)) return null;
-  const checked = checkSkinPack(raw.manifest);
+  const checked = checkSkinPack(raw.manifest, { kept: true });
   if (!checked.ok || checked.pack.id !== dirName || !isObj(raw.files)) return null;
   const files = raw.files as Record<string, SkinFile>, sizes = new Map<string, { width: number; height: number }>();
   const named = packImages(checked.pack);

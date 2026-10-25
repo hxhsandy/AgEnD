@@ -1,8 +1,9 @@
 // The Office view's art (fleet-office.js draws with it on a <canvas>). A skin draws a layout that fleet-office-model.js
-// (desks) or fleet-office-zones.js (zones) made. Two skins are built in and draw everything procedurally — little
-// pixel people, desks, lamps — so no art ships: "pixel" (the desks layout: a room per team, a desk per instance) and
-// "studio" (the zones layout: work desks, a lounge, an alert corner and a nap corner; people walk to the area for their
-// state). Every drawing call goes through the OfficeSkin interface below, so a skin pack (pictures from an artist,
+// (desks) or fleet-office-zones.js (zones) made. Three skins are built in. Two draw everything procedurally — little
+// pixel people, desks, lamps: "pixel" (the desks layout: a room per team, a desk per instance) and "studio" (the zones
+// layout: work desks, a lounge, an alert corner and a nap corner; people walk to the area for their state). The third,
+// "cozy" (#2631), is the zones layout on one picture shipped with the page (a warm pixel-art office), the same built-in
+// people in it. Every drawing call goes through the OfficeSkin interface below, so a skin pack (pictures from an artist,
 // format v1 in fleet-office-pack.js) can replace any part; a part a pack does not supply falls back to the built-in
 // drawing. An admin uploads a pack (#2513, the host keeps it: src/web-office-skins.ts); loadPackSkin() reads it back —
 // its manifest checked here again (checkSkinPack), its pictures by their content ids — and spriteSkin() draws it.
@@ -40,6 +41,7 @@
 // pictures and draws the characters, props and bubbles each frame. In zones the background is kept; furniture, people (walking
 // along the pack's waypoints), tags, props and bubbles are drawn each frame, furniture by depth around the people (depth "y":
 // among them by base y), then the foreground, then the crowd counts, tags and bubbles.
+import { t } from "/assets/app-i18n.js";
 import { frameAt, nameHash } from "./fleet-office-model.js";
 import { CHAR_DEPTH, LOGICAL, checkSkinPack, own, packImages, poseStrip, stripBox, walkStrip } from "./fleet-office-pack.js";
 
@@ -542,9 +544,70 @@ export function spriteSkin(pack, images, base = pixelSkin) {
   };
 }
 
+// ── The built-in cozy (#2631): the zones layout on a warm pixel-art office drawn as one picture, the built-in people ──
+
+/** Its picture, shipped with the page (src/ui/shared/office/cozy.png, auth-api.ts ASSETS: public static, as the font). */
+export const COZY_BACKGROUND = "/assets/office-cozy.png";
+const pts = (...xy) => xy.map(([x, y]) => ({ x, y }));
+// The seats are feet points on the picture: chairs in front of the desks, the sofa, the coffee table and machine, the
+// beanbags (a sleeper's bottom), in front of the whiteboard. The rects put a crowd's first extra spots (fleet-office-zones.js
+// overflowSpots: rows from the rect's top) on the aisles: under the first row of desks, in front of the sofa.
+const COZY_AREAS = {
+  desks: { name: "desks", rect: { x: 130, y: 196, w: 430, h: 220 }, seats: pts([193, 238], [336, 238], [481, 238], [193, 354], [336, 354], [481, 354]) },
+  lounge: { name: "lounge", rect: { x: 700, y: 196, w: 476, h: 184 }, seats: pts([940, 240], [1025, 310], [1120, 305]) },
+  alert: { name: "alert", rect: { x: 900, y: 500, w: 220, h: 110 }, seats: pts([965, 570], [1045, 570]) },
+  nap: { name: "nap", rect: { x: 110, y: 470, w: 400, h: 150 }, seats: pts([180, 562], [300, 562], [422, 565]) },
+};
+/** Its walkable graph, on the picture's aisles, every edge across or up/down; each seat's nearest waypoint is in front of it. */
+const COZY_WAYPOINTS = [
+  ["door", 642, 640], ["hall", 642, 395], ["top", 642, 175],
+  // the desks: the aisle under the first row (y 250), the one under the second (y 395), the column beside them (x 560)
+  ["d-east", 560, 395], ["d-up", 560, 250], ["d1-3", 481, 250], ["d1-2", 336, 250], ["d1-1", 193, 250],
+  ["d2-3", 481, 395], ["d2-2", 336, 395], ["d2-x", 300, 395], ["d2-1", 193, 395],
+  // the beanbags: the aisle above them (y 460)
+  ["n-x", 300, 460], ["n-1", 180, 460], ["n-3", 422, 460],
+  // the lounge: below the coffee table (y 340), up the sofa's west end; the coffee machine's column (x 1140)
+  ["l-hall", 946, 395], ["l-mid", 946, 340], ["l-west", 860, 340], ["l-sofa", 860, 250], ["l-table", 1025, 340],
+  ["e-hall", 1140, 395], ["e-coffee", 1140, 305],
+  // the whiteboard: in front of it (y 570), from the coffee machine's column
+  ["a-east", 1140, 570], ["a-mid", 1005, 570],
+].map(([id, x, y]) => ({ id, x, y }));
+const COZY_EDGES = [
+  ["door", "hall"], ["hall", "top"], ["hall", "d-east"], ["d-east", "d2-3"], ["d2-3", "d2-2"], ["d2-2", "d2-x"], ["d2-x", "d2-1"],
+  ["d-east", "d-up"], ["d-up", "d1-3"], ["d1-3", "d1-2"], ["d1-2", "d1-1"], ["d2-x", "n-x"], ["n-x", "n-1"], ["n-x", "n-3"],
+  ["hall", "l-hall"], ["l-hall", "l-mid"], ["l-mid", "l-west"], ["l-west", "l-sofa"], ["l-mid", "l-table"],
+  ["l-hall", "e-hall"], ["e-hall", "e-coffee"], ["e-hall", "a-east"], ["a-east", "a-mid"],
+];
+/** The cozy's pack: the picture is the room; the one item is the notice board, its tag saying a pack can restyle it. */
+export const COZY_PACK = {
+  format: 1, id: "cozy", scale: 1, background: COZY_BACKGROUND, areas: COZY_AREAS, door: { x: 642, y: 662 },
+  waypoints: COZY_WAYPOINTS, edges: COZY_EDGES, straight: true,
+  furniture: [{ id: "notice", x: 1211, y: 628, depth: 5, get label() { return t("orgo.cozyNotice"); } }],
+  stateZones: { working: "desks", idle: "lounge", needs: "alert", crashed: "alert", stuck: "alert", paused: "nap", stopped: "nap", default: "lounge" },
+  characters: {}, byInstance: {}, props: {}, bubbles: {},
+};
+/** Until its picture is in (loadCozySkin): the studio's floors under the cozy's areas. */
+const cozyBare = spriteSkin(COZY_PACK, new Map(), studioSkin);
+let cozyJob = null;
+
 /** The skins built into this page; an uploaded pack is loaded by loadPackSkin. */
-export const SKINS = new Map([["pixel", pixelSkin], ["studio", studioSkin]]);
-export const BUILT_IN_SKINS = ["pixel", "studio"];
+export const SKINS = new Map([["pixel", pixelSkin], ["studio", studioSkin], ["cozy", cozyBare]]);
+export const BUILT_IN_SKINS = ["pixel", "studio", "cozy"];
+/**
+ * #2631: the cozy's picture, loaded once; the skin drawn from it then takes the cozy's place in SKINS (skinFor). The
+ * skin, or null while it cannot load (the bare one stays; tried again next time).
+ */
+export function loadCozySkin({ image = defaultImage } = {}) {
+  if (SKINS.get("cozy") !== cozyBare) return Promise.resolve(SKINS.get("cozy"));
+  cozyJob ??= image(COZY_BACKGROUND).then((im) => {
+    cozyJob = null;
+    if (!im) return null;
+    const sk = spriteSkin(COZY_PACK, new Map([[COZY_BACKGROUND, im]]), studioSkin);
+    SKINS.set("cozy", sk);
+    return sk;
+  }, () => { cozyJob = null; return null; });
+  return cozyJob;
+}
 /** A skin by id: a built-in one, else a pack loaded here (`packs`: id → skin), else the default (pixel). */
 export const skinFor = (id, packs = null) => SKINS.get(id) || (packs && packs.get(id)) || pixelSkin;
 
@@ -573,7 +636,7 @@ export function loadPackSkin(id, sha, { fetch: get = globalThis.fetch, image = d
       const r = await get(`${base}?v=${encodeURIComponent(sha)}`, { method: "GET", headers: { "Content-Type": "application/json" } });
       if (!r || !r.ok) return null;
       const d = await r.json();
-      const c = checkSkinPack(d && d.manifest);
+      const c = checkSkinPack(d && d.manifest, { kept: true });
       if (!c.ok || c.pack.id !== id) return null;
       const files = d.files && typeof d.files === "object" ? d.files : {};
       const images = new Map();

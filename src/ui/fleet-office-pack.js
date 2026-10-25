@@ -121,6 +121,11 @@ const SET_STRIPS = [...POSES, "prop"];
 /** A furniture item's walking strips (#2596): a character set's walking poses. */
 const WALKS = ["walk", "walkDown", "walkUp", "walkSide"];
 const BUILT_IN = new Set(["pixel", "studio"]);
+/**
+ * Ids built in after packs could be uploaded under them (#2631: "cozy"): a new upload is refused, but a pack the host
+ * kept under one before (`kept`) is still read back, listed and deletable, and wins the id for the offices that name it.
+ */
+const RESERVED = new Set(["cozy"]);
 const ID = /^[A-Za-z0-9_-]{1,40}$/;
 const SRC = /^[A-Za-z0-9._/-]{1,200}$/;
 const HEX = /^#[0-9a-f]{6}$/i;
@@ -190,14 +195,17 @@ function states(v, at) {
   return Array.isArray(v) ? list(v, 8, at).map((s, i) => one(s, `${at}[${i}]`)) : [one(v, at)];
 }
 
-/** A pack's manifest, strictly: { ok: true, pack } or { ok: false, error: "<where>: <why>" }. */
-export function checkSkinPack(x) {
+/**
+ * A pack's manifest, strictly: { ok: true, pack } or { ok: false, error: "<where>: <why>" }. `kept`: a pack the host
+ * keeps already (read back, not uploaded), which may hold a RESERVED id.
+ */
+export function checkSkinPack(x, { kept = false } = {}) {
   try {
     obj(x, "pack");
     keys(x, ["format", "id", "scale", "background", "foreground", "matte", "areas", "stateZones", "door", "waypoints", "edges", "straight", "furniture", "characters", "byInstance", "props", "bubbles", "room", "desk"], "pack");
     if (x.format !== 1) throw new Refused("format", "1");
     if (typeof x.id !== "string" || !ID.test(x.id)) throw new Refused("id", "1–40 letters, digits, _ or -");
-    if (BUILT_IN.has(x.id)) throw new Refused("id", "a built-in skin's id");
+    if (BUILT_IN.has(x.id) || (!kept && RESERVED.has(x.id))) throw new Refused("id", "a built-in skin's id");
     const scale = x.scale === undefined ? 2 : int(x.scale, 1, 8, "scale");
     if (x.matte !== undefined && !matteOk(x.matte)) throw new Refused("matte", "a colour as #rrggbb");
     if (x.straight !== undefined && typeof x.straight !== "boolean") throw new Refused("straight", "true or false");

@@ -14,7 +14,8 @@ import { fileURLToPath } from "node:url";
 const UI_DIR = join(dirname(fileURLToPath(import.meta.url)), "ui");
 const JS = "text/javascript; charset=utf-8";
 
-/** `/assets/<name>` → src/ui/shared/<name>: the share page's closure there, its stylesheets and the font they name. */
+/** `/assets/<name>` → src/ui/shared/<name>: the share page's closure there, its stylesheets, the font they name and the
+ * Cozy style's picture (#2631). */
 export const SHARE_ASSETS: Readonly<Record<string, string>> = {
   ...Object.fromEntries([
     "app-ctx.js", "app-html.js", "app-i18n.js", "app-nav.js", "app-prefs.js", "app-route.js", "app-store.js", "app-themes.js", "header-tools.js",
@@ -22,8 +23,10 @@ export const SHARE_ASSETS: Readonly<Record<string, string>> = {
     "side-panel.js", "text-undo.js", "ui-confirm.js", "ui-dialog.js", "ui-icons.js", "ui-states.js", "ui-toast.js", "usage-dialog.js",
     "view-roster-store.js", "view-strings.js",
   ].map(name => [name, JS])),
-  "tokens.css": "text/css; charset=utf-8", "app.css": "text/css; charset=utf-8", "inter.woff2": "font/woff2",
+  "tokens.css": "text/css; charset=utf-8", "app.css": "text/css; charset=utf-8", "inter.woff2": "font/woff2", "office-cozy.png": "image/png",
 };
+/** An asset kept below src/ui/shared/ rather than in it, by name. */
+export const SHARE_ASSET_FILES: Readonly<Record<string, string>> = { "inter.woff2": join("fonts", "inter.woff2"), "office-cozy.png": join("office", "cozy.png") };
 /** `/ui/js/<name>` → src/ui/<name>: the share page's own module and the Office's. */
 export const SHARE_MODULES: readonly string[] = [
   "office-share-page.js", "fleet-office.js", "fleet-office-model.js", "fleet-office-skin.js", "fleet-office-zones.js", "fleet-office-store.js",
@@ -43,7 +46,7 @@ export function officeShareStatic(path: string): { body: Buffer; type: string } 
   const asset = /^\/assets\/([A-Za-z0-9_.-]+)$/.exec(path);
   if (asset && Object.prototype.hasOwnProperty.call(SHARE_ASSETS, asset[1]!)) {
     const name = asset[1]!;
-    const body = read(join(UI_DIR, "shared", name === "inter.woff2" ? join("fonts", name) : name));
+    const body = read(join(UI_DIR, "shared", SHARE_ASSET_FILES[name] ?? name));
     return body ? { body, type: SHARE_ASSETS[name]! } : null;
   }
   const mod = /^\/ui\/js\/([a-z0-9_-]+\.js)$/.exec(path);

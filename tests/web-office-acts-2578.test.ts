@@ -45,7 +45,7 @@ const scratch = () => { const d = mkdtempSync(join(tmpdir(), "agend-office-acts-
 
 const STRIP = { src: "idle.png", frames: 1, w: 16, h: 16, fps: 0, ax: 8, ay: 15 };
 const MANIFEST = {
-  format: 1, id: "cozy", background: "office.png",
+  format: 1, id: "snug", background: "office.png",
   areas: { desks: { rect: [40, 120, 600, 400], seats: [[120, 220], [260, 220]] }, lounge: { rect: [700, 120, 500, 300], seats: [[760, 260]] } },
   stateZones: { working: "desks", default: "lounge" },
   door: [640, 700],
@@ -54,13 +54,13 @@ const MANIFEST = {
   characters: { default: { idle: STRIP } },
 };
 const PACK = (() => { const r = checkSkinPack(MANIFEST); if (!r.ok) throw new Error(r.error); return r.pack; })();
-const OVERRIDES = { pack: "cozy", seats: { desks: [[130, 230], [270, 230]] }, furniture: { rack: [1000, 150] }, door: [600, 710],
+const OVERRIDES = { pack: "snug", seats: { desks: [[130, 230], [270, 230]] }, furniture: { rack: [1000, 150] }, door: [600, 710],
   waypoints: [{ id: "hall", x: 650, y: 610 }, { id: "nook", x: 300, y: 500 }], edges: [["hall", "nook"]] };
 const offices = () => {
   const r = checkOffices([
-    { id: "ops", name: "Ops", skin: "cozy", members: ["alpha", "team:web"], overrides: OVERRIDES },
+    { id: "ops", name: "Ops", skin: "snug", members: ["alpha", "team:web"], overrides: OVERRIDES },
     { id: "lab", name: "Lab", skin: "pixel", members: ["beta"] },
-  ], id => (id === "cozy" ? PACK : null));
+  ], id => (id === "snug" ? PACK : null));
   if (!r.ok) throw new Error(r.detail);
   return r.offices;
 };
@@ -73,7 +73,7 @@ function acts(opts: { offices?: ReturnType<typeof offices>; clock?: { t: number 
   const states: Record<string, string> = { alpha: "working", beta: "idle", gamma: "needs" };
   const list = opts.offices ?? offices();
   const a = new OfficeActs({
-    offices: () => list, pack: id => (id === "cozy" ? PACK : null), chart: () => CHART,
+    offices: () => list, pack: id => (id === "snug" ? PACK : null), chart: () => CHART,
     people: () => ({ stateOf: n => states[n] ?? "missing", displayName: n => (n === "alpha" ? "Alpha Fox" : undefined) }),
     changed: live => sent.push({ acts: live }),
   }, { limiter: new OfficeActLimiter(() => clock.t) });
@@ -174,7 +174,7 @@ describe("office_view", () => {
     const view = a.view("beta", {});
     expect(view).toEqual({
       offices: [
-        { id: "ops", name: "Ops", skin: "cozy", walks: true, members: [{ name: "alpha", display_name: "Alpha Fox", state: "working" }, { name: "beta", state: "idle" }, { name: "gamma", state: "needs" }],
+        { id: "ops", name: "Ops", skin: "snug", walks: true, members: [{ name: "alpha", display_name: "Alpha Fox", state: "working" }, { name: "beta", state: "idle" }, { name: "gamma", state: "needs" }],
           spots: officeSpots(offices()[0]!, PACK) },
         { id: "lab", name: "Lab", skin: "pixel", walks: false, members: [{ name: "beta", state: "idle" }], spots: { seats: [], waypoints: [], npcs: [], door: null } },
       ],
@@ -328,8 +328,8 @@ async function fleet() {
   fm.logger = { info: quiet, warn: quiet, error: quiet, debug: quiet, trace: quiet, fatal: quiet, child: () => fm.logger };
   vi.spyOn(fm, "notifyFleetError").mockImplementation(() => true);
   fm.fleetConfig = { instances: { alpha: { working_directory: "/tmp", dashboard: { office: true } }, beta: { working_directory: "/tmp" } }, defaults: {}, teams: {} };
-  vi.spyOn(fm.officeSkins, "pack").mockImplementation((id: unknown) => (id === "cozy" ? PACK : null));
-  expect(fm.officeStore.replace([{ id: "ops", name: "Ops", skin: "cozy", members: ["alpha", "beta"], overrides: OVERRIDES }])).toMatchObject({ ok: true });
+  vi.spyOn(fm.officeSkins, "pack").mockImplementation((id: unknown) => (id === "snug" ? PACK : null));
+  expect(fm.officeStore.replace([{ id: "ops", name: "Ops", skin: "snug", members: ["alpha", "beta"], overrides: OVERRIDES }])).toMatchObject({ ok: true });
   fm.initializeWebAuthTokens(); fm.startHealthServer(0);
   await vi.waitFor(() => expect(fm.getDashboardAccess().ready).toBe(true));
   const port = ((fm.healthServer as Server).address() as { port: number }).port;

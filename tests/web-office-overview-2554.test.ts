@@ -334,6 +334,7 @@ describe("All offices on the page", () => {
       offices = { rev: 2, offices: [{ id: "front", name: "Front desk", skin: "clinic-sample", members: ["atlas"] }, { id: "lab", name: "Lab", skin: "clinic-sample", members: ["quill"] }] };
       app.appStore.set({ ...STORE, streamOn: (name: string, cb: (x: any) => void) => { on[name] = cb; return () => {}; } });
       localStorage.setItem("agend_org_office", "front");
+      localStorage.setItem("agend_org_office_skin", "pixel");   // the whole fleet on Desks: nobody is still walking in from a zones scene when the line comes
       await office(); await settle(8);
       const said = (line: string) => lastFrame().some((c: any) => c[0] === "fillText" && c[1][0] === line);
       on.office_acts({ acts: [{ instance: "atlas", office: "front", until: Date.now() + 60_000, since: Date.now(), state: "idle", say: "Tea, anyone?" },
@@ -464,11 +465,12 @@ describe("All offices on the page", () => {
   it("a tile's label opens that office (kept as the pick); a double-click on a tile's empty floor too; the lobby opens nothing", async () => {
     offices = { rev: 2, offices: TWO };
     localStorage.setItem("agend_org_office", "*all");
+    localStorage.setItem("agend_org_office_skin", "pixel");                  // the whole fleet's style (the lobby tile's): Desks
     await office();
     const lab = p.root.querySelector('.oo-tile-label[data-office="lab"]');
     expect([lab.tagName.toLowerCase(), lab.getAttribute("aria-label")]).toEqual(["button", "Open the office Lab"]);
     // Placed just above its tile, wherever the view puts it.
-    // The lobby tile (sage, loner) is Desks here, the whole fleet's default style: one room wrapping at a cell's width.
+    // The lobby tile (sage, loner) is Desks here, the whole fleet's style picked above: one room wrapping at a cell's width.
     const v = shown(), lobbyL = O.cropToRooms(M.autoLayout([{ key: O.LOBBY_TILE, name: null, lobby: true, nodes: O.lobbyNodes(TWO.map((o) => M.officeOk(o)), view()) }], { width: 1280 }));
     const lay = O.tileLayout([...zone(2), { key: "lobby", w: lobbyL.width, h: lobbyL.height }], STAGE);
     expect(parseFloat(lab.style.left)).toBeCloseTo(v.x + lay.tiles[1].x * v.k, 6);

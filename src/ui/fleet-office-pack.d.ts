@@ -29,7 +29,7 @@ export function own<T = unknown>(o: unknown, k: unknown): T | undefined;
 export function inherited(k: unknown): boolean;
 export function matteOk(v: unknown): v is string;
 export function checkStrip(v: unknown, at?: string, scale?: number): PackStrip;
-export function checkSkinPack(x: unknown): { ok: true; pack: CheckedPack } | { ok: false; error: string };
+export function checkSkinPack(x: unknown, opts?: { kept?: boolean }): { ok: true; pack: CheckedPack } | { ok: false; error: string };
 export function skinPackOk(x: unknown): CheckedPack | null;
 export function packImages(pack: CheckedPack): string[];
 export function packStrips(pack: CheckedPack): Array<{ at: string; strip: PackStrip }>;
