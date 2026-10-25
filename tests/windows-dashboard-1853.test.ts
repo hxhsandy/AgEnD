@@ -15,13 +15,16 @@ import { afterAll, describe, expect, it } from "vitest";
 const INSTALLER = join(import.meta.dirname, "..", "website", "public", "install-agend.ps1");
 const text = readFileSync(INSTALLER, "utf8");
 const code = text.split("\n").filter(l => !/^\s*#/.test(l)).join("\n");
-const ending = code.slice(code.indexOf("全部安裝完成！"));
+const ending = code.slice(code.indexOf('if ($script:InstallerReady) { Write-Host "  服務與儀表板已就緒"'));
 
 describe("the installer ends on the dashboard (static)", () => {
   it("the shortcut is made and the dashboard opened, after the progress is cleared; console commands only under 進階", () => {
     expect(ending).toMatch(/\$shortcuts = @\(Install-AgendShortcuts \$UBUNTU_DISTRO \$AGEND_USER\)/);
     // #2650 item 10: a dashboard that does not open names the two ways back to it (neither reinstalls).
-    expect(ending).toMatch(/if \(-not \(Invoke-OpenDashboard \$UBUNTU_DISTRO \$AGEND_USER -BackendSignins \$browserSignins\)\) \{\n\s+Write-Info "安裝已經完成，設定都保留著。之後要打開儀表板：按兩下桌面上的「AgEnD 儀表板」，或再貼一次同一行安裝指令（不會重新安裝，會問你要不要打開儀表板）。"\n\}/);
+    expect(ending).toContain('if (-not (Invoke-OpenDashboard $UBUNTU_DISTRO $AGEND_USER -BackendSignins $browserSignins))');
+    expect(ending).toContain('if ($script:InstallerReady -and $missingBackends.Count -eq 0)');
+    expect(ending).toContain('安裝已經完成，設定都保留著。之後要打開儀表板：');
+    expect(ending).toContain('再貼一次同一行安裝指令會從沒完成的步驟繼續');
     expect(ending.indexOf("Invoke-OpenDashboard $UBUNTU_DISTRO")).toBeGreaterThan(ending.indexOf("Clear-ResumeAtLogon"));
     const advanced = ending.indexOf("── 進階（需要用主控台時才看）──");
     expect(advanced).toBeGreaterThan(ending.indexOf("日常使用："));
@@ -78,7 +81,7 @@ Write-Output ("RESULT=" + (Invoke-OpenDashboard 'Ubuntu-24.04' 'han'))`, bin);
     expect(out).toContain("登入頁網址：http://localhost:19280/signin");       // #2650 item 10: even when the browser opened
     expect(out).toContain("RESULT=True");
     // The user AgEnD was installed as, and its own home — never a hard-coded root.
-    expect(readFileSync(join(bin, "args.txt"), "utf8")).toBe("-d Ubuntu-24.04 -u han -- bash -lc export PATH=$HOME/.local/bin:$PATH; source $HOME/.nvm/nvm.sh 2>/dev/null; agend web --code\n");
+    expect(readFileSync(join(bin, "args.txt"), "utf8")).toBe("-d Ubuntu-24.04 -u han -- timeout --signal=TERM --kill-after=2s 25 bash -lc export PATH=$HOME/.local/bin:$PATH; source $HOME/.nvm/nvm.sh 2>/dev/null; agend web --code\n");
   });
   it("AgEnD not running: says so and how to start it; nothing opened", () => {
     const { out, dir } = withHelpers(`function Start-Process { param($FilePath) Add-Content (Join-Path $env:TMPDIR 'opened.txt') $FilePath }
@@ -106,7 +109,7 @@ Write-Output ("RESULT=" + $r + " EAP=" + $ErrorActionPreference)`, bin);
   it("Windows PowerShell 5.1's boundary, modelled: the native stderr arrives as an error record under Stop — still the message, never a throw", () => {
     // 5.1 wraps a redirected native stderr line in a NativeCommandError record that ErrorActionPreference=Stop turns
     // into a terminating error; pwsh 7.2+ does not. A wsl.exe *function* writing that record reproduces it here.
-    const { out, dir } = withHelpers(`function wsl.exe { $global:LASTEXITCODE = 1; Write-Error -Message 'Web token not found. Is the fleet running?' -ErrorId NativeCommandError }
+    const { out, dir } = withHelpers(`function Invoke-BoundedWsl {return @{Code=1;Text='Web token not found. Is the fleet running?'}}
 function Start-Process { param($FilePath) Add-Content (Join-Path $env:TMPDIR 'opened.txt') $FilePath }
 function Read-Host { param($p) Add-Content (Join-Path $env:TMPDIR 'waited.txt') $p }
 $ErrorActionPreference = 'Stop'
@@ -117,7 +120,7 @@ try { $r = Invoke-OpenDashboard 'Ubuntu-24.04' -Wait; Write-Output ("RESULT=" + 
     expect(() => readFileSync(join(dir, "opened.txt"))).toThrow();
   });
   it("5.1's boundary, modelled: stderr noise as an error record, then the sign-in and exit 0 — still opens the page", () => {
-    const { out, dir } = withHelpers(`function wsl.exe { Write-Error -Message 'nvm: a warning' -ErrorId NativeCommandError; "Sign-in page: http://localhost:19280/signin"; "Code:         K7QM-3XRD   (works once, valid ~5 min)"; $global:LASTEXITCODE = 0 }
+    const { out, dir } = withHelpers(`function Invoke-BoundedWsl {return @{Code=0;Text="Sign-in page: http://localhost:19280/signin\`nCode:         K7QM-3XRD   (works once, valid ~5 min)\`nnvm: a warning"}}
 function Start-Process { param($FilePath) Add-Content (Join-Path $env:TMPDIR 'opened.txt') $FilePath }
 function Set-Clipboard { param($Value) Add-Content (Join-Path $env:TMPDIR 'clip.txt') $Value }
 $ErrorActionPreference = 'Stop'
@@ -158,7 +161,7 @@ Write-Output ("NEW-SHORTCUT-OFF-WINDOWS=[" + (@(Install-AgendShortcuts 'Ubuntu-2
     const r = spawnSync("pwsh", ["-NoProfile", "-File", join(dir, "open-dashboard.ps1")], { encoding: "utf8", timeout: 60_000, input: "\n", env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, BROWSER: "false" } });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("儀表板登入碼：  K 7 Q M - 3 X R D");
-    expect(r.stdout).toContain("登入頁網址：http://localhost:19280/signin");    // #2650 item 10: printed whether or not a browser opened
-    expect(readFileSync(join(bin, "args.txt"), "utf8")).toMatch(/^-d Ubuntu-22\.04 -u root -- bash -lc /);
+    expect(r.stdout).toContain("登入頁網址：http://localhost:19280/signin");
+    expect(readFileSync(join(bin, "args.txt"), "utf8")).toMatch(/^-d Ubuntu-22\.04 -u root -- timeout --signal=TERM --kill-after=2s 25 bash -lc /);
   });
 });

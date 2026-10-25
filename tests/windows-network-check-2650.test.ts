@@ -47,7 +47,7 @@ describe("static", () => {
   it("install.ps1's download has a deadline and names proxy, certificate and timeout failures; still ASCII", () => {
     const boot = readFileSync(BOOTSTRAP, "utf8");
     expect(/^[\x00-\x7f]*$/.test(boot)).toBe(true);
-    expect(boot).toMatch(/Invoke-WebRequest -UseBasicParsing -Uri "\$base\/install-agend\.ps1" -OutFile \$tmp -TimeoutSec \d+/);
+    expect(boot).toMatch(/Invoke-InstallDownload -Uri "\$base\/install-agend\.ps1" -OutFile \$tmp -TimeoutSec \d+/);
     for (const s of ["A proxy blocked it", "The HTTPS certificate was not trusted", "It timed out"]) expect(boot).toContain(s);
   });
 });

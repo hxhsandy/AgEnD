@@ -116,6 +116,11 @@ foreach ($a in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Lan
 $script:OnWindows = $false
 $env:LOCALAPPDATA = Join-Path $env:TMPDIR 'localappdata'
 function Get-InstalledWslVersion { return [version]'2.6.3.0' }
+# Exercise repair decisions while keeping the owned-step transport inert.
+function Invoke-WslStep { param($Label,$Usually,$UpperMinutes,$Distro,$User,$Script)
+    & wsl.exe -d $Distro -u $User -- bash -lc $Script | Out-Host
+    return $LASTEXITCODE
+}
 ${body}`);
   const r = spawnSync("pwsh", ["-NoProfile", "-File", file], { encoding: "utf8", timeout: 60_000, env: { ...process.env, TMPDIR: dir, PATH: `${bin}:${process.env.PATH}` } });
   if (r.error || r.signal || r.status !== 0) throw new Error(`pwsh ended ${r.error ?? r.signal ?? r.status}:\n${r.stdout}${r.stderr}`);
@@ -138,7 +143,7 @@ describe.skipIf(!pwsh)("with pwsh: finding and repairing a broken AgEnD", { time
     const log = calls(bin).trim().split("\n");
     // #2286 review: never the old version itself — it may predate the installer that repairs (#2264).
     expect(log[0]).toBe(`-d AgEnD -u root -- bash -lc ${PRELUDE}set -o pipefail; curl -fsSL https://songsid.github.io/AgEnD/install.sh | AGEND_VERSION=beta bash`);
-    expect(log[1]).toBe(`-d AgEnD -u root -- bash -lc ${PRELUDE}agend --version`);
+    expect(log[1]).toBe(`-d AgEnD -u root -- timeout --signal=TERM --kill-after=2s 25 bash -lc ${PRELUDE}agend --version`);
     expect(log[0]).not.toContain('"');
   });
   it("a stable version, no version found, or one that is not a version: the installer's default (latest), never the text pasted in", () => {

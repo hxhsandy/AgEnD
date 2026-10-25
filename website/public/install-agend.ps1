@@ -21,6 +21,36 @@ $NODE_VERSION = "22"  # LTS 穩定版，AgEnD 需要 22+
 
 # ── 輔助函式 ─────────────────────────────────────────────
 
+# Stream only installer-owned downloads; both response wait and byte progress are bounded.
+function New-InstallDownloadRequest([string]$Uri) { return [Net.WebRequest]::CreateHttp($Uri) }
+function Invoke-InstallDownload([string]$Uri, [string]$OutFile, [int]$TimeoutSec = 120, [double]$NoProgressSeconds = 60) {
+    $request = New-InstallDownloadRequest $Uri
+    $response = $null; $inputStream = $null; $outputStream = $null; $complete = $false
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $wait = {
+        $operation = $args[0]
+        $left = [Math]::Min($NoProgressSeconds, $TimeoutSec - $clock.Elapsed.TotalSeconds)
+        if ($left -le 0 -or -not $operation.Wait([int][Math]::Max(1, $left * 1000))) { throw 'Download exceeded its operation or no-progress deadline; rerun after checking the network.' }
+        return $operation.GetAwaiter().GetResult()
+    }
+    try {
+        $response = & $wait ($request.GetResponseAsync())
+        $inputStream = $response.GetResponseStream()
+        $outputStream = [IO.File]::Open($OutFile, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $buffer = New-Object byte[] 65536
+        while ($true) {
+            $count = & $wait ($inputStream.ReadAsync($buffer, 0, $buffer.Length))
+            if ($count -eq 0) { break }
+            $outputStream.Write($buffer, 0, $count)
+        }
+        $complete = $true
+    } finally {
+        $request.Abort()
+        if ($outputStream) { $outputStream.Dispose() }; if ($inputStream) { $inputStream.Dispose() }; if ($response) { $response.Dispose() }
+        if (-not $complete) { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 function Write-Step($num, $total, $msg) {
     Write-Host "`n[$num/$total] $msg" -ForegroundColor Cyan
     Write-InstallLog "[$num/$total] $msg"
@@ -119,7 +149,7 @@ function Start-InstallLog([string]$runId) {
 function Stage-Done($stage) {
     if ($Force) { return $false }
     if (Test-Path $ProgressFile) {
-        return (Get-Content $ProgressFile -Raw) -match "STAGE_${stage}_DONE"
+        return [bool]((Get-Content $ProgressFile -Raw) -match "STAGE_${stage}_DONE")
     }
     return $false
 }
@@ -157,7 +187,7 @@ function Save-InstallVersion([string]$version) {
 function Get-AgendInstallCommand([string]$version) {
     $version = Resolve-AgendInstallVersion $version
     $pin = ''; if ($version) { $pin = "AGEND_VERSION=$version " }
-    return ('curl -fsSL https://songsid.github.io/AgEnD/install.sh | ' + $pin + 'bash || true')
+    return ('set -o pipefail; curl --connect-timeout 20 --max-time 120 -fsSL https://songsid.github.io/AgEnD/install.sh | ' + $pin + 'bash')
 }
 function Get-InstallResumeCommand([string]$version) {
     $version = Resolve-AgendInstallVersion $version
@@ -360,7 +390,8 @@ function Test-WslNetwork([string]$distro) {
     $prevEAP = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        $text = ((& wsl.exe -d $distro -u root -- bash $wslFile 2>&1) | ForEach-Object { "$_" } | Out-String)
+        $probe = Invoke-BoundedWsl -Arguments @('-d', $distro, '-u', 'root', '--', 'bash', $wslFile) -TimeoutSeconds 60
+        if ($probe.Code -eq 0) { $text = $probe.Text }
     } catch { $text = '' } finally {
         $ErrorActionPreference = $prevEAP
         Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
@@ -416,15 +447,15 @@ function Get-LocalDisks {
 # 不開 Ubuntu 的設定視窗：那個視窗會要你建立 Linux 使用者和密碼，而我們本來就以 root 執行。
 # 回傳 'ready'、'failed'（試過了還是不行），或 'declined'（不同意重新啟動整個 WSL）。
 function Test-WslRoot([string]$distro) {
-    $r = wsl -d $distro -u root -- echo "WSL_OK" 2>&1 | Out-String
-    return ($r -match "WSL_OK")
+    $r = Invoke-BoundedWsl -Arguments @('-d', $distro, '-u', 'root', '--', 'echo', 'WSL_OK')
+    return ($r.Code -eq 0 -and $r.Text -match 'WSL_OK')
 }
 function Wait-WslRoot([string]$distro, [int]$tries = 3, [int]$pauseSeconds = 5) {
     for ($i = 1; $i -le $tries; $i++) {
         if (Test-WslRoot $distro) { return 'ready' }
         if ($i -lt $tries) {
             Write-Info "$distro 還沒準備好，只重新啟動這個 Linux 後再試一次（$i/$($tries - 1)）..."
-            wsl --terminate $distro 2>&1 | Out-Null
+            $null = Invoke-BoundedWsl -Arguments @('--terminate', $distro)
             Start-Sleep -Seconds $pauseSeconds
         }
     }
@@ -434,7 +465,7 @@ function Wait-WslRoot([string]$distro, [int]$tries = 3, [int]$pauseSeconds = 5) 
     # Read-Host 回傳 $null，而 $null -notmatch '…' 不是 $true，會被當成同意。
     if (([string]$answer) -notmatch '^\s*[yY]\s*$') { return 'declined' }
     Write-Info "正在重新啟動整個 WSL..."
-    wsl --shutdown 2>&1 | Out-Null
+    $null = Invoke-BoundedWsl -Arguments @('--shutdown')
     Start-Sleep -Seconds $pauseSeconds
     if (Test-WslRoot $distro) { return 'ready' }
     return 'failed'
@@ -457,8 +488,9 @@ function Get-WslDistroNames {
     try {
         $env:WSL_UTF8 = '1'
         try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
-        $out = @((& wsl.exe --list --quiet 2>$null) | ForEach-Object { ("$_" -replace "`0", '').Trim() } | Where-Object { $_ })
-        if ($LASTEXITCODE -eq 0) { return ,$out }
+        $r = Invoke-BoundedWsl -Arguments @('--list', '--quiet')
+        $out = @($r.Text -split '\r?\n' | ForEach-Object { ($_ -replace "`0", '').Trim() } | Where-Object { $_ })
+        if ($r.Code -eq 0) { return ,$out }
     } catch {
         # wsl.exe 不能執行：改讀登記
     } finally {
@@ -532,10 +564,14 @@ function Get-UbuntuWslImage([string]$version = 'Ubuntu-24.04') {
 function Install-AgendDistro([string]$name, [string]$location) {
     $version = Get-InstalledWslVersion
     if ($version -and $version -ge $WSL_NAME_MIN) {
-        $null = Invoke-Watched -Label "下載並安裝 AgEnD 專用的 Ubuntu（$name）" -Usually "通常需要 3–10 分鐘" -UpperMinutes 15 -Encoding utf16 -File "wsl.exe" -Arguments @("--install", "Ubuntu-24.04", "--name", $name, "--location", $location, "--no-launch")
+        $installCode = Invoke-Watched -Label "下載並安裝 AgEnD 專用的 Ubuntu（$name）" -Usually "通常需要 3–10 分鐘" -UpperMinutes 15 -TimeoutSeconds 1800 -NoProgressSeconds 0 -Encoding utf16 -File "wsl.exe" -Arguments @("--install", "Ubuntu-24.04", "--name", $name, "--location", $location, "--no-launch")
         $after = Get-WslDistroNames
         if ($null -eq $after) { Write-Err "裝完之後讀不到 Linux 清單，無法確認 $name 有沒有裝好；沒有再做任何事。"; return $false }
-        if ($after -contains $name) { return $true }
+        if ($after -contains $name) {
+            if ($installCode -notin @(0,3010)) { Write-Err "Linux 安裝結束碼 $installCode，尚未標記完成；請重新執行以驗證現況。"; return $false }
+            return $true
+        }
+        if ($installCode -eq 124) { Write-Err 'Linux installation timed out; check WSL before retrying.'; return $false }
         Write-Warn "WSL 沒有用 $name 這個名稱裝好，改用官方的 Ubuntu 映像檔匯入..."
     }
     $image = Get-UbuntuWslImage
@@ -545,13 +581,13 @@ function Install-AgendDistro([string]$name, [string]$location) {
     try {
         Write-Info "正在下載官方的 Ubuntu 24.04（幾百 MB，請稍候）..."
         $ProgressPreference = 'SilentlyContinue'    # Windows PowerShell 5.1 的下載進度列會讓下載慢很多
-        try { Invoke-WebRequest -Uri $image.Url -OutFile $file -UseBasicParsing -TimeoutSec 1800 } catch { Write-Err "下載 Ubuntu 失敗：$_"; return $false }
+        try { Invoke-InstallDownload -Uri $image.Url -OutFile $file -TimeoutSec 1800 } catch { Write-Err "下載 Ubuntu 失敗：$_"; return $false }
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash
         if ($hash -ne $image.Sha256) { Write-Err "下載的 Ubuntu 和官方的檢查碼不符，沒有安裝。"; return $false }
         New-Item -ItemType Directory -Path $location -Force | Out-Null
-        $null = Invoke-Watched -Label "匯入 AgEnD 專用的 Ubuntu（$name）" -Usually "通常需要 1–3 分鐘" -UpperMinutes 10 -Encoding utf16 -File "wsl.exe" -Arguments @("--import", $name, $location, $file, "--version", "2")
+        $importCode = Invoke-Watched -Label "匯入 AgEnD 專用的 Ubuntu（$name）" -Usually "通常需要 1–3 分鐘" -UpperMinutes 10 -TimeoutSeconds 1800 -NoProgressSeconds 0 -Encoding utf16 -File "wsl.exe" -Arguments @("--import", $name, $location, $file, "--version", "2")
         $after = Get-WslDistroNames
-        return ($null -ne $after -and $after -contains $name)
+        return ($importCode -in @(0,3010) -and $null -ne $after -and $after -contains $name)
     } finally {
         $ProgressPreference = $prevProgress
         Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
@@ -674,7 +710,8 @@ function Get-FleetConnections([string]$distro) {
     $prevEAP = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        $text = ((& wsl.exe -d $distro -u root -- bash -lc 'export PATH=/root/.local/bin:$PATH; source /root/.nvm/nvm.sh 2>/dev/null; agend validate --connections' 2>&1) | ForEach-Object { "$_" } | Out-String)
+        $result = Invoke-AgendInWsl $distro 'root' 'agend validate --connections'
+        if ($result.Code -eq 0) { $text = $result.Text }
     } catch {
         $text = ''
     } finally {
@@ -684,8 +721,8 @@ function Get-FleetConnections([string]$distro) {
     return 'unknown'
 }
 function Test-WslLogin([string]$key) {
-    $r = wsl -d $UBUNTU_DISTRO -u root -- bash -lc ('export PATH=/root/.local/bin:$HOME/.claude/local:$PATH; if ' + (Get-LoginCheck $key) + '; then echo LOGIN_OK; else echo LOGIN_NO; fi') 2>&1 | Out-String
-    return ($r -match 'LOGIN_OK')
+    $r = Invoke-BoundedWsl -Arguments @('-d', $UBUNTU_DISTRO, '-u', 'root', '--', 'bash', '-lc', ('export PATH=/root/.local/bin:$HOME/.claude/local:$PATH; if ' + (Get-LoginCheck $key) + '; then echo LOGIN_OK; else echo LOGIN_NO; fi'))
+    return ($r.Code -eq 0 -and $r.Text -match 'LOGIN_OK')
 }
 
 # 第 3 階段：逐一登入所選的後端。回傳沒有登入就跳過的後端；有任何一個跳過，這一階段就不算完成（#2239 審查），
@@ -756,192 +793,195 @@ function Complete-LoginStage($backends) {
 # 指令裡不放雙引號：Windows PowerShell 5.1 傳給 wsl.exe 的參數不會跳脫內含的雙引號，指令會被拆開。印給人貼上的
 # 「啟動 AgEnD」指令也用同一個組法，貼上就能用。
 $WSL_COMMAND_FN = @'
-function Get-WslAgendCommand([string]$command) {
-    return ('export PATH=$HOME/.local/bin:$PATH; source $HOME/.nvm/nvm.sh 2>/dev/null; ' + $command)
+function Invoke-BoundedWsl {
+param([string[]]$Arguments, [int]$TimeoutSeconds = 30)
+$sep = [array]::IndexOf($Arguments, '--')
+if ($sep -ge 0 -and $Arguments.Length -gt ($sep + 1) -and $Arguments[$sep + 1] -eq 'bash') {
+$Arguments = @($Arguments[0..$sep]) + @('timeout', '--signal=TERM', '--kill-after=2s', [string]([Math]::Max(1, $TimeoutSeconds - 5))) + @($Arguments[($sep + 1)..($Arguments.Length - 1)])
 }
-# 放進 PowerShell 文字裡的值（Linux、使用者名稱）一律用這個轉成字面字串：名稱裡的單引號（例如 o'neil）不會讓產生的
-# 腳本或貼上的指令壞掉（#2260 審查）。印給人看的指令，名稱沒有特殊字元時維持原樣、不加引號。
+$p = New-Object Diagnostics.Process
+$p.StartInfo.FileName = 'wsl.exe'
+$p.StartInfo.Arguments = (@($Arguments | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }) -join ' ')
+$p.StartInfo.UseShellExecute = $false; $p.StartInfo.CreateNoWindow = $true
+$p.StartInfo.StandardOutputEncoding = [Text.Encoding]::UTF8; $p.StartInfo.StandardErrorEncoding = [Text.Encoding]::UTF8
+$p.StartInfo.RedirectStandardOutput = $true; $p.StartInfo.RedirectStandardError = $true; $p.StartInfo.RedirectStandardInput = $true
+try {
+$null = $p.Start(); $p.StandardInput.Close()
+$out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
+if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
+$p.Kill(); $null = $p.WaitForExit(10000)
+return @{Code=124;Text='WSL timed out; check it before retrying.'}
+}
+if (-not $out.Wait(1000) -or -not $err.Wait(1000)) { return @{Code=1;Text='WSL output did not close.'} }
+$text = $out.Result + $err.Result
+if ($text.Length -gt 1MB) { return @{Code=1;Text='WSL output exceeded its limit.'} }
+return @{Code=$p.ExitCode;Text=$text}
+} catch { return @{Code=-1;Text=[string]$_} }
+finally { $p.Dispose() }
+}
+function Get-WslAgendCommand([string]$command) {
+  return ('export PATH=$HOME/.local/bin:$PATH; source $HOME/.nvm/nvm.sh 2>/dev/null; ' + $command)
+}
 function ConvertTo-PsLiteral([string]$value) { return ("'" + ($value -replace "'", "''") + "'") }
 function ConvertTo-PsArgument([string]$value) { if ($value -match '^[\w.-]+$') { return $value } else { return (ConvertTo-PsLiteral $value) } }
 function Get-AgendStartHint([string]$distro, [string]$user) {
-    return ("wsl -d {0} -u {1} -- bash -lc '{2}'" -f (ConvertTo-PsArgument $distro), (ConvertTo-PsArgument $user), (Get-WslAgendCommand 'agend start'))
+  return ("wsl -d {0} -u {1} -- bash -lc '{2}'" -f (ConvertTo-PsArgument $distro), (ConvertTo-PsArgument $user), (Get-WslAgendCommand 'agend start'))
 }
 '@
 . ([scriptblock]::Create($WSL_COMMAND_FN))
-
 $DASHBOARD_OPENER_FN = @'
 function Get-DashboardSignIn([string]$text) {
-    $url = [regex]::Match($text, 'Sign-in page:\s*(https?://\S+)')
-    $code = [regex]::Match($text, 'Code:\s*([A-Z2-7]{4}-?[A-Z2-7]{4})\b')
-    if (-not $url.Success -or -not $code.Success) { return $null }
-    return @{ Url = $url.Groups[1].Value; Code = $code.Groups[1].Value }
+  $url = [regex]::Match($text, 'Sign-in page:\s*(https?://\S+)')
+  $code = [regex]::Match($text, 'Code:\s*([A-Z2-7]{4}-?[A-Z2-7]{4})\b')
+  if (-not $url.Success -or -not $code.Success) { return $null }
+  return @{ Url = $url.Groups[1].Value; Code = $code.Groups[1].Value }
 }
 function Invoke-OpenDashboard([string]$distro, [string]$user = 'root', [switch]$Wait, [string]$BackendSignins = '') {
-    $command = 'agend web --code'
-    if ($BackendSignins) {
-        if ($BackendSignins -cnotmatch '^(kiro-cli|claude-code|codex|antigravity)(,(kiro-cli|claude-code|codex|antigravity)){0,3}\z') { throw 'Invalid backend selection' }
-        $command += ' --backend-signins ' + $BackendSignins
-    }
-    $text = ''; $exit = 1
-    $prevEAP = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        $text = ((& wsl.exe -d $distro -u $user -- bash -lc (Get-WslAgendCommand $command) 2>&1) | ForEach-Object { "$_" } | Out-String)
-        $exit = $LASTEXITCODE
-    } catch {
-        $text = "$_"; $exit = 1
-    } finally {
-        $ErrorActionPreference = $prevEAP
-    }
-    $signIn = if ($exit -eq 0) { Get-DashboardSignIn $text } else { $null }
-    if (-not $signIn) {
-        Write-Host "  [!!] 現在打不開 AgEnD 儀表板：AgEnD 可能還沒啟動。" -ForegroundColor Yellow
-        Write-Host ("  稍等一下再試一次；或在 PowerShell 執行：" + (Get-AgendStartHint $distro $user))
-        if ($Wait) { Read-Host "按 Enter 關閉" }
-        return $false
-    }
-    $copied = $false; try { Set-Clipboard -Value $signIn.Code; $copied = $true } catch { }
-    $opened = $false; try { Start-Process $signIn.Url; $opened = $true } catch { }
-    $spaced = ($signIn.Code.ToCharArray() | ForEach-Object { [string]$_ }) -join ' '
-    Write-Host ""
-    Write-Host ("  ┌──────────────────────────────────────┐") -ForegroundColor Green
-    Write-Host ("  │   儀表板登入碼：  " + $spaced + "    │") -ForegroundColor Green
-    Write-Host ("  └──────────────────────────────────────┘") -ForegroundColor Green
-    if ($opened) { Write-Host "  [OK] 登入頁已在瀏覽器打開。" -ForegroundColor Green }
-    Write-Host ("  登入頁網址：" + $signIn.Url)
-    if ($copied) { Write-Host "  [OK] 登入碼已複製：在登入頁的輸入框按 Ctrl+V。這組登入碼只能用一次，幾分鐘內有效。" -ForegroundColor Green }
-    else { Write-Host "  在登入頁輸入上面的登入碼。這組登入碼只能用一次，幾分鐘內有效。" }
-    if ($Wait) { Read-Host "按 Enter 關閉" }
-    return $true
+  $command = 'agend web --code'
+  if ($BackendSignins) {
+      if ($BackendSignins -cnotmatch '^(kiro-cli|claude-code|codex|antigravity)(,(kiro-cli|claude-code|codex|antigravity)){0,3}\z') { throw 'Invalid backend selection' }
+      $command += ' --backend-signins ' + $BackendSignins
+  }
+  $text = ''; $exit = 1
+  $prevEAP = $ErrorActionPreference
+  try {
+      $ErrorActionPreference = 'Continue'
+      $r = Invoke-BoundedWsl -Arguments @('-d', $distro, '-u', $user, '--', 'bash', '-lc', (Get-WslAgendCommand $command))
+      $text = $r.Text; $exit = $r.Code
+  } catch {
+      $text = "$_"; $exit = 1
+  } finally {
+      $ErrorActionPreference = $prevEAP
+  }
+  $signIn = if ($exit -eq 0) { Get-DashboardSignIn $text } else { $null }
+  if (-not $signIn) {
+      Write-Host "  [!!] 現在打不開 AgEnD 儀表板：AgEnD 可能還沒啟動。" -ForegroundColor Yellow
+      Write-Host ("  稍等一下再試一次；或在 PowerShell 執行：" + (Get-AgendStartHint $distro $user))
+      if ($Wait) { Read-Host "按 Enter 關閉" }
+      return $false
+  }
+  $copied = $false; try { Set-Clipboard -Value $signIn.Code; $copied = $true } catch { }
+  $opened = $false; try { Start-Process $signIn.Url; $opened = $true } catch { }
+  $spaced = ($signIn.Code.ToCharArray() | ForEach-Object { [string]$_ }) -join ' '
+  Write-Host ""
+  Write-Host ("  ┌──────────────────────────────────────┐") -ForegroundColor Green
+  Write-Host ("  │   儀表板登入碼：  " + $spaced + "    │") -ForegroundColor Green
+  Write-Host ("  └──────────────────────────────────────┘") -ForegroundColor Green
+  if ($opened) { Write-Host "  [OK] 登入頁已在瀏覽器打開。" -ForegroundColor Green }
+  Write-Host ("  登入頁網址：" + $signIn.Url)
+  if ($copied) { Write-Host "  [OK] 登入碼已複製：在登入頁的輸入框按 Ctrl+V。這組登入碼只能用一次，幾分鐘內有效。" -ForegroundColor Green }
+  else { Write-Host "  在登入頁輸入上面的登入碼。這組登入碼只能用一次，幾分鐘內有效。" }
+  if ($Wait) { Read-Host "按 Enter 關閉" }
+  return $true
 }
 '@
 . ([scriptblock]::Create($DASHBOARD_OPENER_FN))
-
-# 「AgEnD 重新啟動」捷徑（#1853，使用者 2026-10-20 核准）：先問，預設不重啟；確定才在安裝時記下的 Linux 和使用者裡執行
-# agend restart，接著顯示 agend status，等你按 Enter。WSL 或 AgEnD 不在時直接說明；絕不執行 wsl --shutdown。
-# 這段函式的文字同時是捷徑執行的腳本（和儀表板捷徑一樣，安裝程式與捷徑共用同一份）。
 $RESTART_FN = @'
 function Invoke-AgendInWsl([string]$distro, [string]$user, [string]$command) {
-    # 在 WSL 裡以登入 shell 執行一個 agend 指令，回傳 @{ Code; Text }。Linux 的輸出是 UTF-8；stderr 不讓 5.1 中止（#2242）。
-    $prevEAP = $ErrorActionPreference; $prevEnc = [Console]::OutputEncoding
-    try {
-        $ErrorActionPreference = 'Continue'
-        try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
-        $text = ((& wsl.exe -d $distro -u $user -- bash -lc (Get-WslAgendCommand $command) 2>&1) | ForEach-Object { "$_" } | Out-String)
-        return @{ Code = $LASTEXITCODE; Text = $text }
-    } catch {
-        return @{ Code = -1; Text = "$_" }
-    } finally {
-        $ErrorActionPreference = $prevEAP
-        try { [Console]::OutputEncoding = $prevEnc } catch { }
-    }
+  $prevEAP = $ErrorActionPreference; $prevEnc = [Console]::OutputEncoding
+  try {
+      $ErrorActionPreference = 'Continue'
+      try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+      $limit = if ($command -match '^agend (restart|start)( |$)') { 360 } else { 30 }
+      return (Invoke-BoundedWsl -TimeoutSeconds $limit -Arguments @('-d', $distro, '-u', $user, '--', 'bash', '-lc', (Get-WslAgendCommand $command)))
+  } catch {
+      return @{ Code = -1; Text = "$_" }
+  } finally {
+      $ErrorActionPreference = $prevEAP
+      try { [Console]::OutputEncoding = $prevEnc } catch { }
+  }
 }
 function Invoke-RestartAgend([string]$distro, [string]$user, [switch]$Wait, [int]$SettleSeconds = 3) {
-    Write-Host ""
-    $answer = Read-Host "  確定要重啟 AgEnD 嗎？所有 agent 會重新啟動，正在進行的工作會中斷。(y/N)"
-    # 只有一個 y 才算同意（y/N、yes 都不算）；[string]：沒有輸入時 Read-Host 回傳 $null，而 $null -notmatch '…' 不是 $true。
-    if (([string]$answer) -notmatch '^\s*[yY]\s*$') {
-        Write-Host "  沒有重啟。"
-        if ($Wait) { $null = Read-Host "按 Enter 關閉" }
-        return 'cancelled'
-    }
-    $r = Invoke-AgendInWsl $distro $user 'agend restart'
-    $result = 'restarted'
-    if ($r.Code -eq 0) {
-        Write-Host "  [OK] AgEnD 正在重新啟動。" -ForegroundColor Green
-    } else {
-        $result = 'failed'
-        if ($r.Code -eq -1) { Write-Host "  [!!] 找不到 WSL（wsl.exe），所以沒有重啟。" -ForegroundColor Yellow }
-        elseif ($r.Text -match 'Fleet not running') { Write-Host ("  [!!] AgEnD 沒有在執行，所以沒有可以重啟的。要啟動它：" + (Get-AgendStartHint $distro $user)) -ForegroundColor Yellow }
-        elseif ($r.Text -match 'command not found|agend: not found|no such file') { Write-Host ("  [!!] 在 {0} 裡找不到 AgEnD（agend 指令），所以沒有重啟。" -f $distro) -ForegroundColor Yellow }
-        else { Write-Host ("  [!!] 沒有重啟成功：{0} 不存在、WSL 沒有啟動，或 AgEnD 回報了錯誤。" -f $distro) -ForegroundColor Yellow }
-        if ($r.Text.Trim()) { Write-Host ("  " + ($r.Text.Trim() -replace "`r?`n", "`n  ")) }
-    }
-    if ($result -eq 'restarted') {
-        Start-Sleep -Seconds $SettleSeconds
-        Write-Host ""
-        $s = Invoke-AgendInWsl $distro $user 'agend status'
-        if ($s.Text.Trim()) { Write-Host ("  " + ($s.Text.Trim() -replace "`r?`n", "`n  ")) }
-    }
-    if ($Wait) { $null = Read-Host "按 Enter 關閉" }
-    return $result
+  Write-Host ""
+  $answer = Read-Host "  確定要重啟 AgEnD 嗎？所有 agent 會重新啟動，正在進行的工作會中斷。(y/N)"
+  if (([string]$answer) -notmatch '^\s*[yY]\s*$') {
+      Write-Host "  沒有重啟。"
+      if ($Wait) { $null = Read-Host "按 Enter 關閉" }
+      return 'cancelled'
+  }
+  $r = Invoke-AgendInWsl $distro $user 'agend restart'
+  $result = 'restarted'
+  if ($r.Code -eq 0) {
+      Write-Host "  [OK] AgEnD 正在重新啟動。" -ForegroundColor Green
+  } else {
+      $result = 'failed'
+      if ($r.Code -eq -1) { Write-Host "  [!!] 找不到 WSL（wsl.exe），所以沒有重啟。" -ForegroundColor Yellow }
+      elseif ($r.Text -match 'Fleet not running') { Write-Host ("  [!!] AgEnD 沒有在執行，所以沒有可以重啟的。要啟動它：" + (Get-AgendStartHint $distro $user)) -ForegroundColor Yellow }
+      elseif ($r.Text -match 'command not found|agend: not found|no such file') { Write-Host ("  [!!] 在 {0} 裡找不到 AgEnD（agend 指令），所以沒有重啟。" -f $distro) -ForegroundColor Yellow }
+      else { Write-Host ("  [!!] 沒有重啟成功：{0} 不存在、WSL 沒有啟動，或 AgEnD 回報了錯誤。" -f $distro) -ForegroundColor Yellow }
+      if ($r.Text.Trim()) { Write-Host ("  " + ($r.Text.Trim() -replace "`r?`n", "`n  ")) }
+  }
+  if ($result -eq 'restarted') {
+      Start-Sleep -Seconds $SettleSeconds
+      Write-Host ""
+      $s = Invoke-AgendInWsl $distro $user 'agend status'
+      if ($s.Text.Trim()) { Write-Host ("  " + ($s.Text.Trim() -replace "`r?`n", "`n  ")) }
+  }
+  if ($Wait) { $null = Read-Host "按 Enter 關閉" }
+  return $result
 }
 '@
 . ([scriptblock]::Create($RESTART_FN))
-
-# 捷徑執行的腳本：共用的函式加上一行呼叫（UTF-8 有 BOM：Windows PowerShell 5.1 才會正確顯示中文）。Linux 與使用者是安裝時記下的。
-# 捷徑腳本印出的第一行：它要打開的 Linux 和使用者，指錯了一眼就看得出來。
 function Get-ShortcutTargetLine([string]$distro, [string]$user) {
-    return ('Write-Host ("AgEnD（Linux：{0}，使用者：{1}）" -f ' + (ConvertTo-PsLiteral $distro) + ', ' + (ConvertTo-PsLiteral $user) + ')')
+  return ('Write-Host ("AgEnD（Linux：{0}，使用者：{1}）" -f ' + (ConvertTo-PsLiteral $distro) + ', ' + (ConvertTo-PsLiteral $user) + ')')
 }
 function Get-DashboardOpenerScript([string]$distro, [string]$user) {
-    return ("# AgEnD 儀表板（AgEnD 安裝程式建立）`n" + (Get-ShortcutTargetLine $distro $user) + "`n" + $WSL_COMMAND_FN + "`n" + $DASHBOARD_OPENER_FN + "`n" + ("Invoke-OpenDashboard {0} {1} -Wait | Out-Null" -f (ConvertTo-PsLiteral $distro), (ConvertTo-PsLiteral $user)) + "`n")
+  return ("# AgEnD 儀表板（AgEnD 安裝程式建立）`n" + (Get-ShortcutTargetLine $distro $user) + "`n" + $WSL_COMMAND_FN + "`n" + $DASHBOARD_OPENER_FN + "`n" + ("Invoke-OpenDashboard {0} {1} -Wait | Out-Null" -f (ConvertTo-PsLiteral $distro), (ConvertTo-PsLiteral $user)) + "`n")
 }
 function Get-RestartScript([string]$distro, [string]$user) {
-    return ("# AgEnD 重新啟動（AgEnD 安裝程式建立）`n" + (Get-ShortcutTargetLine $distro $user) + "`n" + $WSL_COMMAND_FN + "`n" + $RESTART_FN + "`n" + ("Invoke-RestartAgend {0} {1} -Wait | Out-Null" -f (ConvertTo-PsLiteral $distro), (ConvertTo-PsLiteral $user)) + "`n")
+  return ("# AgEnD 重新啟動（AgEnD 安裝程式建立）`n" + (Get-ShortcutTargetLine $distro $user) + "`n" + $WSL_COMMAND_FN + "`n" + $RESTART_FN + "`n" + ("Invoke-RestartAgend {0} {1} -Wait | Out-Null" -f (ConvertTo-PsLiteral $distro), (ConvertTo-PsLiteral $user)) + "`n")
 }
-# 安裝時記下的 Linux 與使用者（%LOCALAPPDATA%\AgEnD\install.json）：捷徑、重新執行安裝指令時的快速路徑都讀它。
 function Get-AgendShortcutDir { return (Join-Path $env:LOCALAPPDATA 'AgEnD') }
 function Read-InstallRecord {
-    try {
-        $r = Get-Content -Raw -LiteralPath (Join-Path (Get-AgendShortcutDir) 'install.json') -ErrorAction Stop | ConvertFrom-Json
-        if ($r.distro -and $r.user) { return @{ Distro = [string]$r.distro; User = [string]$r.user } }
-    } catch { }
-    return $null
+  try {
+      $r = Get-Content -Raw -LiteralPath (Join-Path (Get-AgendShortcutDir) 'install.json') -ErrorAction Stop | ConvertFrom-Json
+      if ($r.distro -and $r.user) { return @{ Distro = [string]$r.distro; User = [string]$r.user } }
+  } catch { }
+  return $null
 }
-# install.json 已經指向另一個 Linux 或使用者時回傳那筆紀錄（例如 AgEnD 專用的 Linux 和原本的 Ubuntu），否則 $null。
-# 捷徑絕不悄悄改指向：agend shortcuts 遇到這種情況會先問。
 function Get-InstallRecordConflict([string]$distro, [string]$user) {
-    $record = Read-InstallRecord
-    # WSL 的名稱不分大小寫；Linux 的使用者名稱分（Han 和 han 是兩個人，#2279 審查）。
-    if ($record -and ($record.Distro -ne $distro -or $record.User -cne $user)) { return $record }
-    return $null
+  $record = Read-InstallRecord
+  if ($record -and ($record.Distro -ne $distro -or $record.User -cne $user)) { return $record }
+  return $null
 }
-# 真正寫入前再讀一次：詢問時看到的是 $seen（$null：當時沒有衝突）。現在沒有衝突，或衝突的還是同一個，才可以寫；
-# 在等回答的時候被別的安裝程式或終端機改掉了，就不寫（#2279 審查）。
 function Test-InstallRecordAsSeen($seen, [string]$distro, [string]$user) {
-    $now = Get-InstallRecordConflict $distro $user
-    if ($null -eq $now) { return $true }
-    return ($null -ne $seen -and $now.Distro -eq $seen.Distro -and $now.User -ceq $seen.User)
+  $now = Get-InstallRecordConflict $distro $user
+  if ($null -eq $now) { return $true }
+  return ($null -ne $seen -and $now.Distro -eq $seen.Distro -and $now.User -ceq $seen.User)
 }
-# 有 Windows Terminal 時捷徑在它裡面開（中文顯示較好）；沒有或 AGEND_INSTALL_TERMINAL=conhost 時直接開 PowerShell。
 function Get-ShortcutCommand([string]$file) {
-    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $a = '-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $file
-    $wt = $null; if ($env:AGEND_INSTALL_TERMINAL -ne 'conhost') { $wt = Get-Command wt.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 }
-    if ($wt) { return @{ Target = $wt.Source; Arguments = '-w new "{0}" {1}' -f $ps, ($a -replace ';', '\;') } }
-    return @{ Target = $ps; Arguments = $a }
+  $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  $a = '-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $file
+  $wt = $null; if ($env:AGEND_INSTALL_TERMINAL -ne 'conhost') { $wt = Get-Command wt.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 }
+  if ($wt) { return @{ Target = $wt.Source; Arguments = '-w new "{0}" {1}' -f $ps, ($a -replace ';', '\;') } }
+  return @{ Target = $ps; Arguments = $a }
 }
-# 一個桌面捷徑：腳本寫在 %LOCALAPPDATA%\AgEnD，捷徑以 Windows PowerShell 執行它（-ExecutionPolicy Bypass 只對那個行程）。
 function New-AgendShortcut([string]$name, [string]$scriptName, [string]$scriptText, [string]$description) {
-    $dir = Get-AgendShortcutDir
-    New-Item -ItemType Directory -Path $dir -Force | Out-Null
-    $file = Join-Path $dir $scriptName
-    [IO.File]::WriteAllText($file, $scriptText, (New-Object System.Text.UTF8Encoding $true))
-    $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) ($name + '.lnk')
-    $shell = New-Object -ComObject WScript.Shell
-    $sc = $shell.CreateShortcut($lnk)
-    $cmd = Get-ShortcutCommand $file
-    $sc.TargetPath = $cmd.Target
-    $sc.Arguments = $cmd.Arguments
-    $sc.Description = $description
-    $sc.Save()
-    return $lnk
+  $dir = Get-AgendShortcutDir
+  New-Item -ItemType Directory -Path $dir -Force | Out-Null
+  $file = Join-Path $dir $scriptName
+  [IO.File]::WriteAllText($file, $scriptText, (New-Object System.Text.UTF8Encoding $true))
+  $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) ($name + '.lnk')
+  $shell = New-Object -ComObject WScript.Shell
+  $sc = $shell.CreateShortcut($lnk)
+  $cmd = Get-ShortcutCommand $file
+  $sc.TargetPath = $cmd.Target
+  $sc.Arguments = $cmd.Arguments
+  $sc.Description = $description
+  $sc.Save()
+  return $lnk
 }
-# 建立（或更新）兩個桌面捷徑、記下 Linux 與使用者。兩個各自建立，一個失敗不會擋住另一個；回傳建立好的捷徑路徑，
-# 呼叫端用 Write-ShortcutResult 分清楚兩個都好、只好一個、都沒好（#2252 審查）。兩個都好才在 WSL 裡留記號（agend update
-# 之後的提示就不會再出現）。不是 Windows 時回傳空陣列。
 function Install-AgendShortcuts([string]$distro, [string]$user) {
-    if (-not $script:OnWindows) { return @() }
-    $made = @()
-    try { $made += New-AgendShortcut 'AgEnD 儀表板' 'open-dashboard.ps1' (Get-DashboardOpenerScript $distro $user) 'AgEnD 網頁儀表板（自動帶入登入碼）' } catch { }
-    try { $made += New-AgendShortcut 'AgEnD 重新啟動' 'restart-agend.ps1' (Get-RestartScript $distro $user) '重新啟動 AgEnD（會先詢問）' } catch { }
-    try {
-        New-Item -ItemType Directory -Path (Get-AgendShortcutDir) -Force | Out-Null
-        $record = @{ distro = $distro; user = $user } | ConvertTo-Json -Compress
-        [IO.File]::WriteAllText((Join-Path (Get-AgendShortcutDir) 'install.json'), $record, (New-Object System.Text.UTF8Encoding $false))
-        if ($made.Count -eq 2) { $null = Invoke-AgendInWsl $distro $user 'set -f; IFS=; d=${AGEND_HOME:-$HOME/.agend}; umask 077; mkdir -p -m 700 -- $d && date -u +%FT%TZ > $d/windows-shortcuts' }
-    } catch { }
+  if (-not $script:OnWindows) { return @() }
+  $made = @()
+  try { $made += New-AgendShortcut 'AgEnD 儀表板' 'open-dashboard.ps1' (Get-DashboardOpenerScript $distro $user) 'AgEnD 網頁儀表板（自動帶入登入碼）' } catch { }
+  try { $made += New-AgendShortcut 'AgEnD 重新啟動' 'restart-agend.ps1' (Get-RestartScript $distro $user) '重新啟動 AgEnD（會先詢問）' } catch { }
+  try {
+      New-Item -ItemType Directory -Path (Get-AgendShortcutDir) -Force | Out-Null
+      $record = @{ distro = $distro; user = $user } | ConvertTo-Json -Compress
+      [IO.File]::WriteAllText((Join-Path (Get-AgendShortcutDir) 'install.json'), $record, (New-Object System.Text.UTF8Encoding $false))
+      if ($made.Count -eq 2) { $null = Invoke-AgendInWsl $distro $user 'set -f; IFS=; d=${AGEND_HOME:-$HOME/.agend}; umask 077; mkdir -p -m 700 -- $d && date -u +%FT%TZ > $d/windows-shortcuts' }
+  } catch { }
     return $made
 }
 # 重新執行安裝指令時：這台電腦是不是已經裝好 AgEnD？先看安裝時記下的，再看預設的 Ubuntu。回傳 @{ Distro; User } 或 $null。
@@ -979,7 +1019,7 @@ function Find-ExistingAgend {
 function Invoke-AgendRepair([string]$distro, [string]$user, [string]$version) {
     $pin = if ($version -match '^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$') { 'AGEND_VERSION=beta ' } else { '' }
     $cmd = Get-WslAgendCommand ('set -o pipefail; curl -fsSL https://songsid.github.io/AgEnD/install.sh | ' + $pin + 'bash')
-    $code = Invoke-Watched -Label "修復 AgEnD" -Usually "通常需要 1–3 分鐘" -UpperMinutes 15 -File 'wsl.exe' -Arguments @('-d', $distro, '-u', $user, '--', 'bash', '-lc', $cmd)
+    $code = Invoke-WslStep -Label "修復 AgEnD" -Usually "通常需要 1–3 分鐘" -UpperMinutes 15 -Distro $distro -User $user -Script $cmd
     if ($code -ne 0) { return $false }
     $after = Invoke-AgendInWsl $distro $user 'agend --version'
     return ($after.Code -eq 0)
@@ -1163,8 +1203,8 @@ function Invoke-WslUpdateStage {
         }
         $wslMsi = "$env:TEMP\wsl-latest.msi"
         Write-Info "  下載中: $($msiAsset.name) ($($release.tag_name))..."
-        Invoke-WebRequest -Uri $msiAsset.browser_download_url -OutFile $wslMsi -UseBasicParsing -TimeoutSec 1800
-        $msiCode = Invoke-Watched -Label "安裝 WSL" -Usually "通常需要 1–2 分鐘" -UpperMinutes 5 -Encoding oem -File "msiexec.exe" -Arguments @("/i", $wslMsi, "/quiet", "/norestart")
+        Invoke-InstallDownload -Uri $msiAsset.browser_download_url -OutFile $wslMsi -TimeoutSec 1800
+        $msiCode = Invoke-Watched -Label "安裝 WSL" -Usually "通常需要 1–2 分鐘" -UpperMinutes 5 -TimeoutSeconds 1800 -NoProgressSeconds 0 -Encoding oem -File "msiexec.exe" -Arguments @("/i", $wslMsi, "/quiet", "/norestart")
         Remove-Item $wslMsi -Force -ErrorAction SilentlyContinue
         if ($msiCode -eq 3010) { return 'reboot' }
         if ($msiCode -ne 0) {
@@ -1178,8 +1218,8 @@ function Invoke-WslUpdateStage {
         Write-DownloadFailure (Get-DownloadFailureKind $_)
         return 'failed'
     }
-    $null = wsl --version 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) { return 'verify-reboot' }
+    $versionProbe = Invoke-BoundedWsl -Arguments @('--version')
+    if ($versionProbe.Code -ne 0) { return 'verify-reboot' }
     return 'updated'
 }
 
@@ -1374,13 +1414,11 @@ $BACKEND_PATH = 'export PATH=/root/.local/bin:$HOME/.claude/local:$PATH'
 # setsid 讓它沒有 /dev/tty 可讀，問題便直接以預設值略過。__AGEND_INSTALL__ 會換成該後端的指令。
 $UNATTENDED_INSTALL = @'
 agend_install() {
+set -e -o pipefail
 __AGEND_INSTALL__
 }
-if command -v setsid >/dev/null 2>&1; then
-  setsid -w bash -c "$(declare -f agend_install); agend_install" </dev/null
-else
-  agend_install </dev/null
-fi
+# Invoke-WslStep already gives this job a private session/process group and empty stdin.
+agend_install </dev/null
 '@
 
 function Save-Backends($csv) { Add-Content -Path $ProgressFile -Value "BACKENDS=$csv" }
@@ -1395,7 +1433,9 @@ function Save-Backends($csv) { Add-Content -Path $ProgressFile -Value "BACKENDS=
 $BACKEND_PROBE = 'set -f; IFS=; export PATH=/root/.local/bin:$HOME/.local/bin:$HOME/.claude/local:$PATH; p=$(command -v __BIN__ 2>/dev/null) || p=; l=; if [ x$p = x ]; then [ -s $HOME/.nvm/nvm.sh ] && . $HOME/.nvm/nvm.sh >/dev/null 2>&1; n=$(npm prefix -g 2>/dev/null) || n=; if [ x$n != x ] && [ -x $n/bin/__BIN__ ]; then mkdir -p $HOME/.local/bin && ln -sf $n/bin/__BIN__ $HOME/.local/bin/__BIN__ && p=$HOME/.local/bin/__BIN__ && l=$n/bin/__BIN__; fi; fi; [ x$p != x ] || exit 1; v=$($p --version 2>/dev/null </dev/null) || exit 1; v=$(head -n 1 <<<$v); [ x$v != x ] || exit 1; echo KEPT\|$v\|$p\|$l'
 # 回傳 @{ Version; Path; LinkedFrom }（已裝好且能執行），否則 $null。
 function Get-InstalledBackend($b) {
-    $out = (wsl -d $UBUNTU_DISTRO -u root -- bash -c $BACKEND_PROBE.Replace('__BIN__', $b.Bin) 2>$null | Out-String)
+    $r = Invoke-BoundedWsl -Arguments @('-d', $UBUNTU_DISTRO, '-u', 'root', '--', 'bash', '-c', $BACKEND_PROBE.Replace('__BIN__', $b.Bin))
+    if ($r.Code -ne 0) { return $null }
+    $out = $r.Text
     $m = [regex]::Match($out, '(?m)^KEPT\|([^|\r\n]+)\|([^|\r\n]+)\|([^|\r\n]*)\r?$')
     if (-not $m.Success) { return $null }
     return @{ Version = $m.Groups[1].Value.Trim(); Path = $m.Groups[2].Value; LinkedFrom = $m.Groups[3].Value }
@@ -1588,9 +1628,18 @@ function Split-ToolOutput([string]$text) {
 #   $HeartbeatSeconds：輸出被導向（不是真主控台）時，每隔幾秒印一行心跳（真主控台則每秒原地更新同一行）。
 #   $Encoding：它輸出的編碼（見 New-OutputTail）。
 #   $OnLine：每印出一行就呼叫一次（例如從 agend setup 的輸出讀出設定頁網址）。
+function Stop-InstallChild($Process) {
+    if ($Process.HasExited) { return }
+    if (($PSVersionTable.PSEdition -eq 'Desktop') -or ($IsWindows -eq $true)) {
+        $killer = Start-Process -FilePath 'taskkill.exe' -ArgumentList @('/PID', $Process.Id, '/T', '/F') -NoNewWindow -PassThru
+        if (-not $killer.WaitForExit(10000)) { try { $killer.Kill() } catch { } }
+    } else { try { $Process.Kill() } catch { } }
+    if (-not $Process.WaitForExit(10000)) { throw 'Installer-owned child did not close; do not start another install until it exits.' }
+}
+
 function Invoke-Watched {
     param([string]$Label, [string]$Usually, [string]$File, [string[]]$Arguments = @(), [double]$UpperMinutes = 0, [int]$HeartbeatSeconds = 30,
-        [string]$Encoding = 'utf8', [scriptblock]$OnLine = $null)
+        [string]$Encoding = 'utf8', [scriptblock]$OnLine = $null, [double]$TimeoutSeconds = 1800, [double]$NoProgressSeconds = 300, [string]$CancellationFile = '')
     $dir = Join-Path ([IO.Path]::GetTempPath()) ('agend-step-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     $outFile = Join-Path $dir 'out.txt'; $errFile = Join-Path $dir 'err.txt'; $inFile = Join-Path $dir 'in.txt'
@@ -1609,7 +1658,7 @@ function Invoke-Watched {
     $prevUtf8 = $env:WSL_UTF8
     if ($Encoding -eq 'utf16') { Remove-Item Env:WSL_UTF8 -ErrorAction SilentlyContinue } else { $env:WSL_UTF8 = '1' }
     # 這一步的狀態（scriptblock 之間共用同一個 hashtable）。
-    $st = @{ Tails = @((New-OutputTail $outFile $Encoding), (New-OutputTail $errFile $Encoding)); Pending = @('', ''); Progress = ''; Shown = $false; Row = $null }
+    $st = @{ Tails = @((New-OutputTail $outFile $Encoding), (New-OutputTail $errFile $Encoding)); Pending = @('', ''); Progress = ''; Shown = $false; Row = $null; LastOutput = 0.0 }
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $nextBeat = $HeartbeatSeconds
     $spin = '|/-\'
@@ -1642,6 +1691,7 @@ function Invoke-Watched {
         for ($k = 0; $k -lt 2; $k++) {
             $chunk = Read-OutputTail $st.Tails[$k]
             if ($chunk) {
+                $st.LastOutput = $clock.Elapsed.TotalSeconds
                 $cut = Split-ToolOutput ($st.Pending[$k] + $chunk)
                 foreach ($line in $cut.Lines) { & $printLine $line }
                 $st.Pending[$k] = $cut.Rest
@@ -1659,11 +1709,21 @@ function Invoke-Watched {
         while (-not $proc.HasExited) {
             Start-Sleep -Milliseconds 250
             & $emit $false
+            if ($clock.Elapsed.TotalSeconds -ge $TimeoutSeconds -or ($NoProgressSeconds -gt 0 -and ($clock.Elapsed.TotalSeconds - $st.LastOutput) -ge $NoProgressSeconds)) {
+                & $clearStatus
+                Write-Err "$Label 超過等待上限或沒有新進度；正在停止這個安裝步驟。請檢查上方原因，再重新執行相同步驟。"
+                if ($CancellationFile) {
+                    [IO.File]::WriteAllText($CancellationFile, 'cancel')
+                    $null = $proc.WaitForExit(5000)
+                }
+                Stop-InstallChild $proc
+                return 124
+            }
             if ($null -ne $consoleSaved) {
                 while ($null -ne ($key = Read-StepKey)) {
                     if (Test-CtrlC $key) {
                         & $clearStatus
-                        if (Confirm-StopInstall $proc) {
+                        if (Confirm-StopInstall $proc $CancellationFile) {
                             Restore-StepConsole $consoleSaved; $consoleSaved = $null
                             Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
                             exit 1
@@ -1697,13 +1757,14 @@ function Invoke-Watched {
 }
 
 # 自動步驟中按了 Ctrl+C：先問，不直接中斷。回傳 $true 表示使用者要停止（子程序已結束）。
-function Confirm-StopInstall($proc) {
+function Confirm-StopInstall($proc, [string]$CancellationFile = '') {
     Write-Host ""
     Write-Warn "你按了 Ctrl+C。在這個視窗裡，Ctrl+C 是「停止」，不是「複製」。"
     Write-Warn "安裝還在背景繼續進行，沒有中斷。"
     Write-Host "  要停止安裝嗎？輸入 y 再按 Enter 就停止；直接按 Enter 會繼續。" -ForegroundColor Yellow -NoNewline
     $answer = Read-Answer
     if (([string]$answer) -match '^\s*[yY]\s*$') {
+        if ($CancellationFile) { [IO.File]::WriteAllText($CancellationFile, 'cancel'); $null = $proc.WaitForExit(5000) }
         if (-not $proc.HasExited) {
             if ($script:OnWindows) { & taskkill.exe /PID $proc.Id /T /F 2>&1 | Out-Null } else { try { $proc.Kill() } catch { } }
         }
@@ -1716,24 +1777,114 @@ function Confirm-StopInstall($proc) {
 }
 
 # 把一段 bash 腳本寫到沒有空白的 ProgramData 路徑（LF、UTF-8 無 BOM），回傳 Windows 路徑和 WSL 裡的路徑。
-function New-WslScriptFile([string]$Script) {
+function New-WslScriptFile([string]$Script, [string]$Distro = $UBUNTU_DISTRO) {
     $dir = Join-Path $env:ProgramData 'AgEnD-install'
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     $file = Join-Path $dir ('step-' + [Guid]::NewGuid().ToString('N') + '.sh')
     [IO.File]::WriteAllText($file, ($Script -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding $false))
-    $wslFile = (wsl -d $UBUNTU_DISTRO -u root -- wslpath -u ($file -replace '\\', '\\') 2>$null | Out-String).Trim()
-    if (-not $wslFile.StartsWith('/')) { $wslFile = '/mnt/' + $file.Substring(0, 1).ToLower() + ($file.Substring(2) -replace '\\', '/') }
+    $pathResult = Invoke-BoundedWsl -Arguments @('-d', $Distro, '-u', 'root', '--', 'wslpath', '-u', $file)
+    if ($pathResult.Code -ne 0) { throw 'WSL path conversion failed; no step was started.' }
+    $wslFile = $pathResult.Text.Trim()
+    if (-not $wslFile.StartsWith('/')) { throw 'WSL path conversion returned an invalid path.' }
     return @($file, $wslFile)
 }
 # 在 WSL 裡以 root 執行一段 bash 腳本，作為長步驟（見 Invoke-Watched）。
-function Invoke-WslStep {
-    param([string]$Label, [string]$Usually, [string]$Script, [double]$UpperMinutes = 0, [scriptblock]$OnLine = $null)
-    $file, $wslFile = New-WslScriptFile $Script
-    try {
-        return (Invoke-Watched -Label $Label -Usually $Usually -UpperMinutes $UpperMinutes -OnLine $OnLine -File 'wsl.exe' -Arguments @('-d', $UBUNTU_DISTRO, '-u', 'root', '--', 'bash', $wslFile))
-    } finally {
-        Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+function Get-OwnedWslStepScript([string]$ScriptPath, [string]$CancellationPath, [int]$Seconds) {
+    $script64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ScriptPath))
+    $cancel64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($CancellationPath))
+    return (@(
+        'set -u'
+        ('script=$(printf ''%s'' ''{0}'' | base64 -d)' -f $script64)
+        ('cancel=$(printf ''%s'' ''{0}'' | base64 -d)' -f $cancel64)
+        'cat /proc/sys/kernel/random/boot_id > "$cancel.boot"'
+        'child=; watcher='
+        'cleanup() {'
+        '  trap - EXIT TERM INT HUP'
+        '  if [ -n "$child" ] && kill -0 -- -"$child" 2>/dev/null; then kill -TERM -- -"$child" 2>/dev/null || :; sleep 0.2; kill -KILL -- -"$child" 2>/dev/null || :; fi'
+        '  if [ -n "$watcher" ]; then kill "$watcher" 2>/dev/null || :; wait "$watcher" 2>/dev/null || :; fi'
+        '  if [ -n "$child" ]; then wait "$child" 2>/dev/null || :; fi'
+        '  printf complete > "$cancel.done.tmp"; mv -f -- "$cancel.done.tmp" "$cancel.done"'
+        '}'
+        'trap cleanup EXIT'
+        'trap ''exit 124'' TERM INT HUP'
+        ("setsid timeout --signal=TERM --kill-after=2s " + $Seconds + ' bash "$script" </dev/null &')
+        'child=$!'
+        '(while kill -0 "$child" 2>/dev/null; do if [ -e "$cancel" ]; then kill -TERM -- -"$child" 2>/dev/null || :; sleep 2; kill -KILL -- -"$child" 2>/dev/null || :; break; fi; sleep 0.2; done) &'
+        'watcher=$!'
+        'wait "$child"; code=$?'
+        'exit "$code"'
+    ) -join "`n")
+}
+function Assert-NoPendingWslCancellation {
+    if (-not $ProgressFile) { return }
+    $pending = Get-ProgressValue 'PENDING_WSL_CANCEL' '[^\r\n]+'
+    if (-not $pending) { return }
+    if ($pending -notmatch '[\\/]step-[a-f0-9]{32}\.sh\.cancel$') { throw 'Invalid pending installer cancellation record; check the saved progress.' }
+    $closed = Test-Path -LiteralPath "$pending.done"
+    if (-not $closed -and (Test-Path -LiteralPath "$pending.boot")) {
+        $priorBoot = [IO.File]::ReadAllText("$pending.boot").Trim()
+        $r = Invoke-BoundedWsl -Arguments @('-d', $UBUNTU_DISTRO, '-u', 'root', '--', 'cat', '/proc/sys/kernel/random/boot_id')
+        $nowBoot = $r.Text.Trim()
+        $closed = $r.Code -eq 0 -and $priorBoot -match '^[a-f0-9-]{36}$' -and $nowBoot -match '^[a-f0-9-]{36}$' -and $priorBoot -cne $nowBoot
     }
+    if (-not $closed) { throw "The previous installer job has not confirmed cancellation. Do not start a second job. Let it close, or restart Windows and rerun. Cancellation receipt: $pending" }
+    $keep = @([IO.File]::ReadAllLines($ProgressFile) | Where-Object { -not $_.StartsWith('PENDING_WSL_CANCEL=') })
+    [IO.File]::WriteAllLines($ProgressFile, $keep)
+    foreach ($suffix in @('', '.boot', '.done', '.done.tmp')) { Remove-Item -LiteralPath ($pending + $suffix) -Force -ErrorAction SilentlyContinue }
+}
+function Invoke-WslStep {
+    param([string]$Label, [string]$Usually, [string]$Script, [double]$UpperMinutes = 0, [scriptblock]$OnLine = $null, [int]$TimeoutSeconds = 1800, [int]$NoProgressSeconds = 300, [string]$Distro = $UBUNTU_DISTRO, [string]$User = $AGEND_USER)
+    Assert-NoPendingWslCancellation
+    $file, $wslFile = New-WslScriptFile $Script -Distro $Distro
+    $cancel = "$file.cancel"; $wrapper = $null
+    try {
+        $wrapper, $wslWrapper = New-WslScriptFile (Get-OwnedWslStepScript $wslFile "$wslFile.cancel" $TimeoutSeconds) -Distro $Distro
+        # Setup deliberately waits for a person; its host still has an absolute TTL.
+        if ($OnLine) { $NoProgressSeconds = 0 }
+        return (Invoke-Watched -Label $Label -Usually $Usually -UpperMinutes $UpperMinutes -OnLine $OnLine -TimeoutSeconds ($TimeoutSeconds + 30) -NoProgressSeconds $NoProgressSeconds -CancellationFile $cancel -File 'wsl.exe' -Arguments @('-d', $Distro, '-u', $User, '--', 'bash', $wslWrapper))
+    } finally {
+        if ((Test-Path -LiteralPath $cancel) -and -not (Test-Path -LiteralPath "$cancel.done")) {
+            if ($ProgressFile) { Add-Content -LiteralPath $ProgressFile -Value ("PENDING_WSL_CANCEL=" + $cancel) }
+            Write-Warn "Linux 尚未確認這個步驟已停止；保留取消要求與進度，不會盲目再啟動一個。重新開機 Windows 後可再執行安裝。"
+        } else {
+            foreach ($f in @($file, $wrapper, $cancel, "$cancel.boot", "$cancel.done", "$cancel.done.tmp")) { if ($f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } }
+        }
+    }
+}
+
+
+function Clear-InstallStage([string]$stage) {
+    if (-not (Test-Path -LiteralPath $ProgressFile)) { return }
+    $keep = @([IO.File]::ReadAllLines($ProgressFile) | Where-Object { $_ -cne "STAGE_${stage}_DONE" })
+    [IO.File]::WriteAllLines($ProgressFile, $keep)
+}
+function Get-VerifiedAgendVersion([string]$Expected = '') {
+    # Prove the CLI, supported native Node, tmux and SQLite rather than command existence alone.
+    $js = 'const cp=require("child_process"),p=require("path"),m=require("module"); const run=(b,a)=>cp.execFileSync(b,a,{encoding:"utf8",timeout:5000,stdio:["ignore","pipe","pipe"]}).trim(); const v=process.versions.node.split(".").map(Number); if(!(v[0]>=24 || v[0]===23&&v[1]>=6 || v[0]===22&&v[1]>=14))throw Error("Unsupported Node"); run("tmux",["-V"]); const root=run("npm",["root","-g"]); const r=m.createRequire(p.join(root,"@songsid/agend/package.json")); const D=r("better-sqlite3"),db=new D(":memory:");db.prepare("select 1").get();db.close(); console.log("AGEND_VERSION="+run("agend",["--version"]));'
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($js))
+    $command = 'node -e ''eval(Buffer.from(process.argv[1],String.fromCharCode(98,97,115,101,54,52)).toString())'' ' + $encoded
+    $r = Invoke-AgendInWsl $UBUNTU_DISTRO $AGEND_USER $command
+    if ($r.Code -ne 0) { Write-Warn "AgEnD/Node/tmux/SQLite 驗證未通過（結束碼 $($r.Code)），此步驟不會標記完成。"; return $null }
+    $m = [regex]::Match($r.Text, '(?m)^AGEND_VERSION=([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\r?$')
+    if (-not $m.Success -or ($Expected -and $m.Groups[1].Value -cne $Expected)) { return $null }
+    return $m.Groups[1].Value
+}
+function Resolve-RequestedAgendVersion([string]$Requested) {
+    if ($Requested -match '^\d+\.\d+\.\d+') { return $Requested }
+    $tag = if ($Requested) { $Requested } else { 'latest' }
+    $r = Invoke-AgendInWsl $UBUNTU_DISTRO $AGEND_USER ('npm view @songsid/agend@' + $tag + ' version --json --fetch-timeout=15000 --fetch-retries=0')
+    if ($r.Code -ne 0) { throw 'Could not resolve the requested AgEnD version; installation is not marked complete.' }
+    try { $v = $r.Text | ConvertFrom-Json -ErrorAction Stop } catch { throw 'Invalid package version metadata; installation is not marked complete.' }
+    if ($v -isnot [string] -or $v -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') { throw 'Invalid package version metadata.' }
+    return $v
+}
+function Test-InstallerReady {
+    # No auth code/token is requested or printed; only local service and HTTP health are checked.
+    $js = 'const cp=require("child_process"),p=require("path"),fs=require("fs"),m=require("module"); const root=cp.execFileSync("npm",["root","-g"],{encoding:"utf8",timeout:5000}).trim(); const r=m.createRequire(p.join(root,"@songsid/agend/package.json")); const cfg=r("js-yaml").load(fs.readFileSync(p.join(process.env.AGEND_HOME||p.join(require("os").homedir(),".agend"),"fleet.yaml"),"utf8")); const port=cfg.health_port??19280; if(!Number.isInteger(port)||port<1||port>65535)throw Error("Invalid dashboard port"); (async()=>{for(let i=0;i<10;i++){try{const h=await fetch("http://127.0.0.1:"+port+"/health",{signal:AbortSignal.timeout(3000)});const body=await h.json();const ui=await fetch("http://127.0.0.1:"+port+"/",{signal:AbortSignal.timeout(3000)});if((h.ok||h.status===503)&&(body.status==="ok"||body.status==="degraded")&&body.startupComplete===true&&ui.ok){for(const problem of (Array.isArray(body.problems)?body.problems:[]).slice(0,16)){if(typeof problem==="string")console.log("AgEnD warning: "+problem.replace(/[\r\n]/g," ").slice(0,512));}return;}}catch{}await new Promise(r=>setTimeout(r,1000));}process.exitCode=1;})();'
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($js))
+    $script = $AGEND_ENV + 'systemctl --user is-active com.agend.fleet || exit $?; node -e ''eval(Buffer.from(process.argv[1],String.fromCharCode(98,97,115,101,54,52)).toString())'' ' + $encoded
+    $code = Invoke-WslStep -Label '確認服務與儀表板就緒' -Usually '通常需要幾秒到 1 分鐘' -UpperMinutes 1 -TimeoutSeconds 90 -NoProgressSeconds 90 -Script $script
+    return ($code -eq 0)
 }
 
 
@@ -1937,8 +2088,17 @@ $TOTAL = 5
 
 Write-Step 1 $TOTAL "安裝 WSL ($UBUNTU_DISTRO)"
 
+$wslStageVerified = $false
 if (Stage-Done 1) {
-    Write-Ok "WSL 已安裝，跳過此步驟"
+    if (Get-InstalledWslVersion) {
+        $currentNames = Get-WslDistroNames
+        if ($null -eq $currentNames) { throw 'Cannot verify the saved WSL stage; no Linux distributions were changed.' }
+        $wslStageVerified = $currentNames -contains $UBUNTU_DISTRO
+    }
+    if (-not $wslStageVerified) { Clear-InstallStage 1 }
+}
+if ($wslStageVerified) {
+    Write-Ok "WSL 發行版已重新確認，保留"
 } else {
     # ── 1a: 安裝前檢查（組建、架構、兩個 Windows 功能、虛擬化），缺哪個功能就啟用哪個（見 Get-WslPreflight）──
     Write-Info "檢查這台電腦能不能用 WSL 2..."
@@ -1948,7 +2108,7 @@ if (Stage-Done 1) {
     $featureStates = @($preflight.Features.Values)
     if ($featureStates -contains 'Unknown') {
         # 讀不到功能狀態（沒有 DISM 的 PowerShell 模組）：沿用以前的判斷，wsl --status 能用就當作已啟用。
-        $statusOut = wsl --status 2>&1 | Out-String
+        $statusProbe = Invoke-BoundedWsl -Arguments @('--status'); $statusOut = $statusProbe.Text
         if ($statusOut -match "Usage" -or $statusOut -match "引數") {
             foreach ($n in $WSL_FEATURES) { if ($preflight.Features[$n] -eq 'Unknown') { $preflight.Features[$n] = 'Disabled' } }
         }
@@ -1976,7 +2136,8 @@ if (Stage-Done 1) {
     }
 
     # ── 1c: 設定 WSL 預設版本為 2 ──
-    wsl --set-default-version 2 2>&1 | Out-Null
+    $defaultVersion = Invoke-BoundedWsl -Arguments @('--set-default-version', '2')
+    if ($defaultVersion.Code -ne 0) { throw 'Could not set the WSL default version to 2.' }
 
     # ── 1d: 這台電腦已經有哪些 Linux（只看清單，不啟動任何一個）──
     # 之前裝過 AgEnD 專用的就沿用；有 Ubuntu 就問（建議另外裝一個）；都沒有就照常安裝 $UBUNTU_DISTRO。
@@ -2025,7 +2186,7 @@ if (Stage-Done 1) {
                 Read-Host "按 Enter 結束"; exit 1
             }
         } else {
-            $null = Invoke-Watched -Label "下載並安裝 $UBUNTU_DISTRO" -Usually "通常需要 3–10 分鐘" -UpperMinutes 15 -Encoding utf16 -File "wsl.exe" -Arguments @("--install", "-d", $UBUNTU_DISTRO, "--location", $wslPath, "--no-launch")
+            $null = Invoke-Watched -Label "下載並安裝 $UBUNTU_DISTRO" -Usually "通常需要 3–10 分鐘" -UpperMinutes 15 -TimeoutSeconds 1800 -NoProgressSeconds 0 -Encoding utf16 -File "wsl.exe" -Arguments @("--install", "-d", $UBUNTU_DISTRO, "--location", $wslPath, "--no-launch")
             # 較舊的 WSL 不認得 --location，或安裝沒有成功：和另外安裝時一樣，改用官方映像檔匯入（#2650 第 7 項）。
             $afterFresh = Get-WslDistroNames
             if ($null -ne $afterFresh -and $afterFresh -notcontains $UBUNTU_DISTRO) {
@@ -2079,14 +2240,15 @@ if ($wslState -eq 'ready') {
 # 防護：設定 wsl.conf（systemd + 關閉 Windows PATH + 預設 root）
 Write-Info "正在設定 WSL 環境防護..."
 # Read exact bytes without introducing a PowerShell output newline.
-$encodedConf = (wsl -d $UBUNTU_DISTRO -u root -- bash -c 'if [ -L /etc/wsl.conf ]; then exit 1; elif [ -e /etc/wsl.conf ]; then base64 -w0 /etc/wsl.conf; fi' 2>$null | Out-String).Trim()
-if ($LASTEXITCODE -ne 0) { throw 'Cannot safely read /etc/wsl.conf; no settings were replaced.' }
+$confRead = Invoke-BoundedWsl -Arguments @('-d', $UBUNTU_DISTRO, '-u', 'root', '--', 'bash', '-c', 'if [ -L /etc/wsl.conf ]; then exit 1; elif [ -e /etc/wsl.conf ]; then base64 -w0 /etc/wsl.conf; fi')
+$encodedConf = $confRead.Text.Trim()
+if ($confRead.Code -ne 0) { throw 'Cannot safely read /etc/wsl.conf; no settings were replaced.' }
 $currentConf = ConvertFrom-WslConfigSnapshot $encodedConf
 $confCode = Invoke-WslStep -Label "合併 WSL 設定（保留原有設定）" -Usually "通常幾秒鐘" -UpperMinutes 1 -Script (Get-MergedLinuxWslConfigScript $currentConf $encodedConf)
 if ($confCode -ne 0) { throw "WSL config merge failed (exit $confCode); review the error above and rerun." }
 Write-Ok "WSL 環境設定已合併：啟用 systemd、關閉 Windows PATH、預設使用 root；其他設定保留"
 Write-Info "正在重啟選定的 Linux 讓設定生效..."
-wsl --terminate $UBUNTU_DISTRO 2>$null
+$null = Invoke-BoundedWsl -Arguments @('--terminate', $UBUNTU_DISTRO)
 Start-Sleep -Seconds 2
 
 # Merge the Windows-wide file too: never discard memory/swap/network settings.
@@ -2120,33 +2282,36 @@ if (-not ((Stage-Done 2) -and (Stage-Done 4))) {
 
 Write-Step 2 $TOTAL "安裝 AI 後端"
 
-if (Stage-Done 2) {
-    $selected = Resolve-Backends (Get-SavedBackends)
-    Write-Ok ("AI 後端已安裝，跳過此步驟（" + (($selected | ForEach-Object { $_.Name }) -join "、") + "）")
+$savedBackends = Get-ProgressValue 'BACKENDS' '[\d,]+'
+$selected = Resolve-Backends (Get-SavedBackends)
+if (@($selected).Count -eq 0) { $savedBackends = $null; Clear-InstallStage 2 }
+$missingBackends = @($selected | Where-Object { -not (Get-InstalledBackend $_) })
+if ((Stage-Done 2) -and $missingBackends.Count -eq 0) {
+    Write-Ok ("AI 後端已驗證，保留（" + (($selected | ForEach-Object { $_.Name }) -join "、") + "）")
 } else {
-    Write-Host ""
-    Write-Info "請選擇要安裝的 AI 後端（可多選，用逗號分隔）："
-    Write-Host ""
-    foreach ($b in $ALL_BACKENDS) {
-        Write-Info ("  {0}. {1,-16}（{2}）" -f $b.Id, $b.Name, $b.Note)
-    }
-    Write-Host ""
-    $sel = Read-Host "  請輸入數字（例：1,2 或直接 Enter 選 1）"
-    if ([string]::IsNullOrWhiteSpace($sel)) { $sel = "1" }  # 向後相容：預設 Kiro CLI
-    $selected = Resolve-Backends $sel
-    if (@($selected).Count -eq 0) {
-        Write-Warn "未選擇有效後端，預設安裝 Kiro CLI"
-        $selected = Resolve-Backends "1"
+    Clear-InstallStage 2
+    if ($savedBackends -and -not $Force) {
+        Write-Info "接續上次選擇的後端；已能執行的保留，只重試缺少或損壞的後端。"
+        $selected = Resolve-Backends $savedBackends
+    } else {
+        Write-Info "請選擇要安裝的 AI 後端（可多選，用逗號分隔）："
+        foreach ($b in $ALL_BACKENDS) { Write-Info ("  {0}. {1}（{2}）" -f $b.Id, $b.Name, $b.Note) }
+        $sel = Read-Host "  請輸入數字（例：1,2 或直接 Enter 選 1）"
+        if ([string]::IsNullOrWhiteSpace($sel)) { $sel = "1" }
+        $selected = Resolve-Backends $sel
+        if (@($selected).Count -eq 0) { Write-Warn "未選擇有效後端，預設安裝 Kiro CLI"; $selected = Resolve-Backends "1" }
     }
     $selectedCsv = (($selected | ForEach-Object { $_.Id }) -join ',')
     Write-Ok ("將安裝：" + (($selected | ForEach-Object { $_.Name }) -join "、"))
     Write-Host ""
 
+    Save-Backends $selectedCsv
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
 
     Write-Info "  [WSL] 安裝必要套件..."
-    $null = Invoke-WslStep -Label "安裝必要套件" -Usually "通常需要 1–2 分鐘" -UpperMinutes 5 -Script 'apt-get install -y unzip curl git || true'
+    $dependencyCode = Invoke-WslStep -Label "安裝必要套件" -Usually "通常需要 1–2 分鐘" -UpperMinutes 5 -Script 'set -e; apt-get update; apt-get install -y unzip curl git'
+    if ($dependencyCode -ne 0) { throw "Required packages failed (exit $dependencyCode); backend stage remains retryable." }
 
     $failed = @()
     foreach ($b in $selected) {
@@ -2163,15 +2328,23 @@ if (Stage-Done 2) {
             $nodePrep = 'export NVM_DIR=/root/.nvm; [ -s $NVM_DIR/nvm.sh ] && . $NVM_DIR/nvm.sh; if ! command -v npm >/dev/null 2>&1; then curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash; export NVM_DIR=/root/.nvm; . $NVM_DIR/nvm.sh; nvm install 22 >/dev/null 2>&1; fi; '
         }
         $cmd = $UNATTENDED_INSTALL.Replace('__AGEND_INSTALL__', "$BACKEND_PATH; $nodePrep$($b.Install)")
-        $null = Invoke-WslStep -Label ("安裝 {0}" -f $b.Name) -Usually "通常需要 1–3 分鐘" -UpperMinutes 6 -Script $cmd
-        $check = wsl -d $UBUNTU_DISTRO -u root -- bash -lc "$BACKEND_PATH; if command -v $($b.Bin) >/dev/null 2>&1; then echo OK; else echo FAIL; fi" 2>&1 | Out-String
-        if ($check -match "OK") { Write-Ok ("{0} 安裝完成" -f $b.Name) }
-        else { Write-Warn ("{0} 安裝可能失敗（找不到 {1}）" -f $b.Name, $b.Bin); $failed += $b.Name }
+        $backendCode = Invoke-WslStep -Label ("安裝 {0}" -f $b.Name) -Usually "通常需要 1–3 分鐘" -UpperMinutes 6 -Script $cmd
+        $verified = if ($backendCode -eq 0) { Get-InstalledBackend $b } else { $null }
+        if ($verified) { Write-Ok ("{0} 安裝完成（{1}）" -f $b.Name, $verified.Version) }
+        else { Write-Warn ("{0} 尚未安裝成功（結束碼 {1}）；下次會重試" -f $b.Name, $backendCode); $failed += $b.Name }
     }
 
     Write-Info "  [WSL] 設定 PATH..."
-    wsl -d $UBUNTU_DISTRO -u root -- bash -c 'if ! grep -q ".claude/local" /root/.bashrc 2>/dev/null; then echo "export PATH=\"/root/.local/bin:\$HOME/.claude/local:\$PATH\"" >> /root/.bashrc; fi' 2>&1 | Out-Null
-    wsl -d $UBUNTU_DISTRO -u root -- bash -c 'if ! grep -q ".claude/local" /root/.profile 2>/dev/null; then echo "export PATH=\"/root/.local/bin:\$HOME/.claude/local:\$PATH\"" >> /root/.profile; fi' 2>&1 | Out-Null
+    $pathScript = @'
+set -e
+for rc in /root/.bashrc /root/.profile; do
+  if ! grep -q '.claude/local' "$rc" 2>/dev/null; then
+    printf '\nexport PATH="/root/.local/bin:$HOME/.claude/local:$PATH"\n' >> "$rc"
+  fi
+done
+'@
+    $pathCode = Invoke-WslStep -Label '設定後端 PATH' -Usually '通常幾秒鐘' -UpperMinutes 1 -Script $pathScript
+    if ($pathCode -ne 0) { throw "Backend PATH setup failed (exit $pathCode)." }
 
     Write-Host ""
     $ErrorActionPreference = $prevEAP
@@ -2189,7 +2362,7 @@ if (Stage-Done 2) {
     }
     Write-Ok "PATH 已設定（/root/.bashrc + /root/.profile）"
     Save-Backends $selectedCsv
-    Mark-Stage 2
+    if ($failed.Count -eq 0) { Mark-Stage 2 }
 }
 
 # Progress IDs stay compatible: 4 = installed AgEnD, 3 = verified backend sign-ins.
@@ -2199,9 +2372,14 @@ if (Stage-Done 2) {
 
 Write-Step 3 $TOTAL "安裝 AgEnD"
 
-if (Stage-Done 4) {
-    Write-Ok "AgEnD 已安裝，跳過此步驟"
+$requestedPin = if ($AgendInstallVersion) { $AgendInstallVersion } else { 'latest' }
+$savedPin = Get-ProgressValue 'AGEND_INSTALL_REQUEST'
+$savedVersion = Get-ProgressValue 'AGEND_INSTALLED_VERSION'
+$installedVersion = if ((Stage-Done 4) -and $savedPin -ceq $requestedPin -and $savedVersion) { Get-VerifiedAgendVersion $savedVersion } else { $null }
+if ($installedVersion) {
+    Write-Ok "AgEnD $installedVersion、Node、tmux 與 SQLite 已驗證，保留"
 } else {
+    Clear-InstallStage 4
     Write-Info "正在安裝 AgEnD（使用官方安裝腳本 + Node.js $NODE_VERSION）..."
 
     $prevEAP = $ErrorActionPreference
@@ -2210,11 +2388,13 @@ if (Stage-Done 4) {
     Write-Host ""
 
     Write-Info "  [WSL] 安裝 tmux..."
-    $null = Invoke-WslStep -Label "安裝 tmux" -Usually "通常不到 1 分鐘" -UpperMinutes 3 -Script 'apt-get install -y -qq tmux || true'
+    $tmuxCode = Invoke-WslStep -Label "安裝 tmux" -Usually "通常不到 1 分鐘" -UpperMinutes 3 -Script 'apt-get install -y -qq tmux'
+    if ($tmuxCode -ne 0) { throw "tmux installation failed (exit $tmuxCode)." }
 
     Write-Info "  [WSL] 執行 AgEnD 官方安裝腳本（含 nvm + Node.js $NODE_VERSION + 編譯工具）..."
     $scriptLines = @(
         '#!/bin/bash'
+        'set -e'
         'export HOME=/root'
         '# 官方安裝腳本（non-interactive piped 不會觸發 quickstart）'
         (Get-AgendInstallCommand $AgendInstallVersion)
@@ -2222,19 +2402,21 @@ if (Stage-Done 4) {
         'if ! grep -q "NVM_DIR" /root/.bashrc 2>/dev/null; then printf "\nexport NVM_DIR=\"/root/.nvm\"\n[ -s \"\$NVM_DIR/nvm.sh\" ] && source \"\$NVM_DIR/nvm.sh\"\n" >> /root/.bashrc; fi'
         'if ! grep -q "NVM_DIR" /root/.profile 2>/dev/null; then printf "\nexport NVM_DIR=\"/root/.nvm\"\n[ -s \"\$NVM_DIR/nvm.sh\" ] && source \"\$NVM_DIR/nvm.sh\"\n" >> /root/.profile; fi'
     )
-    $null = Invoke-WslStep -Label "安裝 AgEnD 與 Node.js" -Usually "通常需要 3–8 分鐘" -UpperMinutes 15 -Script ($scriptLines -join "`n")
+    $installCode = Invoke-WslStep -Label "安裝 AgEnD 與 Node.js" -Usually "通常需要 3–8 分鐘" -UpperMinutes 15 -Script ($scriptLines -join "`n")
 
     Write-Host ""
 
     # 獨立驗證：用 agend --version 確認安裝成功
     Write-Info "  [WSL] 驗證 AgEnD 安裝..."
-    $verifyResult = wsl -d $UBUNTU_DISTRO -u root -- bash -c 'agend --version 2>/dev/null' 2>&1 | Out-String
-    $verifyResult = $verifyResult.Trim()
+    $expectedVersion = if ($installCode -eq 0) { Resolve-RequestedAgendVersion $AgendInstallVersion } else { '' }
+    $verifyResult = if ($installCode -eq 0 -and $expectedVersion) { Get-VerifiedAgendVersion $expectedVersion } else { $null }
     $ErrorActionPreference = $prevEAP
 
-    if ($verifyResult -match "^\d+\.\d+") {
+    if ($verifyResult) {
         Write-Ok "AgEnD v$verifyResult 安裝完成"
         Write-Ok "Node.js $NODE_VERSION LTS + tmux 已就緒"
+        Add-Content -LiteralPath $ProgressFile -Value ("AGEND_INSTALLED_VERSION=" + $verifyResult)
+        Add-Content -LiteralPath $ProgressFile -Value ("AGEND_INSTALL_REQUEST=" + $requestedPin)
         Mark-Stage 4
     } else {
         Write-Err "AgEnD 安裝失敗"
@@ -2271,8 +2453,10 @@ if ($browserLogin) {
 
 Write-Step 5 $TOTAL "串接通訊軟體 + 啟動服務"
 
-if (Stage-Done 5) {
-    Write-Ok "已完成，跳過此步驟"
+$script:InstallerReady = $false
+if ((Stage-Done 5) -and (Test-InstallerReady)) {
+    $script:InstallerReady = $true
+    Write-Ok "服務與儀表板已驗證就緒"
 } else {
     Write-Host ""
     Write-Info "接下來在瀏覽器裡完成設定：選擇 Discord 或 Telegram 並貼上 Bot Token；或選「Web only (no bot)」，不用 Bot、只用網頁儀表板。"
@@ -2286,12 +2470,14 @@ if (Stage-Done 5) {
     Write-Host ""
     Write-Info "檢查 AgEnD 狀態..."
     Start-Sleep -Seconds 5
-    wsl -d $UBUNTU_DISTRO -u root -- bash -lc 'export PATH=/root/.local/bin:$PATH; source /root/.nvm/nvm.sh 2>/dev/null; agend ls' 2>&1 | ForEach-Object {
-        $line = $_.ToString().Trim()
-        if ($line -match "\S" -and $line -notmatch "RemoteException") { Write-Info "  $line" }
-    }
+    $status = Invoke-AgendInWsl $UBUNTU_DISTRO $AGEND_USER 'agend ls'
+    if ($status.Text.Trim()) { Write-Info $status.Text.Trim() }
 
-    Mark-Stage 5
+    $script:InstallerReady = Test-InstallerReady
+    if ($script:InstallerReady) { Mark-Stage 5 } else {
+        Clear-InstallStage 5
+        Write-Warn "設定已儲存，但服務或儀表板尚未就緒。請查看上方錯誤、到儀表板完成登入；下次執行會重新確認，不會宣稱安裝全部成功。"
+    }
 }
 
 # ═══════════════════════════════════════════════════════════
@@ -2300,7 +2486,7 @@ if (Stage-Done 5) {
 
 Write-Host ""
 Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Green
-Write-Host "  全部安裝完成！" -ForegroundColor Green
+if ($script:InstallerReady) { Write-Host "  服務與儀表板已就緒" -ForegroundColor Green } else { Write-Warn "設定已儲存，服務或儀表板尚未就緒" }
 Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Green
 Write-Host ""
 Write-Info "  [OK] WSL ($UBUNTU_DISTRO) 已安裝"
@@ -2310,9 +2496,10 @@ $skippedLogins = @($selected | Where-Object { $b = $_; -not (@($signedIn) | Wher
 if ($skippedLogins.Count -eq 0) { Mark-Stage 3 }
 if ($signedIn.Count -gt 0) { Write-Info ("  [OK] AI 後端已安裝並登入：" + (($signedIn | ForEach-Object { $_.Name }) -join "、")) }
 foreach ($b in @($skippedLogins)) {
+    if (-not (Get-InstalledBackend $b)) { Write-Warn ("  {0} 尚未安裝成功；進度會保留，再執行安裝指令會重試。" -f $b.Name); continue }
     Write-Warn ("  [!!] {0} 已安裝但還沒登入。要登入，在 PowerShell 執行：{1}" -f $b.Name, (Get-LoginFollowUpCommand $b.Key))
 }
-Write-Info "  [OK] AgEnD 已安裝並啟動（systemd 服務）"
+if ($script:InstallerReady) { Write-Info "  [OK] AgEnD 服務與儀表板已驗證就緒" } else { Write-Warn "  AgEnD 設定已儲存；服務與儀表板尚未通過就緒檢查" }
 $connections = Get-FleetConnections $UBUNTU_DISTRO
 if ($connections -eq 'web') { Write-Info "  [OK] 只用網頁儀表板（沒有串接通訊軟體；之後可在 設定 → 聊天與連線 加上 Discord 或 Telegram）" }
 elseif ($connections -eq 'chat') { Write-Info "  [OK] 通訊軟體已串接" }
@@ -2346,10 +2533,13 @@ Write-Info "    agend web               # 取得儀表板的一次性登入碼"
 Write-Info ("    手動啟動：" + (Get-AgendStartHint $UBUNTU_DISTRO $AGEND_USER))
 Write-Host ""
 Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Green
-Save-InstallReceipt 'done' @($skippedLogins | ForEach-Object { [string]$_.Key })
 
 # 清除進度檔與自動接續的登記
-Remove-Item $ProgressFile -Force -ErrorAction SilentlyContinue
+$missingBackends = @($selected | Where-Object { -not (Get-InstalledBackend $_) })
+if ($script:InstallerReady -and $missingBackends.Count -eq 0) { Save-InstallReceipt 'done' @($skippedLogins | ForEach-Object { [string]$_.Key }) }
+elseif ($missingBackends.Count -gt 0) { Set-InstallFailure 'backend' } else { Set-InstallFailure 'service' }
+if ($script:InstallerReady -and $missingBackends.Count -eq 0) { Remove-Item -LiteralPath $ProgressFile -Force -ErrorAction SilentlyContinue }
+else { Write-Info "安裝進度已保留；再次執行相同指令，會重試缺少的後端或服務檢查。" }
 Clear-ResumeAtLogon
 
 # 最後直接打開儀表板（和桌面捷徑相同的流程）。
@@ -2357,8 +2547,10 @@ Write-Host ""
 Write-Info "正在打開 AgEnD 網頁儀表板..."
 if (-not (Invoke-OpenDashboard $UBUNTU_DISTRO $AGEND_USER -BackendSignins $browserSignins)) {
     # #2650 第 10 項：安裝已經完成，只是儀表板現在打不開。說出之後打開它的兩條路（都不會重新安裝）。
+    if ($script:InstallerReady -and $missingBackends.Count -eq 0) {
     Write-Info "安裝已經完成，設定都保留著。之後要打開儀表板：按兩下桌面上的「AgEnD 儀表板」，或再貼一次同一行安裝指令（不會重新安裝，會問你要不要打開儀表板）。"
+    } else { Write-Info "設定與進度都保留著。可按兩下桌面的「AgEnD 儀表板」；再貼一次同一行安裝指令會從沒完成的步驟繼續。" }
 }
 
 Read-Host "按 Enter 結束"
-
+if (-not $script:InstallerReady -or $missingBackends.Count -gt 0) { exit 1 }
