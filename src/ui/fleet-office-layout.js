@@ -4,6 +4,10 @@
 // overridesBetween), saved with the whole list and the rev read (PUT /ui/offices; a change made meanwhile is a 409).
 // Reset goes back to the pack's own positions. A "show coordinates" overlay draws the 1280×720 logical grid.
 //
+// #2665: an item with a `night` (#2568) has a night handle too — its night strip drawn faint on the canvas (as the
+// seats' figures, #2558), a moon, and a thin line to its day place. One that sleeps in place shows it on its day place
+// (and it follows the item); dragged away, the item has its own night place; its Reset puts back the pack's.
+//
 // Every handle is a button for the keyboard too: Tab to it, the arrow keys move it (Shift: by 10), Delete removes a
 // waypoint; the selected waypoint's corridors are listed with a way to join or unjoin each. Never offered to a guest,
 // the public link or a read-only session (the host refuses their saves too).
@@ -19,7 +23,8 @@ register("orgl", {
     edit: "Edit layout", title: "Edit layout", coords: "Show coordinates", addWaypoint: "Add waypoint", removeWaypoint: "Remove waypoint",
     joinTo: "Join to", join: "Join", unjoin: "Unjoin {0}", corridors: "Corridors", none: "Nothing selected: pick a seat, an item, the door or a waypoint.",
     reset: "Reset to the pack's layout", save: "Save layout", cancel: "Cancel", saved: "Layout saved.", hint: "Drag, or use the arrow keys (Shift: by 10).",
-    seat: "Seat {0} in {1}", furniture: "Item {0}", door: "Door", waypoint: "Waypoint {0}", at: "{0} at {1}, {2}",
+    seat: "Seat {0} in {1}", furniture: "Item {0}", night: "Item {0} (night)", door: "Door", waypoint: "Waypoint {0}", at: "{0} at {1}, {2}",
+    nightReset: "Back to the pack's night place",
     changed: "Someone changed the offices meanwhile. Your layout is kept: Save again puts it on the current list.",
     failed: "The layout was not saved ({0}).", rateLimited: "Too many saves. Try again in a minute.",
     stale: "This office was removed or its style changed meanwhile: this layout can no longer be saved. Cancel closes it.",
@@ -28,7 +33,8 @@ register("orgl", {
     edit: "編輯配置", title: "編輯配置", coords: "顯示座標", addWaypoint: "新增路徑點", removeWaypoint: "移除路徑點",
     joinTo: "連到", join: "連接", unjoin: "取消連接 {0}", corridors: "走道", none: "尚未選取：請選座位、家具、門或路徑點。",
     reset: "還原成 pack 的配置", save: "儲存配置", cancel: "取消", saved: "配置已儲存。", hint: "拖曳，或用方向鍵移動（Shift：一次 10）。",
-    seat: "{1} 的座位 {0}", furniture: "家具 {0}", door: "門", waypoint: "路徑點 {0}", at: "{0}，位置 {1}, {2}",
+    seat: "{1} 的座位 {0}", furniture: "家具 {0}", night: "家具 {0}（夜間）", door: "門", waypoint: "路徑點 {0}", at: "{0}，位置 {1}, {2}",
+    nightReset: "回到 pack 的夜間位置",
     changed: "有人在這期間修改了辦公室。你的配置已保留：再按一次儲存，會套用到目前的清單。",
     failed: "配置沒有儲存（{0}）。", rateLimited: "儲存太頻繁，請一分鐘後再試。",
     stale: "這個辦公室在這期間被移除，或它的風格已改變：這份配置無法再儲存。按取消關閉。",
@@ -39,11 +45,21 @@ const tl = (k, ...v) => t(`orgl.${k}`, ...v);
 // ── The pure part ──
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(v)));
-/** Every handle on a pack: { key, kind, label, x, y } — seats by area, furniture, the door, the waypoints. */
+/** An item's night place (#2665): its own, or (in place) its day place; `own` whether it has one. */
+const nightAt = (f) => (f.night.x !== null && f.night.x !== undefined && f.night.y !== null && f.night.y !== undefined ? { x: f.night.x, y: f.night.y, own: true } : { x: f.x, y: f.y, own: false });
+/**
+ * Every handle on a pack: { key, kind, label, x, y } — seats by area, furniture, each item's night place (#2665: an
+ * item with a `night`; `day` its day place, `inPlace` while it sleeps there), the door, the waypoints.
+ */
 export function handlesOf(pack) {
   const out = [];
   for (const [name, a] of Object.entries(pack.areas)) a.seats.forEach((s, i) => out.push({ key: `seat:${name}:${i}`, kind: "seat", label: tl("seat", i + 1, name), x: s.x, y: s.y }));
   for (const f of pack.furniture) out.push({ key: `furn:${f.id}`, kind: "furniture", label: tl("furniture", f.id), x: f.x, y: f.y });
+  for (const f of pack.furniture) {
+    if (!f.night) continue;
+    const n = nightAt(f);
+    out.push({ key: `night:${f.id}`, kind: "night", label: tl("night", f.id), x: n.x, y: n.y, day: { x: f.x, y: f.y }, inPlace: !n.own });
+  }
   out.push({ key: "door", kind: "door", label: tl("door"), x: pack.door.x, y: pack.door.y });
   for (const w of pack.waypoints) out.push({ key: `wp:${w.id}`, kind: "waypoint", label: tl("waypoint", w.id), x: w.x, y: w.y });
   return out;
@@ -59,6 +75,7 @@ export function moveHandle(pack, key, x, y) {
     return { ...pack, areas: { ...pack.areas, [a]: { ...area, seats: area.seats.map((s, j) => (j === i ? p : s)) } } };
   }
   if (kind === "furn") return { ...pack, furniture: pack.furniture.map((f) => (f.id === a ? { ...f, ...inCanvas() } : f)) };
+  if (kind === "night") return { ...pack, furniture: pack.furniture.map((f) => (f.id === a && f.night ? { ...f, night: { ...f.night, ...inCanvas() } } : f)) };
   if (kind === "door") return { ...pack, door: inCanvas() };
   if (kind === "wp") return { ...pack, waypoints: pack.waypoints.map((w) => (w.id === a ? { ...w, ...inCanvas() } : w)) };
   return pack;
@@ -81,12 +98,23 @@ export function toggleEdge(pack, a, b) {
   const has = (e) => (e[0] === a && e[1] === b) || (e[0] === b && e[1] === a);
   return { ...pack, edges: pack.edges.some(has) ? pack.edges.filter((e) => !has(e)) : [...pack.edges, [a, b]] };
 }
+/** #2665: item `id`'s night place back to the pack's (`base`): its own x/y, or in place again. */
+export function resetNight(pack, base, id) {
+  const o = base.furniture.find((f) => f.id === id);
+  if (!o || !o.night) return pack;
+  return { ...pack, furniture: pack.furniture.map((f) => (f.id === id && f.night ? { ...f, night: { ...f.night, x: o.night.x, y: o.night.y } } : f)) };
+}
 /** What Save keeps: the overrides between the pack and the edited layout (null: the pack's own). */
 export const layoutOverrides = (base, edited) => overridesBetween(base, edited);
 
 // ── The overlay ──
 
 const GRID = 80, LABEL = 160;
+/**
+ * A night handle's moon (#2665): a crescent centred near (x, y). Night handles are drawn under the others: one in place
+ * is a wider ring round its item's square (the item stays grabbable), its moon at the ring's corner.
+ */
+const moonPath = (x, y) => `M ${x + 1} ${y - 5} A 5 5 0 1 0 ${x + 1} ${y + 5} A 4 4 0 1 1 ${x + 1} ${y - 5} Z`;
 const KEY_STEP = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
 
 /**
@@ -131,6 +159,7 @@ export function LayoutEditor({ base, start, place = null, stale = "", dock = tru
   };
   const add = () => { const at = selected ? { x: selected.x + 40, y: selected.y } : { x: LOGICAL.w / 2, y: LOGICAL.h / 2 }; const r = addWaypoint(edited, at.x, at.y); change(r.pack); setSel(`wp:${r.id}`); };
   const wpSel = selected && selected.kind === "waypoint" ? selected.key.slice(3) : null;
+  const nightSel = selected && selected.kind === "night" ? selected.key.slice(6) : null;
   const save = async () => {
     if (busy) return;
     setBusy(true); setMsg("");
@@ -167,6 +196,7 @@ export function LayoutEditor({ base, start, place = null, stale = "", dock = tru
   const controls = html`<label class="check"><input type="checkbox" class="ol-coords" checked=${coords} onChange=${() => setCoords((v) => !v)} /><span>${tl("coords")}</span></label>
       <button type="button" class="btn btn-sm ol-add" onClick=${add} disabled=${busy}>${tl("addWaypoint")}</button>
       <span class="muted ol-sel" aria-live="polite">${selected ? tl("at", selected.label, selected.x, selected.y) : tl("none")}</span>
+      ${nightSel ? html`<button type="button" class="btn btn-sm ol-night-reset" onClick=${() => change(resetNight(edited, base, nightSel))} disabled=${busy}>${tl("nightReset")}</button>` : null}
       ${wpSel ? html`<button type="button" class="btn btn-sm btn-danger ol-remove" onClick=${() => { change(removeWaypoint(edited, wpSel)); setSel(null); }} disabled=${busy}>${tl("removeWaypoint")}</button>
         <label class="oo-pick"><span class="oo-pick-label">${tl("joinTo")}</span>
           <select class="tb-select ol-join-to" value=${joinTo} onChange=${(e) => setJoinTo(e.target.value)}>
@@ -188,11 +218,13 @@ export function LayoutEditor({ base, start, place = null, stale = "", dock = tru
         ${grid}
         ${Object.values(edited.areas).map((a) => html`<rect key=${`a:${a.name}`} class="ol-area" x=${a.rect.x} y=${a.rect.y} width=${a.rect.w} height=${a.rect.h} />`)}
         ${edited.edges.map((e) => { const p = at.get(e[0]), q = at.get(e[1]); return p && q ? html`<line key=${`e:${edgeKey(e)}`} class="ol-edge" x1=${p.x} y1=${p.y} x2=${q.x} y2=${q.y} />` : null; })}
-        ${handles.map((h) => html`<g key=${h.key} class=${`ol-handle ol-${h.kind}${sel === h.key ? " on" : ""}`} data-handle=${h.key} tabindex="0" role="button"
+        ${handles.filter((h) => h.kind === "night" && !h.inPlace).map((h) => html`<line key=${`nl:${h.key}`} class="ol-night-line" x1=${h.day.x} y1=${h.day.y} x2=${h.x} y2=${h.y} />`)}
+        ${[...handles.filter((h) => h.kind === "night"), ...handles.filter((h) => h.kind !== "night")].map((h) => html`<g key=${h.key} class=${`ol-handle ol-${h.kind}${sel === h.key ? " on" : ""}`} data-handle=${h.key} tabindex="0" role="button"
             aria-label=${tl("at", h.label, h.x, h.y)} aria-pressed=${sel === h.key ? "true" : "false"}
             onPointerDown=${down(h.key)} onKeyDown=${keyOn(h)} onFocus=${() => setSel(h.key)}>
           ${h.kind === "door" ? html`<rect x=${h.x - 9} y=${h.y - 9} width="18" height="18" transform=${`rotate(45 ${h.x} ${h.y})`} />`
             : h.kind === "furniture" ? html`<rect x=${h.x - 8} y=${h.y - 8} width="16" height="16" />`
+            : h.kind === "night" ? html`<circle cx=${h.x} cy=${h.y} r=${h.inPlace ? 15 : 8} /><path class="ol-moon" d=${h.inPlace ? moonPath(h.x + 10, h.y - 10) : moonPath(h.x, h.y)} />`
             : html`<circle cx=${h.x} cy=${h.y} r=${h.kind === "seat" ? 9 : 7} />`}
           ${coords && sel === h.key ? html`<text class="ol-coord" x=${h.x + 12} y=${h.y - 10}>${h.x}, ${h.y}</text>` : null}
         </g>`)}

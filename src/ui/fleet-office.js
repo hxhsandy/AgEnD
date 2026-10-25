@@ -70,7 +70,7 @@ import { POLL_MS } from "./fleet-traffic.js";
 import { OfficeEditor, officeForSave } from "./fleet-office-editor.js";
 import { LayoutEditor, handlesOf } from "./fleet-office-layout.js";
 import { ShareButton } from "./office-share-dialog.js";
-import { applyOverrides } from "./fleet-office-pack.js";
+import { applyOverrides, fitNight } from "./fleet-office-pack.js";
 import { ALL_ID, LOBBY_TILE, OV, createCrossFlights, cropToRooms, fromTile, inTile, labelAt, lobbyNodes, overviewOk, tileAt, tileBox, tileLayout, visibleTiles } from "./fleet-office-overview.js";
 import { centreOn, gestureState, gestures, miniPoint, toScreen, toWorld, wheelFactor, zoomKey, zoomTo } from "./fleet-canvas-view.js";
 import { OK_MAX, OK_MIN, clampPan, desksK, edgeMatte, edgeStrips, fitScene, layerScale, miniBox, miniFrame, openingView, pinchOffice, savedOf, stepK, viewFromSaved,
@@ -193,7 +193,7 @@ function looksOf(L, work, q, mode, zones) {
 function withOverrides(baseSkin, zones, office) {
   const ov = zones && office ? office.overrides : null;
   if (!ov || ov.pack !== baseSkin.id) return { skin: baseSkin, ignored: false };
-  const a = applyOverrides(baseSkin.pack, ov);
+  const a = applyOverrides(baseSkin.pack, fitNight(baseSkin.pack, ov));    // #2665: a night place the pack lost: left out
   return a.ok ? { skin: { ...baseSkin, pack: a.pack }, ignored: false } : { skin: baseSkin, ignored: true };
 }
 /** A stored office's scene (or the lobby tile's): seats in its style's areas, its own seats, or one room wrapping at `deskW`. */
@@ -209,7 +209,10 @@ function partOf(L, looks, skin, zones, walkers, flights) {
   return { L, looks, skin, zones, walkers, flights, all, desks: all.filter((d) => d.node), layers: null,
     active: zones ? activeFurniture(skin.pack, shown, byName) : new Set(), lines: bubbleDefaults(), lang: lang() };
 }
-/** At bedtime (#2568): each item with a `night` drawn as it — its strip playing, at its night place (its own when none). */
+/**
+ * At bedtime (#2568): each item with a `night` drawn as it — its strip playing, at its night place: the office's
+ * (Edit layout, #2665: applyOverrides puts it on `night`), else the pack's night x/y, else its (moved) day place.
+ */
 export const nightFurniture = (list) => list.map((f) => (f.night ? { ...f, sprite: f.night.sprite, activeSprite: null, x: f.night.x ?? f.x, y: f.night.y ?? f.y, asleep: true } : f));
 /** #2596: each NPC with a `walk` where its walker is now (`at(key)`): moved there — its tag and depth with it — and, while
  * it walks, `walking` and its `heading` (its walk strip: walkStrip); asleep, or with no walker (not strolling), where it is. */
@@ -238,6 +241,8 @@ export function ghostsOf(pack, people = []) {
   }
   return out;
 }
+/** #2665: Edit layout's faint night places by day — each item with a `night` as it is drawn at bedtime (nightFurniture). */
+export const nightGhostsOf = (pack) => nightFurniture(pack.furniture.filter((f) => f.night));
 /** All offices: the tile `name` is drawn in ({ tile, skin }), or null. */
 const senderTile = (parts, name) => (name ? parts.find((p) => desksOf(p.L).some((d) => d.node.name === name)) || null : null);
 /**
@@ -330,12 +335,15 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
     const furniture = strollFurniture(p.night ? nightFurniture(sk.pack.furniture) : sk.pack.furniture, (k) => p.walkers.at(k, t));
     if (furniture.some((f) => f.walking)) walking = true;
     const band = [...furniture.filter((f) => f.depth === "y").map((f) => ({ y: f.y, k: 0, f })), ...people.map((q) => ({ y: q.at.y, k: 1, p: q })),
-      ...(p.ghosts ? ghostsOf(sk.pack, people).map((g) => ({ y: g.y, k: 1, g })) : [])]
+      ...(p.ghosts ? ghostsOf(sk.pack, people).map((g) => ({ y: g.y, k: 1, g })) : []),
+      // #2665: by day, each item's night place too (at night the items are there already).
+      ...(p.ghosts && !p.night ? nightGhostsOf(sk.pack).map((n) => ({ y: n.y, k: 1, n })) : [])]
       .sort((x, y) => x.y - y.y || x.k - y.k);
     for (const f of furniture) if (f.depth !== "y" && f.depth < CHAR_DEPTH) sk.drawFurniture(ctx, f, f.asleep || p.active.has(f.id), ms, env);
     for (const it of post) if (it.t === 0) sk.drawProp(ctx, it, ms, env);        // a letter on the floor: under the people
-    for (const { f, p: q, g } of band) {
+    for (const { f, p: q, g, n } of band) {
       if (f) { sk.drawFurniture(ctx, f, f.asleep || p.active.has(f.id), ms, env); continue; }
+      if (n) { ctx.save(); ctx.globalAlpha = GHOST_ALPHA; sk.drawFurniture(ctx, n, true, 0, env); ctx.restore(); continue; }
       if (g) { ctx.save(); ctx.globalAlpha = GHOST_ALPHA; sk.drawCharacter(ctx, { x: g.x - 44, y: g.y - 53, w: 88, h: 53, seat: g }, g.look, 0, env); ctx.restore(); continue; }
       const box = { ...q.d, x: q.at.x - 44, y: q.at.y - 53, w: 88, h: 53, seat: { x: q.at.x, y: q.at.y } };
       // An agent's own pose (office_set, #2578) while its act lasts and nothing calls it; walking is walking.
