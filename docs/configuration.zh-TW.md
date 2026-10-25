@@ -210,7 +210,7 @@ Cloudflare 的公共解析器（1.1.1.1 / 1.0.0.1）解析 tunnel 名稱，再�
 | 欄位 | 型別 | 說明 |
 |------|------|------|
 | `url` | string | Webhook endpoint URL |
-| `events` | string[] | 已有事件：`hang`、`mcp_died`、`pty_error`、`pty_recovered`、`cost_warning`、`cost_limit`、`schedule_deferred`、`model_failover`、`model_recovered`；`["*"]` 訂閱全部 |
+| `events` | string[] | 已有事件：`hang`、`mcp_died`、`pty_error`、`pty_recovered`、`cost_warning`、`cost_limit`、`schedule_deferred`、`model_failover`、`model_recovered`、`context_lost`（多次啟動失敗後放棄 resume、改用全新對話）；`["*"]` 訂閱全部 |
 | `headers` | object | 選用的 HTTP headers |
 
 `instance.started`、`instance.stopped`、`rotation` 與 `crash_loop` 並未送出。範例：
@@ -301,7 +301,7 @@ templates:
 | `channel_id` | string | — | 多連線模式中綁定的 adapter ID |
 | `general_topic` | boolean | `false` | 標記為 General Topic（接收未路由的訊息） |
 | `backend` | string | `"claude-code"` | CLI backend：`claude-code`、`codex`、`opencode`、`kiro-cli`、`antigravity`、`grok`、`muse` |
-| `kiro_ui` | `"legacy"` \| `"tui"` | `"legacy"` | 僅供 Kiro 使用的啟動模式。`legacy` 跑在 kiro 的 v1 engine，`tui` 跑在 v2 engine；每次啟動都會明確指定，kiro-cli 的預設值或已存的設定都無法把 instance 換到別的 engine（#1109）。在 Kiro v3 介面能無人值守執行之前，`"v3"` 會被設定驗證拒絕（#849）。 |
+| `kiro_ui` | `"legacy"` \| `"tui"` | `"legacy"`；新建的 instance 會寫入 `"tui"`（#2598） | 僅供 Kiro 使用的啟動模式。所有建立 kiro instance 的方式（`create_instance`、網頁精靈、`agend setup` 或 `agend quickstart` 建立的新 fleet、fleet 自動建立的 General 或 topic）都會寫入 `tui`，除非 fleet 預設已指定。沒有設定的既有項目維持 `legacy`：要搬請用 `migrate_kiro_instance`，不要直接改這個值。`legacy` 跑在 kiro 的 v1 engine，`tui` 跑在 v2 engine；每次啟動都會明確指定，kiro-cli 的預設值或已存的設定都無法把 instance 換到別的 engine（#1109）。在 Kiro v3 介面能無人值守執行之前，`"v3"` 會被設定驗證拒絕（#849）。 |
 | `auto_pause_after` | number | `0`（停用） | 閒置多少分鐘後自動暫停。0 = 不暫停。 |
 | `model` | string | — | 模型覆寫；有效名稱與格式依 backend 而定 |
 | `model_failover` | string[] | — | 被限速時的備用模型（例：`["opus", "sonnet"]`）。5 分鐘冷卻期，防止同一時間窗口內重複 failover |
@@ -322,7 +322,8 @@ templates:
 | `workflow` | string \| false | `"builtin"` | 工作流程：`"builtin"`、`"file:path"`、內嵌內容或 `false`。可放在 instance 或 `defaults`，不可放在 fleet.yaml 頂層 |
 | `skipPermissions` | boolean | 未設 `false` 時視為 `true` | 依 backend 使用不同 bypass flag，見[安全邊界](SECURITY.zh-TW.md)。OpenCode：其 `--help` 有列 `--auto` 時以 `--auto` 啟動（明確的 `deny` 規則仍然有效）；舊版沒有啟動開關，prompt 由執行期回答「Allow once」 |
 | `cross_instance_visibility` | `"full"` \| `"summary"` \| `"hidden"` | `"full"` | Agent 之間（跨 instance）的訊息在此 instance 主題與 web chat 中顯示多少，不論它是發送方還是接收方：`full` 完整訊息（與以往相同）、`summary` 一行、`hidden` 不顯示。在 `defaults` 設定整個 fleet（也可用 `/visibility`），在這裡為單一 instance 覆寫；Settings 兩者都有。立即生效，不需重啟。訊息送達與 Mirror Topic 一律不受影響 —— 見 [features](features.zh-TW.md#agent-之間的訊息顯示-bot-to-bot-message-visibility)。 |
-| `dashboard` | object | 全部允許 | 在 `tool_set` 之外，這個 instance 能在 dashboard 上用哪些功能：`appearance`（自己的外觀：主題、圖片、小工具、背景效果、特效、mod 提案）、`task_board`（`task` 工具）、`web_settings`（替人改設定 → 外觀）、`office`（它在辦公室畫面的角色：`office_view`、`office_set`——**沒設成 `true` 就是關閉**，#2578）。設成 `false` 就關掉：每次呼叫都會被拒絕並說明原因（不用重啟），agent 的工具清單也會立刻拿掉（它的 MCP server 會跟著 fleet.yaml）；沒有任務看板的 agent，啟動說明也不再叫它用看板；重新打開時會通知那個 agent。**新的 fleet**（`agend init`、`agend quickstart`、設定頁）寫入時會帶 `defaults.dashboard.task_board: false`：任務看板維持關閉，直到你把它設為 `true`（或刪掉這一行），或在設定頁勾選。既有的 fleet.yaml 不會被改寫。`defaults.dashboard` 套用到所有 instance；instance 自己的設定會逐項合併（例如 `dashboard: { task_board: false }`）。設定頁：agent 對話框 → 進階 → Dashboard 權限，以及 Agent 預設值。關閉立即生效；打開要先確認。 |
+| `dashboard` | object | 全部允許 | 在 `tool_set` 之外，這個 instance 能在 dashboard 上用哪些功能：`appearance`（自己的外觀：主題、圖片、小工具、背景效果、特效、mod 提案）、`task_board`（`task` 工具）、`web_settings`（替人改設定 → 外觀）；Office 改用獨立的 `office_access` 設定。設成 `false` 就關掉：每次呼叫都會被拒絕並說明原因（不用重啟），agent 的工具清單也會立刻拿掉（它的 MCP server 會跟著 fleet.yaml）；沒有任務看板的 agent，啟動說明也不再叫它用看板；重新打開時會通知那個 agent。**新的 fleet**（`agend init`、`agend quickstart`、設定頁）寫入時會帶 `defaults.dashboard.task_board: false`：任務看板維持關閉，直到你把它設為 `true`（或刪掉這一行），或在設定頁勾選。既有的 fleet.yaml 不會被改寫。`defaults.dashboard` 套用到所有 instance；instance 自己的設定會逐項合併（例如 `dashboard: { task_board: false }`）。設定頁：agent 對話框 → 進階 → Dashboard 權限，以及 Agent 預設值。關閉立即生效；打開要先確認。 |
+| `office_access` | boolean | `false` | 允許這個 agent 使用 `office_view`、`office_set`。繼承 `defaults.office_access`，只有 `true` 才開啟。設定頁仍放在 Dashboard 權限；開啟須確認，關閉立即拒絕呼叫並移除工具。修改預設值會立即更新繼承該設定的 agent；個別設定仍優先。獨立存放，讓 2.3.1、2.2.6 能驗證此設定檔並忽略 Office。既有 `dashboard.office` 會在啟動或接受重新載入時保留 `.bak` 備份後轉換；設定頁只寫入新欄位。 |
 | `board_cards_at_once` | number | `1` | 別人交辦給這個 instance 的看板卡，最多能同時有幾張在進行中；到上限時再認領會被擋下。必須是至少 1 的整數。instance 開給自己的卡不算。需要同時做好幾張交辦卡的角色（例如 reviewer）可以調高。每次認領時讀取，立即生效。見 [features](features.zh-TW.md#在網頁上fleet--tasks)。 |
 | `lightweight` | boolean | `false` | 跳過 transcript monitor、context guardian 等非必要子系統 |
 | `pre_task_command` | string | — | 每次使用者訊息之前貼入的原始命令 |
@@ -641,7 +642,8 @@ macOS 上 claude 把登入存在鑰匙圈（Keychain），項目名稱依 profil
 session 的對話紀錄（`projects/<目錄>/<session>.jsonl`）、它的資料夾與檔案歷史複製到新 profile，並把副本設成最新的一份，
 讓重啟時的 `--continue` 接上它。
 - 舊 profile 保留自己那份，所以切回去會回到同一段對話（含期間新增的部分）。
-- 下一次回覆會在快取為空的狀態下重讀整段對話：這一輪會比較慢，並以完整價格計費。
+- 切換本身不會讓提示快取變空。在同一個快取範圍內（組織；供應商隔離工作區時還包括工作區），模型與提示前綴不變時，
+  通常會沿用原本的快取。快取範圍、模型或 profile 設定不同，或快取已過期時，下一次回覆可能要重建快取（這一輪會比較慢，並以完整價格計費）。
 - 回覆會帶 `conversation_carried_over: true`。
 - 設定與登入仍各屬各的 profile，兩邊其他對話紀錄維持原狀。專案自動記憶依上文共用；profile 已有非空記憶目錄時會保留。
 
@@ -741,3 +743,15 @@ web:
 關閉時，本機、公開連結與訪客頁面都會隱藏 Canvas Worker 控制項、試播、海報、效果庫與播放，不載入 CW 執行模組或 Worker。CW 專用工具（包含網頁 mod 匯出與提案）不出現在 agent 工具清單，直接呼叫也會拒絕；混合型外觀工具保留非 CW 選項。受管理技能與 agent 公告省略 CW 操作說明。關閉會停止正在播放的 CW 特效，但不刪除磁碟上的 Worker、套用位置、偏好或 mod；重新開啟會恢復，仍遵守原本的同意與信任檢查。
 
 落花、點擊星星等只含資料的環境效果，以及主題、小工具和自訂 CSS，都不受此開關影響。
+
+### 首次設定時從瀏覽器登入後端
+
+本機的 `agend setup` 頁面會在 fleet 啟動前提供 Kiro、Claude Code、Codex 的登入控制。Kiro 的登入方式、組織 Start URL 與區域，以及 Claude 回傳的驗證碼，都在瀏覽器輸入；Codex 會顯示供應商連結與裝置碼。不會開放瀏覽器終端機或任意指令輸入。**Web only（不使用 bot）** 與 bot 設定共用此流程。Antigravity 等其他後端仍走明確的主控台備援路徑。
+
+安裝程式可用 `agend setup --backend-signins kiro-cli,claude-code,codex` 指定清單，網頁不能移除這些已選的後端。選擇 **Sign in later** 只會在私有的 `backend-signin-pending.json` 留下標準後端 ID，即使沒有 agent 使用該後端，也會顯示在 **Needs you**。**設定 → Agent → 登入** 提供相同的瀏覽器控制；檔案不含驗證碼、供應商網址或憑證，也不能當成登入成功的證明。每個已選後端都必須驗證登入或明確略過，且登入程序確認關閉，才可啟動 fleet。
+
+登入控制必須使用這台電腦上仍有效的 setup cookie，透過 `--tunnel` 一律拒絕。重新整理會接回同一次嘗試；畫面重繪不會讓已回答的提示再次接受輸入，若 CLI 重問，請取消再重試。若無法確認程序已關閉，setup 會拒絕交接；請在主機關閉該 setup 的登入程序，再重新執行 setup。寫入設定仍需要原有的主機確認。
+
+`agend setup --backend-signin-capabilities` 只輸出安裝程式用的能力 JSON，不開啟 setup，也不清除完成標記。Windows 安裝程式只有在版本 1 的 setup、dashboard、installer 能力旗標都成立時才使用新流程：先安裝 AgEnD，再於 setup 頁面登入後端。舊版套件保留主控台備援。已有設定的安裝會用 `agend web --code --backend-signins kiro-cli,claude-code,codex` 開啟儀表板清單，單純導覽不會啟動登入。安裝進度 ID 維持相容；最後狀態會重新檢查登入，略過的後端不會被說成已登入。Antigravity 仍為明確的主控台備援，尚未啟用被動裝置驗證橋接。
+
+直接連線的儀表板也只有目前有效的本機管理員 session 可操作登入；agent 的 header token、唯讀 session、訪客與公開連結，都不能讀取提示或送出答案。Kiro、Claude、Codex 的預設帳號使用具名控制；憑證設定檔保留原有流程。遇到不支援的畫面，可明確選擇 **改用主控台備援**。頂端狀態列可重新開啟進行中的嘗試。成功登入後會沿用原有的預設帳號 agent 恢復流程；若只是確認原有憑證仍有效，不會重新啟動正在執行的 agent。登入、安裝、舊版與 profile 流程共用同一個寫入保留名額。

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import yaml from "js-yaml";
 import { unshareParsed } from "./yaml-shared-nodes.js";
 import { getAgendHome, getTmuxSessionName, ensureWorkspaceGit } from "./paths.js";
-import { dashboardSwitches } from "./dashboard-permissions.js";
+import { normalizeOfficeStorage, dashboardSwitches } from "./dashboard-permissions.js";
 import type { CostGuardConfig, HangDetectorConfig, DailySummaryConfig, FleetConfig, FleetDefaults, FleetTemplate, InstanceConfig, RawFleetConfig } from "./types.js";
 
 export function deepMergeGeneric<T extends object>(target: T, source: Partial<T>): T {
@@ -65,6 +65,39 @@ export const DEFAULT_LIST_INSTANCES_OUTPUT_BUDGET = 8 * 1024;
 /** Maximum lines for get_instance_logs to prevent context flooding. */
 export const MAX_INSTANCE_LOG_LINES = 200;
 
+/**
+ * #2598: the engine a NEWLY created kiro instance is written with — the TUI (kiro 3.0 drops classic) — or undefined
+ * when it does not apply (not kiro, or the fleet's own default names an engine, which it then inherits). Only creation
+ * paths call this: an existing entry without kiro_ui stays classic (DEFAULT_INSTANCE_CONFIG). Its engine is never
+ * guessed from launch history: moving an existing conversation is migrate_kiro_instance's, with that history.
+ */
+export function newInstanceKiroUi(
+  backend: string | undefined,
+  defaults: { backend?: string; kiro_ui?: InstanceConfig["kiro_ui"] } | undefined,
+): "tui" | undefined {
+  return (backend ?? defaults?.backend ?? "claude-code") === "kiro-cli" && defaults?.kiro_ui === undefined ? "tui" : undefined;
+}
+
+/**
+ * The General the fleet creates for a connection that has none. It is written whole (built-in defaults included), so
+ * its kiro_ui is set from the fleet's own: a new kiro instance's (newInstanceKiroUi), else the fleet default's — never
+ * the built-in legacy over a fleet default of tui (#2621 review).
+ */
+export function autoGeneralInstanceConfig(
+  defaults: { backend?: string; kiro_ui?: InstanceConfig["kiro_ui"] } | undefined,
+  workingDirectory: string,
+  channelId: string,
+): InstanceConfig {
+  const kiroUi = newInstanceKiroUi(undefined, defaults) ?? defaults?.kiro_ui;
+  return {
+    ...DEFAULT_INSTANCE_CONFIG,
+    working_directory: workingDirectory,
+    general_topic: true,
+    channel_id: channelId,
+    ...(kiroUi ? { kiro_ui: kiroUi } : {}),
+  } as InstanceConfig;
+}
+
 export const DEFAULT_INSTANCE_CONFIG: Omit<InstanceConfig, "working_directory"> = {
   auto_pause_after: 0, // minutes; 0 = disabled (opt-in)
   mcp_auto_restart: true, // restart (idle-gated) when the MCP server dies
@@ -73,6 +106,7 @@ export const DEFAULT_INSTANCE_CONFIG: Omit<InstanceConfig, "working_directory"> 
   reply_triggers: DEFAULT_REPLY_TRIGGERS,
   reply_completion_guard: true, // detect and recover a human turn that ended without a delivered reply
 
+  // An entry that sets no kiro_ui is classic, as it always was; new ones are written with tui (newInstanceKiroUi).
   kiro_ui: "legacy",
   terminal: {
     enabled: true,
@@ -181,6 +215,7 @@ export function loadFleetConfig(configPath: string): FleetConfig {
     return { defaults: {}, instances: {} };
   }
 
+  normalizeOfficeStorage(parsed);
   const fleetDefaults: FleetDefaults = parsed.defaults ?? {};
   const rawInstances = parsed.instances ?? {};
   const instances: Record<string, InstanceConfig> = {};
@@ -189,6 +224,7 @@ export function loadFleetConfig(configPath: string): FleetConfig {
     // #2391 review: a dashboard switch written as null follows the default (dashboardSwitches), so it never masks it.
     const overrides = written && typeof written === "object" && written.dashboard !== undefined
       ? { ...written, dashboard: dashboardSwitches(written.dashboard) } : written;
+    if (overrides?.office_access === null) delete overrides.office_access;
     const merged = deepMergeGeneric(
       getEffectiveInstanceDefaults(fleetDefaults),
       overrides,

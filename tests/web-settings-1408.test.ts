@@ -267,8 +267,8 @@ describe("#2347: one save model — an edit is unsaved at once, the bar's Save w
     save().click(); await settle(2);
     await vi.waitFor(() => expect(puts().length).toBe(first + 1), { timeout: 6000 });
     // All of them go (the defaults write replaces `dashboard` whole): the edited one as edited, the others as now saved
-    // (office, unset, is off: off unless set true, #2578).
-    expect([before, back, puts().at(-1)]).toEqual([[true, false, true, false], [false, false, false, false], { dashboard: { appearance: false, task_board: false, web_settings: false, office: false } }]);
+    // Office remains off and untouched; its separate office_access field is not rewritten.
+    expect([before, back, puts().at(-1)]).toEqual([[true, false, true, false], [false, false, false, false], { dashboard: { appearance: false, task_board: false, web_settings: false } }]);
   });
   it("after a Save that went through, the drafts go: the form shows what is saved, unmarked", async () => {
     let saved = false;
@@ -455,9 +455,9 @@ describe("#1374 and leaks", () => {
   it("mounting reads the configuration once; while it stays open nothing is read again", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "clearTimeout", "clearInterval", "performance"] });
     const m = mount(); await vi.advanceTimersByTimeAsync(50); await m;
-    // #2233: Agents' sign-in list reads its rows once (GET /ui/backend-login); the stream says when to read again.
+    // #2599: both sign-in controllers are read once; the stream says when to read again.
     expect(reads().sort()).toEqual(["/api/fleet", "/api/profiles", "/api/settings/classic", "/api/settings/connections", "/api/settings/fleet/raw",
-      "/api/settings/pending", "/api/settings/provider-secrets", "/api/settings/schema", "/ui/backend-login"]);
+      "/api/settings/pending", "/api/settings/provider-secrets", "/api/settings/schema", "/ui/backend-login", "/ui/browser-backend-signins"]);
     reqs = [];
     await vi.advanceTimersByTimeAsync(120_000);
     expect(reqs).toEqual([]);

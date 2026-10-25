@@ -15,14 +15,15 @@ register("fusage", {
     range: "Range", today: "Today", r7d: "7 days", month: "This month", all: "All", custom: "Custom", from: "From", to: "To", apply: "Apply",
     group: "Group by", g_instance: "Agent", g_backend: "Backend", g_model: "Model", g_profile: "Credential profile", g_team: "Team (as configured now)",
     csv: "Download CSV", basis: "API-equivalent at list price (checked {0}) — not money spent. Subscriptions are not billed per token.",
-    amount: "API-equivalent", input: "Input", output: "Output", read: "Cache read", write: "Cache write", total: "Total tokens", requests: "Requests", messages: "Messages",
+    amount: "API-equivalent", input: "Input", output: "Output", reasoning: "Reasoning", read: "Cache read", write: "Cache write", total: "Total tokens", requests: "Requests", messages: "Messages",
     notPriced: "not priced", partial: "partial", noTeam: "(no team)", unknown: "unknown",
-    f_cache_write_not_reported: "cache writes not reported (Codex) — an estimate", f_not_priced: "not priced: {0}", f_source_unknown: "read before backend and profile were recorded",
+    f_cache_write_not_reported: "cache writes not reported (Codex, Muse) — an estimate", f_not_priced: "not priced: {0}", f_source_unknown: "read before backend and profile were recorded",
+    f_estimated: "estimated from text size — Kiro records no token counts", f_includes_estimates: "includes estimates (Kiro)", f_cost_reported: "amount as the CLI reported it (no list price for this model)", estimatedPart: "of which estimated: {0}",
     scanning: "Scanning — totals may still grow.", updated: "Updated {0} · read every 10 min", since: "Collected since {0}", notYet: "Not collected yet",
     refresh: "Refresh",
     notMeasured: "Not measured", nm_credit_billed: "Kiro is credit-billed and records no tokens", nm_unsupported: "AgEnD can't read this CLI's usage yet", nm_no_data: "nothing read yet",
     shared: "shares its working directory with {0}; their transcripts can't be told apart",
-    empty: "Nothing recorded yet", emptyHint: "Usage is read from Claude Code and Codex transcripts, from when the fleet started.",
+    empty: "Nothing recorded yet", emptyHint: "Usage is read from Claude Code, Codex, Grok, Muse, OpenCode and Antigravity, and estimated for Kiro, from when the fleet started.",
     blocked: "Not offered over the public link", blockedHint: "Usage is offered over the public link only when \"Usage report over the public link\" is on in Settings → Web dashboard — on the dashboard reached directly, on the computer running AgEnD.",
     openSettings: "Open Settings → Web dashboard on that computer",
     partialDays: "Daily detail from {0}: the earlier days in this range are too many rows to send. The rows and totals above cover the whole range; the trend, the heatmap and the CSV start at {0}.",
@@ -42,14 +43,15 @@ register("fusage", {
     range: "期間", today: "今天", r7d: "7 天", month: "本月", all: "全部", custom: "自訂", from: "從", to: "到", apply: "套用",
     group: "分組", g_instance: "Agent", g_backend: "Backend", g_model: "模型", g_profile: "憑證 profile", g_team: "Team（依目前設定）",
     csv: "下載 CSV", basis: "依牌價換算的 API 等值（查證日期 {0}）——不是實際花費。訂閱方案不按 token 計費。",
-    amount: "API 等值", input: "輸入", output: "輸出", read: "快取讀取", write: "快取寫入", total: "token 總計", requests: "請求數", messages: "訊息數",
+    amount: "API 等值", input: "輸入", output: "輸出", reasoning: "推理", read: "快取讀取", write: "快取寫入", total: "token 總計", requests: "請求數", messages: "訊息數",
     notPriced: "未定價", partial: "部分", noTeam: "（不屬於任何 team）", unknown: "未知",
-    f_cache_write_not_reported: "未回報快取寫入（Codex）——是估算", f_not_priced: "未定價：{0}", f_source_unknown: "讀取時尚未記錄 backend 與 profile",
+    f_cache_write_not_reported: "未回報快取寫入（Codex、Muse）——是估算", f_not_priced: "未定價：{0}", f_source_unknown: "讀取時尚未記錄 backend 與 profile",
+    f_estimated: "依文字長度估算——Kiro 不記錄 token 數", f_includes_estimates: "含估算值（Kiro）", f_cost_reported: "金額為 CLI 自行回報（價目表沒有此模型）", estimatedPart: "其中估算：{0}",
     scanning: "掃描中——總數可能還會增加。", updated: "更新於 {0} · 每 10 分鐘讀取一次", since: "自 {0} 起收集", notYet: "尚未收集",
     refresh: "重新整理",
     notMeasured: "未量測", nm_credit_billed: "Kiro 以 credit 計費，不記錄 token", nm_unsupported: "AgEnD 目前還讀不到這個 CLI 的用量", nm_no_data: "尚未讀到任何資料",
     shared: "與 {0} 共用工作目錄，無法分辨各自的 transcript",
-    empty: "還沒有任何紀錄", emptyHint: "用量從 Claude Code 與 Codex 的 transcript 讀取，自 fleet 啟動起計。",
+    empty: "還沒有任何紀錄", emptyHint: "用量從 Claude Code、Codex、Grok、Muse、OpenCode 與 Antigravity 讀取，Kiro 則為估算，自 fleet 啟動起計。",
     blocked: "公開連結上不提供", blockedHint: "只有在設定 → 網頁儀表板裡開啟「透過公開連結提供用量報告」時，公開連結才會提供用量；這個設定要在執行 AgEnD 的那台電腦上、直接開啟的儀表板裡變更。",
     openSettings: "在那台電腦上開啟設定 → 網頁儀表板",
     partialDays: "每日明細從 {0} 起：這段期間更早的日子資料列太多，無法一次送出。上方的各列與總計涵蓋整段期間；趨勢、熱度圖與 CSV 則從 {0} 開始。",
@@ -95,11 +97,11 @@ export function keyText(group, key) {
 const writes = (r) => (r.cacheWrite5m || 0) + (r.cacheWrite1h || 0) + (r.cacheWrite || 0);
 function flagText(f, r) {
   if (f === "not_priced") return tu("f_not_priced", (r.unpriced || []).join(", "));
-  return ["cache_write_not_reported", "source_unknown"].includes(f) ? tu(`f_${f}`) : f;
+  return ["cache_write_not_reported", "source_unknown", "estimated", "includes_estimates", "cost_reported"].includes(f) ? tu(`f_${f}`) : f;
 }
 
 // ── CSV (design §4): the daily rows of this same answer; messages on their own rows (they are per agent, not per model).
-const CSV_COLUMNS = ["date", "zone", "instance", "backend", "model", "tier", "profile", "input", "output", "cache_read", "cache_write_5m", "cache_write_1h", "cache_write", "requests", "messages", "amount", "basis", "flags"];
+const CSV_COLUMNS = ["date", "zone", "instance", "backend", "model", "tier", "profile", "input", "output", "reasoning", "cache_read", "cache_write_5m", "cache_write_1h", "cache_write", "requests", "messages", "amount", "basis", "flags", "estimated"];
 /** One CSV field: quoted when it must be, and never read as a formula by a spreadsheet (=, +, -, @, tab, CR first). */
 export function csvField(v) {
   let s = v === null || v === undefined ? "" : String(v);
@@ -109,11 +111,11 @@ export function csvField(v) {
 export function usageCsv(report) {
   const lines = [CSV_COLUMNS.join(",")];
   for (const d of report.daily || []) {
-    lines.push([d.date, d.zone, d.instance, d.backend, d.model, d.tier, d.profile, d.input, d.output, d.cacheRead, d.cacheWrite5m, d.cacheWrite1h, d.cacheWrite,
-      d.requests, "", d.amount === null ? "" : d.amount.toFixed(6), report.basis, (d.flags || []).join(" ")].map(csvField).join(","));
+    lines.push([d.date, d.zone, d.instance, d.backend, d.model, d.tier, d.profile, d.input, d.output, d.reasoning, d.cacheRead, d.cacheWrite5m, d.cacheWrite1h, d.cacheWrite,
+      d.requests, "", d.amount === null ? "" : d.amount.toFixed(6), report.basis, (d.flags || []).join(" "), d.estimated ? "yes" : "no"].map(csvField).join(","));
   }
   for (const m of report.messagesDaily || []) {
-    lines.push([m.date, report.zone, m.instance, "", "", "", "", "", "", "", "", "", "", "", m.count, "", report.basis, ""].map(csvField).join(","));
+    lines.push([m.date, report.zone, m.instance, "", "", "", "", "", "", "", "", "", "", "", "", m.count, "", report.basis, "", ""].map(csvField).join(","));
   }
   return `${lines.join("\r\n")}\r\n`;
 }
@@ -151,7 +153,7 @@ export function levels(values) {
   return (v) => (!(v > 0) ? 0 : v <= cut[0] ? 1 : v <= cut[1] ? 2 : v <= cut[2] ? 3 : 4);
 }
 
-const tokensOf = (d) => d.input + d.output + d.cacheRead + d.cacheWrite5m + d.cacheWrite1h + d.cacheWrite;
+const tokensOf = (d) => d.input + d.output + (d.reasoning || 0) + d.cacheRead + d.cacheWrite5m + d.cacheWrite1h + d.cacheWrite;
 /**
  * Each day of the answer: its tokens (whether it was used at all), the priced part of its amount, whether part of it is
  * not priced, and its parts by zone (a day folded before the fleet's timezone changed keeps its own zone, §5.3).
@@ -218,7 +220,7 @@ export function thinXLabels(n, slotPx, labelWidthPx) {
 /** The trend's series: the top `TOP` agents by the measure over the range, then "others"; one value per date. */
 export function trendSeries(report, dates) {
   const priced = report.totals && report.totals.amount !== null && report.totals.amount > 0;
-  const measure = (d) => (priced ? d.amount || 0 : d.input + d.output + d.cacheRead + d.cacheWrite5m + d.cacheWrite1h + d.cacheWrite);
+  const measure = (d) => (priced ? d.amount || 0 : tokensOf(d));
   const byAgent = new Map();
   for (const d of report.daily || []) byAgent.set(d.instance, (byAgent.get(d.instance) || 0) + measure(d));
   const ranked = [...byAgent.entries()].filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
@@ -327,6 +329,7 @@ function Row({ r, group, max, measure }) {
     <td data-label=${tu("amount")} class=${`num${r.amount === null ? " muted" : ""}`}>${amountText(r)}</td>
     <td data-label=${tu("input")} class="num">${tokens(r.input)}</td>
     <td data-label=${tu("output")} class="num">${tokens(r.output)}</td>
+    <td data-label=${tu("reasoning")} class="num">${r.reasoningReported === false ? "—" : tokens(r.reasoning || 0)}</td>
     <td data-label=${tu("read")} class="num">${tokens(r.cacheRead)}</td>
     <td data-label=${tu("write")} class="num">${r.flags.includes("cache_write_not_reported") && writes(r) === 0 ? "—" : tokens(writes(r))}</td>
     <td data-label=${tu("total")} class="num">${tokens(r.total)}</td>
@@ -379,13 +382,14 @@ export function UsageReport({ report, choice, setChoice, refresh, fetchedAt }) {
       ${report.scanning.active && (!report.scanning.caughtUp || report.scanning.pendingBytes > 0) ? html` <span class="us-scan" role="status">${tu("scanning")} <button type="button" class="btn btn-sm" onClick=${refresh}>${tu("refresh")}</button></span>` : null}</p>
     ${empty ? html`<${Empty} icon="chart" title=${tu("empty")} hint=${tu("emptyHint")} />` : html`
       <dl class="us-totals card">
-        <div class="ch-metric"><dt>${tu("amount")}</dt><dd>${amountText(report.totals)}</dd></div>
+        <div class="ch-metric"><dt>${tu("amount")}</dt><dd>${amountText(report.totals)}${report.totals.estimated
+          ? html`<span class="us-est">${report.totals.amountEstimated !== null && report.totals.amountEstimated !== undefined ? tu("estimatedPart", money(report.totals.amountEstimated)) : tu("f_includes_estimates")}</span>` : null}</dd></div>
         <div class="ch-metric"><dt>${tu("total")}</dt><dd>${tokens(report.totals.total)}</dd></div>
         <div class="ch-metric"><dt>${tu("requests")}</dt><dd>${n(report.totals.requests)}</dd></div>
         <div class="ch-metric"><dt>${tu("messages")}</dt><dd>${report.totals.messages === null ? "—" : n(report.totals.messages)}</dd></div>
       </dl>
       ${rows.length ? html`<table class="us-table"><thead><tr><th scope="col">${tu(`g_${group}`)}</th><th scope="col" class="num">${tu("amount")}</th>
-        <th scope="col" class="num">${tu("input")}</th><th scope="col" class="num">${tu("output")}</th><th scope="col" class="num">${tu("read")}</th><th scope="col" class="num">${tu("write")}</th>
+        <th scope="col" class="num">${tu("input")}</th><th scope="col" class="num">${tu("output")}</th><th scope="col" class="num">${tu("reasoning")}</th><th scope="col" class="num">${tu("read")}</th><th scope="col" class="num">${tu("write")}</th>
         <th scope="col" class="num">${tu("total")}</th><th scope="col" class="num">${tu("requests")}</th><th scope="col" class="num">${tu("messages")}</th></tr></thead>
         <tbody>${rows.map((r) => html`<${Row} key=${r.key} r=${r} group=${group} max=${max} measure=${measure} />`)}</tbody></table>`
         : html`<p class="note">${tu("noRows")}</p>`}

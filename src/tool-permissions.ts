@@ -61,7 +61,7 @@ const WORKER: readonly string[] = [
   "set_web_ambient", "clear_web_ambient",
   // Mods (#1629 r4-5b): its own look as a file, and proposing one for a person — never importing.
   "export_web_mod", "propose_web_mod",
-  // Its own character in the Office view (#2578): no target; off until a person switches dashboard.office on.
+  // Its own character in the Office view (#2578): no target; off until a person switches office_access on.
   "office_view", "office_set",
   "upload_web_effect", "list_web_effects", "preview_web_effect", "profile_web_effect", "apply_web_effect", "remove_web_effect", "delete_web_effect",
   // Its own schedules. Present here, but not a free hand: scheduleOpRefusal
@@ -84,6 +84,8 @@ const ORCHESTRATION: readonly string[] = [
   "deploy_template", "teardown_deployment",
   "create_team", "delete_team", "update_team",
   "update_fleet_defaults", "update_instance_config",
+  // #2598 B2: asks only; a fleet admin's Confirm in General makes the move.
+  "migrate_kiro_instance",
   // Changing a decision somebody else recorded; `post_decision` adds, and stays.
   "update_decision",
   // #2056: Settings → Web appearance for the user (General has these too; a worker changes only its own theme).

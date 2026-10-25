@@ -10,7 +10,7 @@
 
 - 要限制 fleet 聊天存取，請明確設定 `access.mode: locked`，並縮小 `allowed_users` 名單。**整段 `access` 省略時，執行時會回退到 open。**
 - 已持久化的存取模式優先於 YAML；持久化與 YAML 的使用者名單取聯集。只從 YAML 刪除使用者，不一定會撤銷權限。見[設定參考](configuration.zh-TW.md#channelaccess)。
-- Fleet 管理員必須明列在目標 instance 所屬 adapter 的 YAML `allowed_users`（沒有目標時為呼叫來源的 adapter） 中。Open 模式或配對核准本身不會授予這個身分。ClassicBot 有自己的管理員與聊天允許名單；見[權限表](permissions.md)。
+- Fleet 管理員必須明列在目標 instance 所屬 adapter 的 YAML `allowed_users`（沒有目標時為呼叫來源的 adapter）中。Open 模式或配對核准本身不會授予這個身分。ClassicBot 有自己的管理員與聊天允許名單；見[權限表](permissions.md)。
 - 啟用帳號兩步驟驗證並保護 bot token。伺服器會對 AgEnD 操作執行 `tool_set` 限制，但這不限制後端自己的 shell、檔案或網路工具。
 
 ## 繞過權限 (`skipPermissions`)
@@ -128,7 +128,8 @@ Daemon 透過 `~/.agend/instances/<name>/channel.sock` 與 AgEnD MCP bridge 通�
 
 這個儲存庫使用的 GitHub Actions 都釘在完整 commit SHA，移動 tag 不會改到
 CI 或 npm 發布 workflow 實際執行的程式。任何遠端 `uses:` 仍是 tag 時，CI
-會讓 merge gate 失敗。見[CI 覆蓋 — GitHub Actions 釘選](ci.zh-TW.md#github-actions-釘選2528)。
+會讓 merge gate 失敗。Dependabot 每週的 `github-actions` 更新會同時改寫
+SHA 與後面的 tag 註解（patch／minor 合併；每個 major 單獨開 PR）。見[CI 覆蓋 — GitHub Actions 釘選](ci.zh-TW.md#github-actions-釘選2528)。
 
 CI 會驗證根目錄與 `website/` 安裝樹的 npm registry 簽章（`npm audit
 signatures --json`）。簽章無效會讓 job 失敗；只有缺少簽章時會被報告。見[CI 覆蓋](ci.zh-TW.md#npm-registry-簽章2528)。

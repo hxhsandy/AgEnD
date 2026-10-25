@@ -13,14 +13,19 @@
  * already counted, and counting them twice would be worse than missing a rewrite. The inode is checked on the
  * descriptor actually read, not only on the listing. Two instances whose transcripts land in the same place (the same
  * working directory: one Claude project, one Codex cwd) cannot be told apart: neither is analysed, both say so.
+ * Kiro (#2122 §10): its stores hold no token counts, so its turns are estimated (kiro-usage.ts) by a scan on a worker
+ * thread (kiro-usage-run.ts) — for the usage report only; the cache analysis leaves Kiro out.
  */
 import { mkdir, open, readdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { scanJsonl } from "./cache-scan.js";
-import { addTurn, claudeLine, codexLine, emptyLedger, KEEP_DAYS, pruneLedger, reviveLedger, type FileCursor, type Ledger, type TranscriptKind } from "./cache-ledger.js";
+import { addTurn, claudeLine, codexLine, emptyLedger, grokLine, museLine, KEEP_DAYS, pruneLedger, reviveLedger, type FileCursor, type Ledger, type TranscriptKind } from "./cache-ledger.js";
 import { analyzeLedger, type InstanceAnalysis } from "./cache-analysis.js";
 import { PRICES_CHECKED, PRICE_SOURCES } from "./cache-prices.js";
 import { addCoverage, foldHours, pruneDays, readDays, writeDays, type UsageDays } from "./usage-rollup.js";
+import type { KiroScanInput, KiroScanOutput } from "./kiro-usage-scan.js";
+import type { OpencodeScanInput, OpencodeScanOutput } from "./opencode-usage-scan.js";
+import { antigravityUsageSupported, type AntigravityScanInput, type AntigravityScanOutput } from "./antigravity-usage-scan.js";
 
 /** An instance to analyse: a fleet.yaml instance, or a ClassicBot room (its workspace under the AgEnD home). */
 export interface CacheInstance {
@@ -32,6 +37,8 @@ export interface CacheInstance {
    * without one); "unrecorded" for codex (a rollout does not say which login wrote it).
    */
   profile?: string;
+  /** #2122: a Kiro instance's classic store — its credential profile's `data.sqlite3`; absent = `kiroDbPath()`. */
+  kiroDbPath?: string;
 }
 
 export interface CacheServiceOptions {
@@ -39,6 +46,26 @@ export interface CacheServiceOptions {
   claudeProjectsDir(): string;
   claudeKey(workingDirectory: string): string;
   codexSessionsDir(): string;
+  /** #2122 §10 step 3: grok's sessions, `<dir>/<encodeURIComponent(cwd)>/<session>/updates.jsonl`; absent: grok is not read. */
+  grokSessionsDir?(): string;
+  /**
+   * #2122 §10 step 4: muse's sessions, `<dir>/<YYYY>/<MM>/<DD>/<id>/session.jsonl` and its subagents'
+   * `<id>/subagent/<sub>/session.jsonl`; absent: muse is not read.
+   */
+  museSessionsDir?(): string;
+  /** #2122 §10 step 5: OpenCode's database (`<XDG_DATA_HOME>/opencode/opencode.db`); absent: OpenCode is not read. */
+  opencodeDbPath?(): string;
+  /** One OpenCode scan (default: on a worker thread, kiro-usage-run.ts; tests run it in-process). */
+  opencodeScan?(input: OpencodeScanInput): Promise<OpencodeScanOutput>;
+  /** #2122 §10 step 6: Antigravity's conversation databases' directory; absent: Antigravity is not read. */
+  antigravityDir?(): string;
+  /**
+   * agy's version as AgEnD's cached CLI probe recorded it (never a probe from here); null: not known yet. Only a version
+   * the field map is checked on is read (antigravityUsageSupported).
+   */
+  antigravityVersion?(): string | null;
+  /** One Antigravity scan (default: on a worker thread, kiro-usage-run.ts; tests run it in-process). */
+  antigravityScan?(input: AntigravityScanInput): Promise<AntigravityScanOutput>;
   /** Rollout files with their mtimes (the shared rollout index). */
   listRollouts(root: string): Array<{ path: string; mtimeMs: number }>;
   /** #2122: how much the last listing of `root` could not read (rollout-index.ts `unreadable`); absent: 0. */
@@ -54,6 +81,11 @@ export interface CacheServiceOptions {
   monotonic?: () => number;
   /** #2122: the zone days are folded in (defaults.scheduler.default_timezone, else the host's). */
   zone?: () => string;
+  /** #2122 §10: Kiro's shared classic store and KIRO_HOME; absent: Kiro instances are not read. */
+  kiroDbPath?(): string;
+  kiroHome?(): string;
+  /** One bounded Kiro scan (default: on a worker thread, kiro-usage-run.ts; tests run it in-process). */
+  kiroScan?(input: KiroScanInput): Promise<KiroScanOutput>;
 }
 
 export type CacheWindow = "24h" | "7d" | "30d";
@@ -88,7 +120,10 @@ export interface CacheReport {
 
 const DAY = 86_400_000;
 const META_MAX_BYTES = 256 * 1024;   // session_meta carries the instructions (~22 KB in real rollouts)
-const kindOf = (backend: string): TranscriptKind | null => (backend === "claude-code" ? "claude" : backend === "codex" ? "codex" : null);
+const kindOf = (backend: string): TranscriptKind | null =>
+  (backend === "claude-code" ? "claude" : backend === "codex" ? "codex" : backend === "kiro-cli" ? "kiro" : backend === "grok" ? "grok" : backend === "muse" ? "muse" : backend === "opencode" ? "opencode" : backend === "antigravity" ? "antigravity" : null);
+/** The readers the cache analysis covers; the others are in the usage report only. */
+const analysed = (kind: TranscriptKind | null): kind is "claude" | "codex" => kind === "claude" || kind === "codex";
 const sleep = (ms: number): Promise<void> => new Promise((r) => { const h = setTimeout(r, ms); h.unref?.(); });
 const dict = <T>(): Record<string, T> => Object.create(null) as Record<string, T>;
 /** An error that means the path is not there (never was, or went): a real absence, not a failure to read it. */
@@ -185,6 +220,11 @@ export class CacheService {
     }
   }
 
+  /** Whether this service is told where that reader's stores are (Kiro and Grok are optional). */
+  private reads(kind: TranscriptKind): boolean {
+    return kind === "kiro" ? !!this.o.kiroDbPath : kind === "grok" ? !!this.o.grokSessionsDir : kind === "muse" ? !!this.o.museSessionsDir
+      : kind === "opencode" ? !!this.o.opencodeDbPath : kind === "antigravity" ? !!this.o.antigravityDir && antigravityUsageSupported(this.o.antigravityVersion?.() ?? null) : true;
+  }
   private zone(): string { return this.o.zone?.() || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; }
   private daysPath(inst: CacheInstance): string { return join(dirname(inst.ledgerPath), "usage-days.json"); }
   /** #2122: an instance's rollup, read once. */
@@ -223,7 +263,8 @@ export class CacheService {
     const insts = this.o.instances();
     const shared = await this.shared(insts);
     for (const inst of insts) {
-      if (!kindOf(inst.backend) || shared.has(inst.name) || this.unread.has(inst.name)) continue;
+      const kind = kindOf(inst.backend);
+      if (!kind || !this.reads(kind) || shared.has(inst.name) || this.unread.has(inst.name)) continue;
       const next: UsageDays = structuredClone(await this.rollupFor(inst));
       addCoverage(next, now - KEEP_DAYS * DAY, now);
       if (await writeDays(this.daysPath(inst), next)) this.rollups.set(inst.name, next);
@@ -250,7 +291,7 @@ export class CacheService {
     for (const i of insts) {
       const kind = kindOf(i.backend);
       if (!kind) continue;
-      const keys = kind === "claude" ? [`claude|${this.o.claudeKey(i.workingDirectory)}`] : (await cwdKeys(i.workingDirectory)).map((k) => `codex|${k}`);
+      const keys = kind === "claude" ? [`claude|${this.o.claudeKey(i.workingDirectory)}`] : (await cwdKeys(i.workingDirectory)).map((k) => `${kind}|${k}`);
       for (const k of keys) groups.set(k, [...(groups.get(k) ?? []), i.name]);
     }
     const out = new Map<string, string[]>();
@@ -280,14 +321,25 @@ export class CacheService {
     const insts = this.o.instances();
     const shared = await this.shared(insts);
     const codex = await this.codexFilesByInstance(insts.filter((i) => !shared.has(i.name)), cutoff);
+    const muse = await this.museFilesByInstance(insts.filter((i) => kindOf(i.backend) === "muse" && !shared.has(i.name)), cutoff);
+    const kiro = await this.kiroPass(insts.filter((i) => kindOf(i.backend) === "kiro" && !shared.has(i.name)), cutoff, budget);
+    budget -= kiro.read;
+    await this.opencodePass(insts.filter((i) => kindOf(i.backend) === "opencode" && !shared.has(i.name)), cutoff);
+    await this.antigravityPass(insts.filter((i) => kindOf(i.backend) === "antigravity" && !shared.has(i.name)), cutoff);
+    behindBytes += kiro.behindBytes; behindFiles += kiro.behindSources;
     for (const inst of insts) {
       if (this.stopped) break;
       const kind = kindOf(inst.backend);
       if (!kind || shared.has(inst.name)) { await this.keepHistory(inst, cutoff); continue; }
       const ledger = await this.ledgerFor(inst);
-      const files = kind === "claude" ? await this.claudeFiles(inst, cutoff) : codex.get(inst.name) ?? [];
+      if (kind === "kiro" || kind === "opencode" || kind === "antigravity") { pruneLedger(ledger, cutoff, await this.foldBeforePrune(inst, ledger, cutoff)); continue; }
+      const files = kind === "claude" ? await this.claudeFiles(inst, cutoff) : kind === "grok" ? await this.grokFiles(inst, cutoff)
+        : kind === "muse" ? muse.get(inst.name) ?? [] : codex.get(inst.name) ?? [];
+      // A listing that could not read everything is no inventory: a cursor it missed stays, or the file would be counted
+      // again from its start once it is listed (Prism #2605). An instance whose store stays unreadable keeps its cursors
+      // until it is readable again — bounded by its own files.
       const listed = new Set(files.map((f) => f.path));
-      for (const path of Object.keys(ledger.files)) if (!listed.has(path)) { delete ledger.files[path]; this.dirty.add(inst.name); }
+      if (!this.unread.has(inst.name)) for (const path of Object.keys(ledger.files)) if (!listed.has(path)) { delete ledger.files[path]; this.dirty.add(inst.name); }
       for (const f of files) {
         let cur = ledger.files[f.path];
         if (!cur) { cur = ledger.files[f.path] = { kind, ino: f.ino, offset: 0 }; this.dirty.add(inst.name); }
@@ -325,6 +377,137 @@ export class CacheService {
     if (Object.keys(ledger.hours).length !== before) this.dirty.add(inst.name);
   }
 
+  /** TUI session file → its signature and cwd, as the last Kiro scan saw them (kiro-usage-scan.ts). */
+  private kiroTuiIndex: KiroScanInput["tuiIndex"] = Object.create(null);
+  /**
+   * #2122 §10: one bounded scan of Kiro's stores for these instances (on a worker thread), its estimated turns added to
+   * their ledgers. A scan that fails or times out reads nothing and covers no one; the next pass tries again from the
+   * same cursors.
+   */
+  private async kiroPass(insts: CacheInstance[], cutoff: number, budget: number): Promise<{ read: number; behindBytes: number; behindSources: number }> {
+    const none = { read: 0, behindBytes: 0, behindSources: 0 };
+    if (!insts.length) return none;
+    const dbPath = this.o.kiroDbPath?.(), home = this.o.kiroHome?.();
+    if (!dbPath || !home) return none;
+    const ledgers = new Map<string, Ledger>();
+    const input: KiroScanInput = { kiroHome: home, cutoff, maxBytes: Math.max(budget, 1), tuiIndex: this.kiroTuiIndex, instances: [] };
+    for (const inst of insts) {
+      const ledger = await this.ledgerFor(inst);
+      ledgers.set(inst.name, ledger);
+      const cursors: KiroScanInput["instances"][number]["cursors"] = Object.create(null);
+      for (const [k, f] of Object.entries(ledger.files)) if (f.kind === "kiro" && f.sig !== undefined) cursors[k] = { sig: f.sig, after: f.after ?? cutoff };
+      input.instances.push({ name: inst.name, cwds: await cwdKeys(inst.workingDirectory), dbPath: inst.kiroDbPath ?? dbPath, cursors });
+    }
+    let out: KiroScanOutput;
+    try {
+      out = await (this.o.kiroScan ?? (async (i: KiroScanInput) => (await import("./kiro-usage-run.js")).runKiroUsageScan(i)))(input);
+    } catch (err) {
+      this.o.log?.("warn", "usage: the Kiro scan failed; it is tried again next pass", { err: String(err) });
+      for (const i of insts) this.unread.add(i.name);
+      return none;
+    }
+    this.kiroTuiIndex = out.tuiIndex;
+    const byName = new Map(insts.map((i) => [i.name, i]));
+    for (const r of out.instances) {
+      const inst = byName.get(r.name), ledger = ledgers.get(r.name);
+      if (!inst || !ledger) continue;
+      // A scan that could not read everything is no inventory: its cursors stay (Prism #2605: dropping them would count a
+      // source again from the start once it is readable).
+      if (r.failed) this.unread.add(r.name);
+      else {
+        const live = new Set(r.live);
+        for (const [k, f] of Object.entries(ledger.files)) if (f.kind === "kiro" && !live.has(k)) { delete ledger.files[k]; this.dirty.add(r.name); }
+      }
+      for (const u of r.updates) {
+        const cur: FileCursor = ledger.files[u.key] ??= { kind: "kiro", ino: 0, offset: 0 };
+        for (const t of [...u.turns].sort((a, b) => a.t - b.t)) addTurn(ledger, cur, t, cutoff, inst.profile ?? "default");
+        cur.sig = u.sig; cur.after = u.after;
+        this.dirty.add(r.name);
+      }
+    }
+    return { read: out.readBytes, behindBytes: out.behindBytes, behindSources: out.behindSources };
+  }
+
+  /**
+   * #2122 §10 step 5: one OpenCode scan for these instances (on a worker thread), its finished messages added to their
+   * ledgers. A failed scan reads nothing and covers no one; the cursor (`opencode:db`) stays where it was.
+   */
+  private async opencodePass(insts: CacheInstance[], cutoff: number): Promise<void> {
+    const dbPath = this.o.opencodeDbPath?.();
+    if (!insts.length || !dbPath) return;
+    const ledgers = new Map<string, Ledger>();
+    const input: OpencodeScanInput = { dbPath, cutoff, instances: [] };
+    for (const inst of insts) {
+      const ledger = await this.ledgerFor(inst);
+      ledgers.set(inst.name, ledger);
+      const c = ledger.files["opencode:db"];
+      input.instances.push({ name: inst.name, cwds: await cwdKeys(inst.workingDirectory), cursor: c ? { after: c.after ?? cutoff, ids: c.ids ?? [] } : null });
+    }
+    let out: OpencodeScanOutput;
+    try {
+      out = await (this.o.opencodeScan ?? (async (i: OpencodeScanInput) => (await import("./kiro-usage-run.js")).runOpencodeUsageScan(i)))(input);
+    } catch (err) {
+      this.o.log?.("warn", "usage: the OpenCode scan failed; it is tried again next pass", { err: String(err) });
+      for (const i of insts) this.unread.add(i.name);
+      return;
+    }
+    const byName = new Map(insts.map((i) => [i.name, i]));
+    for (const r of out.instances) {
+      const inst = byName.get(r.name), ledger = ledgers.get(r.name);
+      if (!inst || !ledger) continue;
+      if (r.failed) { this.unread.add(r.name); continue; }
+      const cur: FileCursor = ledger.files["opencode:db"] ??= { kind: "opencode", ino: 0, offset: 0 };
+      for (const t of [...r.turns].sort((a, b) => a.t - b.t)) addTurn(ledger, cur, t, cutoff, inst.profile ?? "default");
+      if (r.turns.length || cur.after !== r.cursor.after) this.dirty.add(r.name);
+      cur.after = r.cursor.after; cur.ids = r.cursor.ids;
+    }
+  }
+
+  /** Antigravity database → its signature and workspace, as the last scan saw them (antigravity-usage-scan.ts). */
+  private antigravityIndex: AntigravityScanInput["index"] = Object.create(null);
+  /**
+   * #2122 §10 step 6: one Antigravity scan for these instances (on a worker thread), its generations added to their
+   * ledgers. As the Kiro pass: a failed scan reads nothing and covers no one, and keeps every cursor.
+   */
+  private async antigravityPass(insts: CacheInstance[], cutoff: number): Promise<void> {
+    const dir = this.o.antigravityDir?.();
+    if (!insts.length || !dir || !this.reads("antigravity")) return;
+    const ledgers = new Map<string, Ledger>();
+    const input: AntigravityScanInput = { dir, cutoff, index: this.antigravityIndex, instances: [] };
+    for (const inst of insts) {
+      const ledger = await this.ledgerFor(inst);
+      ledgers.set(inst.name, ledger);
+      const cursors: AntigravityScanInput["instances"][number]["cursors"] = Object.create(null);
+      for (const [k, f] of Object.entries(ledger.files)) if (f.kind === "antigravity" && f.sig !== undefined) cursors[k] = { sig: f.sig, after: f.after ?? -1 };
+      input.instances.push({ name: inst.name, cwds: await cwdKeys(inst.workingDirectory), cursors });
+    }
+    let out: AntigravityScanOutput;
+    try {
+      out = await (this.o.antigravityScan ?? (async (i: AntigravityScanInput) => (await import("./kiro-usage-run.js")).runAntigravityUsageScan(i)))(input);
+    } catch (err) {
+      this.o.log?.("warn", "usage: the Antigravity scan failed; it is tried again next pass", { err: String(err) });
+      for (const i of insts) this.unread.add(i.name);
+      return;
+    }
+    this.antigravityIndex = out.index;
+    const byName = new Map(insts.map((i) => [i.name, i]));
+    for (const r of out.instances) {
+      const inst = byName.get(r.name), ledger = ledgers.get(r.name);
+      if (!inst || !ledger) continue;
+      if (r.failed) this.unread.add(r.name);
+      else {
+        const live = new Set(r.live);
+        for (const [k, f] of Object.entries(ledger.files)) if (f.kind === "antigravity" && !live.has(k)) { delete ledger.files[k]; this.dirty.add(r.name); }
+      }
+      for (const u of r.updates) {
+        const cur: FileCursor = ledger.files[u.key] ??= { kind: "antigravity", ino: 0, offset: 0 };
+        for (const t of [...u.turns].sort((a, b) => a.t - b.t)) addTurn(ledger, cur, t, cutoff, inst.profile ?? "default");
+        cur.sig = u.sig; cur.after = u.after;
+        this.dirty.add(r.name);
+      }
+    }
+  }
+
   /** A file that is not the one the cursor read (another inode, or shorter): keep the session's end, start at its end. */
   private followFromEnd(ledger: Ledger, path: string, cur: FileCursor, ino: number, size: number): FileCursor {
     const next: FileCursor = { kind: cur.kind, ino, offset: size };
@@ -336,7 +519,8 @@ export class CacheService {
   private async read(ledger: Ledger, cur: FileCursor, path: string, budget: number, cutoff: number, profile?: string): Promise<{ read: number; behind: number; failed?: true }> {
     try {
       const res = await scanJsonl(path, cur.offset, { maxBytes: budget, ino: cur.ino }, (line) => {
-        const turn = cur.kind === "claude" ? claudeLine(line, cur) : codexLine(line, cur);
+        if (cur.kind === "grok") { for (const t of grokLine(line, cur)) addTurn(ledger, cur, t, cutoff, profile); return; }
+        const turn = cur.kind === "claude" ? claudeLine(line, cur) : cur.kind === "muse" ? museLine(line, cur) : codexLine(line, cur);
         if (turn) addTurn(ledger, cur, turn, cutoff, profile);
       });
       if (res.replaced) { this.followFromEnd(ledger, path, cur, res.ino, res.size); return { read: 0, behind: 0 }; }
@@ -365,6 +549,75 @@ export class CacheService {
       try { const st = await stat(path); if (st.isFile() && st.mtimeMs >= cutoff) out.push({ path, ino: st.ino, size: st.size }); }
       catch (err) { if (!gone(err)) this.unread.add(inst.name); }
     }
+    return out;
+  }
+
+  /** #2122 §10 step 3: a grok instance's sessions' `updates.jsonl` of the last KEEP_DAYS (its directory is its cwd). */
+  private async grokFiles(inst: CacheInstance, cutoff: number): Promise<Array<{ path: string; ino: number; size: number }>> {
+    const root = this.o.grokSessionsDir?.();
+    if (!root) return [];
+    const out: Array<{ path: string; ino: number; size: number }> = [];
+    for (const cwd of await cwdKeys(inst.workingDirectory)) {
+      const dir = join(root, encodeURIComponent(cwd));
+      let names: string[];
+      // Sessions are directories; grok also keeps plain files there (prompt_history.jsonl), which are not sessions.
+      try { names = (await readdir(dir, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name); }
+      catch (err) { if (!gone(err)) this.unread.add(inst.name); continue; }
+      for (const n of names) {
+        const path = join(dir, n, "updates.jsonl");
+        try { const st = await stat(path); if (st.isFile() && st.mtimeMs >= cutoff) out.push({ path, ino: st.ino, size: st.size }); }
+        catch (err) { if (!gone(err)) this.unread.add(inst.name); }
+      }
+    }
+    return out;
+  }
+
+  /** Muse session → the inode its head was read from and the workspace it names (null: none in its head). */
+  private readonly museWorkspace = new Map<string, { ino: number; ws: string | null }>();
+  /**
+   * #2122 §10 step 4: Muse sessions (and their subagents') changed in the last KEEP_DAYS, by the instance whose working
+   * directory the session's `workspace_root` names. A main session records it in its first lines (read once per file,
+   * at most META_MAX_BYTES); a subagent session is its parent's.
+   */
+  private async museFilesByInstance(insts: CacheInstance[], cutoff: number): Promise<Map<string, Array<{ path: string; ino: number; size: number }>>> {
+    const out = new Map<string, Array<{ path: string; ino: number; size: number }>>();
+    const root = this.o.museSessionsDir?.();
+    if (!insts.length || !root) return out;
+    const byCwd = new Map<string, string>();
+    for (const i of insts) for (const k of await cwdKeys(i.workingDirectory)) byCwd.set(k, i.name);
+    const unlisted = (): void => { for (const i of insts) this.unread.add(i.name); };
+    // Directories only, and never muse's own dot-entries (`.msp-view-v1/`, lock and marker files): a plain file there is no
+    // session, and listing through it would fail every pass (Fable #2606).
+    const list = async (dir: string): Promise<string[]> => {
+      try { return (await readdir(dir, { withFileTypes: true })).filter((e) => e.isDirectory() && !e.name.startsWith(".")).map((e) => e.name); }
+      catch (err) { if (!gone(err)) unlisted(); return []; }
+    };
+    const live = new Set<string>();
+    for (const y of await list(root)) for (const m of await list(join(root, y))) for (const d of await list(join(root, y, m))) {
+      for (const id of await list(join(root, y, m, d))) {
+        const dir = join(root, y, m, d, id), main = join(dir, "session.jsonl");
+        const files = [main, ...(await list(join(dir, "subagent"))).map((s) => join(dir, "subagent", s, "session.jsonl"))];
+        const stats: Array<{ path: string; ino: number; size: number }> = [];
+        for (const path of files) {
+          try { const st = await stat(path); if (st.isFile() && st.mtimeMs >= cutoff) stats.push({ path, ino: st.ino, size: st.size }); }
+          catch (err) { if (!gone(err)) unlisted(); }
+        }
+        if (!stats.length) continue;
+        live.add(main);
+        let st;
+        try { st = await stat(main); } catch (err) { if (!gone(err)) unlisted(); continue; }
+        let meta = this.museWorkspace.get(main);
+        if (!meta || meta.ino !== st.ino || meta.ws === null) {
+          const head = await museHead(main);
+          if (head === "unreadable") { unlisted(); continue; }
+          meta = { ino: st.ino, ws: head };
+          this.museWorkspace.set(main, meta);
+        }
+        const name = meta.ws ? byCwd.get(resolve(meta.ws)) : undefined;
+        if (name) out.set(name, [...(out.get(name) ?? []), ...stats]);
+      }
+    }
+    for (const p of this.museWorkspace.keys()) if (!live.has(p)) this.museWorkspace.delete(p);
     return out;
   }
 
@@ -466,7 +719,7 @@ export class CacheService {
       // `status` is about collecting now; what it measured before (another backend, a directory it did not share yet)
       // is in `ledger` and `days` either way.
       const kind = kindOf(inst.backend), others = shared.get(inst.name);
-      if (!kind) out.push({ inst, status: inst.backend.startsWith("kiro") ? "credit_billed" : "unsupported", ledger, days });
+      if (!kind || !this.reads(kind)) out.push({ inst, status: inst.backend.startsWith("kiro") ? "credit_billed" : "unsupported", ledger, days });
       else if (others) out.push({ inst, status: "shared", with: others, ledger, days });
       else out.push({ inst, status: "ok", ledger, days });
     }
@@ -484,7 +737,8 @@ export class CacheService {
     const shared = await this.shared(insts);
     for (const inst of insts) {
       const kind = kindOf(inst.backend);
-      if (!kind) { instances.push({ name: inst.name, backend: inst.backend, status: inst.backend.startsWith("kiro") ? "credit_billed" : "unsupported" }); continue; }
+      // Kiro is in the usage report (estimated), not in the cache analysis: it records no cache use to analyse.
+      if (!analysed(kind)) { instances.push({ name: inst.name, backend: inst.backend, status: inst.backend.startsWith("kiro") ? "credit_billed" : "unsupported" }); continue; }
       const others = shared.get(inst.name);
       if (others) { instances.push({ name: inst.name, backend: inst.backend, status: "shared", with: others }); continue; }
       const ledger = await this.ledgerFor(inst);
@@ -527,6 +781,32 @@ export async function rolloutMeta(path: string): Promise<{ ino: number; cwd: str
       const d = JSON.parse(buf.toString("utf8", 0, nl)) as { type?: unknown; payload?: { cwd?: unknown } };
       return { ino, cwd: d.type === "session_meta" && typeof d.payload?.cwd === "string" ? d.payload.cwd : null };
     } catch { return { ino, cwd: null }; }
+  } catch (err) {
+    return gone(err) ? null : "unreadable";
+  } finally {
+    await fh?.close().catch(() => {});
+  }
+}
+
+/**
+ * #2122 §10 step 4: the workspace a Muse session's first lines name (`payload.record.workspace_root`, in its
+ * `runtime.session.metadata` record), read with one bounded read; null: none there (yet); "unreadable": there and not
+ * readable.
+ */
+export async function museHead(path: string): Promise<string | null | "unreadable"> {
+  let fh;
+  try {
+    fh = await open(path, "r");
+    const buf = Buffer.alloc(META_MAX_BYTES);
+    const { bytesRead } = await fh.read(buf, 0, META_MAX_BYTES, 0);
+    for (const line of buf.toString("utf8", 0, bytesRead).split("\n")) {
+      if (line.indexOf("workspace_root") === -1) continue;
+      try {
+        const ws = (JSON.parse(line) as { payload?: { record?: { workspace_root?: unknown } } }).payload?.record?.workspace_root;
+        if (typeof ws === "string" && ws) return ws;
+      } catch { /* the last, cut line */ }
+    }
+    return null;
   } catch (err) {
     return gone(err) ? null : "unreadable";
   } finally {

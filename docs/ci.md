@@ -17,10 +17,37 @@ the test steps and supported Node/npm versions stay the same.
 
 The CI workflow still runs CHANGELOG guards, the GitHub Actions SHA-pin guard,
 typecheck/build, four unit shards, integration tests and the Node 20 preinstall
-rollback smoke. Only a PR that changes nothing but `changes/` fragments skips
-typecheck/build and the tests (the CHANGELOG guards and the pin guard still
-check it); a change under `docs/` or to a root `*.md` runs everything, because
-tests read those files (#1932). macOS is included on all `v*` tags, including prereleases.
+rollback smoke. On a pull request, `detect-changes` classifies the diff against
+the merge-base (`scripts/ci/detect-changes.sh`) and skips the heavy steps the
+change cannot affect. The jobs themselves always run and report success, so the
+merge gate never sees `skipped` (a job-level skip on a matrix cell would leave
+that required name pending). An unreadable or empty diff, and every non-PR
+event (push to main, tags, schedule, `workflow_dispatch`), run the full suite
+(fail closed). CodeQL is unchanged (GitHub default setup).
+
+- **text-only** — only `docs/**`, `changes/**`, root `*.md`, and
+  `website/src/content/**`. CHANGELOG guards, the pin guard, Gitleaks, and the
+  tests in `scripts/ci/docs-reading-tests.txt` run. The four shards,
+  integration, typecheck/build and install-smoke skip their heavy steps. A
+  test that reads `docs/`, a root README, or website content pages and is
+  missing from that list fails `tests/docs-reading-tests-list.test.ts`. Any
+  `src/`, `tests/`, `scripts/`, workflow, package or lockfile path means it is
+  not text-only.
+- **packaging** — `package.json`, a lockfile, `launcher/`,
+  install/update/service code and scripts, any `scripts/**` path, and any
+  `.github/**` path. `install-smoke` and the Node 20 rollback smoke run their
+  real steps.
+- **deps** — `package.json` or a lockfile (root or `website/`), or any
+  `.github/**` path. `npm-audit-signatures` and `dependency-review` run their
+  real step.
+- **src** — any `src/**`, `scripts/**`, or `.github/**` path.
+  `data-downgrade` runs its real step.
+
+A change to a gated job's own workflow, action or scripts turns that job on:
+`.github/**` runs the full suite (packaging, deps and src true, text-only
+false). `scripts/**` sets src and packaging.
+
+macOS is included on all `v*` tags, including prereleases.
 Weekly CI runs Monday at 03:17 UTC; the npm proof runs at 03:37 UTC. Weekly
 failures need investigation but are not a prerequisite for a PR or branch push.
 
@@ -92,24 +119,32 @@ Every remote `uses:` in `.github/workflows` and `.github/actions` is a
 ```
 
 A local composite stays `./.github/actions/…`; its own remote `uses:` are
-pinned too. Dependabot's `github-actions` ecosystem (`.github/dependabot.yml`,
-weekly) updates the SHA and the comment together: patch and minor share one
-PR; each major is its own PR so a Node-runtime or artifact-protocol bump is
-reviewed alone.
-
-The `actions-pinned` job in `ci.yml` runs `npm ci --ignore-scripts` then
-`scripts/ci/assert-actions-pinned.mjs` on every event, including a docs-only
-PR. The guard parses YAML with the lockfile's `js-yaml@4.3.2`
-(`https://registry.npmjs.org/js-yaml/-/js-yaml-4.3.2.tgz`, integrity
-`sha512-SFNOvSJ+Dgf/9An904Yx+CgSlIPCkIpao4qo51lpee25TIRejdH3rhR4EZMGoNx3/TP3O+wzWuiTFl4sqbltzA==`).
+pinned too. A floating tag (`@v4`, `@v4.4.0`, `@main`) or a short SHA fails
+the `actions-pinned` job in `ci.yml`: that job runs `npm ci --ignore-scripts`
+then `scripts/ci/assert-actions-pinned.mjs` on every event, including a
+text-only PR. The guard parses YAML with the lockfile's `js-yaml@4.3.2`.
 The `build` aggregate fails unless that job is `success`.
 
-To add an action, resolve the tag with
-`gh api repos/<owner>/<repo>/commits/<tag> --jq .sha` (peel an annotated tag
-through `git/ref/tags` then `git/tags`). Do not guess the SHA. Review a
-third-party action at the pinned commit; the only one today is
-`gitleaks/gitleaks-action` (commercial licence, `node20`, `dist/index.js` at
-`ff98106e4c7b2bc287b24eaf42907196329070c7` / v2.3.9).
+### How pins are updated
+
+Dependabot's `github-actions` ecosystem (`.github/dependabot.yml`, weekly,
+`directory: /`) rewrites the commit SHA and the trailing tag comment
+together. Patch and minor version-updates share one PR
+(`github-actions-patch-minor`); security updates of those same levels share
+another (`github-actions-security-patch-minor`). Each major is its own PR
+so a Node-runtime or artifact-protocol bump is reviewed alone. Majors are
+not ignored: Node 20 actions stop on GitHub-hosted runners after 2026-09-16.
+
+Review a Dependabot pin PR by resolving the tag to a SHA
+(`gh api repos/<owner>/<repo>/commits/<tag> --jq .sha`; peel an annotated
+tag through `git/ref/tags` then `git/tags`) and checking it matches the
+`uses:` line. Do not guess the SHA or hand-edit it without that lookup.
+Review a third-party action at the pinned commit; the only one today is
+`gitleaks/gitleaks-action` (commercial licence, `dist/index.js` at
+`e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e` / v3.0.0).
+
+To add an action by hand, use the same lookup, write the 40-character SHA
+and the tag comment, and leave the pin guard green.
 
 ### Publish workflows
 
@@ -126,16 +161,31 @@ and on `website/` after `npm ci --ignore-scripts`. Invalid signatures, invalid
 attestations, mixed findings, and command or parse failures fail the job.
 Missing-only findings are printed and do not fail (npm 10 itself exits 1 for
 missing as well as invalid; the wrapper applies that report-only policy).
-The job does not run package
-lifecycle scripts: `esbuild` / `lightningcss` postinstall and any native
-`install` (for example `better-sqlite3` in the test jobs) stay in `ci.yml` and
-`deploy-website.yml`, which still run a full `npm ci`.
+On a pull request the real `npm ci` and `npm audit signatures` steps run only
+when the diff sets `deps` (`package.json`, a lockfile, or any `.github/**`
+path); otherwise the job still reports success. Push to main always runs them. The job does not run
+package lifecycle scripts: `esbuild` / `lightningcss` postinstall and any
+native `install` (for example `better-sqlite3` in the test jobs) stay in
+`ci.yml` and `deploy-website.yml`, which still run a full `npm ci`.
 
 ## Dependency review on PRs (#2528)
 
 `dependency-review.yml` runs `actions/dependency-review-action` on pull
-requests into `main` and `release/**`. It fails on high or critical
-advisories in the PR diff, and on a newly introduced licence that is not
-on the allow-list in `.github/dependency-review-config.yml` (the licences
-in the root and website trees today). An undetectable licence is reported
-and does not fail.
+requests into `main` and `release/**`. The action itself runs only when the
+diff sets `deps` (`package.json`, a lockfile, or any `.github/**` path);
+otherwise the job still reports success. GitHub diffs the PR against its base; this is not a
+full-tree audit of `main`. Config: `.github/dependency-review-config.yml`.
+
+The check **fails** the PR when any of these appear in that diff:
+
+- a **high or critical** advisory (`fail-on-severity: high`) in a
+  `runtime` or `development` scope (`fail-on-scopes`);
+- a newly introduced **licence** that is not on the allow-list (the
+  licences in the root and website trees today: 0BSD, Apache-2.0 and the
+  one Apache-2.0/LGPL/MIT conjunction, BSD-2-Clause, BSD-3-Clause,
+  BlueOak-1.0.0, CC0-1.0, ISC, LGPL-2.1-or-later, LGPL-3.0-or-later, MIT,
+  MPL-2.0, Python-2.0).
+
+It does **not** fail on moderate/low advisories, on an undetectable
+licence (those are reported), or on an advisory that already exists on
+the base branch and this PR does not change.

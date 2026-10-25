@@ -2399,7 +2399,18 @@ program
   .option("--reset", "Allow setup again after it has already been completed")
   .option("--port <port>", "Port for the setup page (default: the health port)")
   .option("--tunnel", "Expose the setup page through a Cloudflare quick tunnel so a phone can open it")
-  .action(async (opts: { reset?: boolean; port?: string; tunnel?: boolean }) => {
+  .option("--backend-signins <backends>", "Selected backend IDs, comma-separated, for local browser sign-in")
+  .option("--backend-signin-capabilities", "Print installer sign-in capabilities without starting setup")
+  .action(async (opts: { reset?: boolean; port?: string; tunnel?: boolean; backendSignins?: string; backendSigninCapabilities?: boolean }) => {
+    if (opts.backendSigninCapabilities) {
+      console.log(JSON.stringify({ version: 1, setup: true, dashboard: true, installer: true, backends: ["kiro-cli", "claude-code", "codex"], console: ["antigravity"] }));
+      return;
+    }
+    const { onboardingBackends } = await import("./backend-signin-pending.js");
+    const selected = opts.backendSignins === undefined ? undefined : onboardingBackends(opts.backendSignins.split(","));
+    if (selected === null || (opts.tunnel && selected?.length)) {
+      console.error("Backend sign-in requires canonical backend IDs and a local setup page (no --tunnel)."); process.exit(1);
+    }
     const { clearSetupComplete, isSetupComplete } = await import("./setup-marker.js");
     if (opts.reset) {
       console.log(clearSetupComplete(DATA_DIR) ? "Setup marker cleared." : "No setup marker to clear.");
@@ -2446,7 +2457,7 @@ program
       port: opts.port === undefined ? undefined : Number(opts.port),
       healthPort: fleet.health_port,
     });
-    const host = new SetupHost({ dataDir: DATA_DIR, configPath: FLEET_CONFIG_PATH, port, tunnel: opts.tunnel });
+    const host = new SetupHost({ dataDir: DATA_DIR, configPath: FLEET_CONFIG_PATH, port, tunnel: opts.tunnel, backendSignIns: selected });
     let started: { port: number; sid: string; code: string; path: string; publicUrl: string | null };
     try {
       started = await host.start();
@@ -2512,7 +2523,11 @@ program
   .command("web")
   .description("Open the Web UI sign-in page in your browser and print a one-time sign-in code")
   .option("--code", "Only print the sign-in page and code; do not open a browser")
-  .action(async (opts: { code?: boolean }) => {
+  .option("--backend-signins <backends>", "Open the browser sign-in checklist for these backend IDs")
+  .action(async (opts: { code?: boolean; backendSignins?: string }) => {
+    const { backendSignInGuide } = await import("./backend-signin-guide.js");
+    const guide = backendSignInGuide(opts.backendSignins);
+    if (guide === null) { console.error("Use canonical backend IDs for the sign-in checklist."); process.exit(1); }
     const tokenPath = join(DATA_DIR, "web.token");
     if (!existsSync(tokenPath)) {
       console.error("Web token not found. Is the fleet running?");
@@ -2544,7 +2559,7 @@ program
       console.error(t("cli.fleet_unreachable", port));
       process.exit(1);
     }
-    const signin = `http://localhost:${port}/signin`;
+    const signin = `http://localhost:${port}/signin${guide ? `?next=${encodeURIComponent(guide)}` : ""}`;
     console.log(`Sign-in page: ${signin}`);
     console.log(`Code:         ${code}   (works once, valid ~${minutes} min)`);
     if (opts.code) return;

@@ -242,7 +242,7 @@ When you reply to a message in the web chat, its echo to Discord or Telegram is 
 
 ## Peer-to-peer agent collaboration
 
-Instances collaborate through the tools their profiles allow. Ordinary workers can discover and message peers; creating, starting or waking instances requires the appropriate orchestration permission. See [tool profiles](features.md#tool-profiles).
+Instances collaborate through the tools their profiles allow. Ordinary workers can discover and message peers. Creating, starting, or explicitly waking an instance (`wake_instance`) needs a profile with the orchestration tools. A worker's `send_to_instance` can still wake a paused recipient indirectly: delivery wakes the target the same way `/wake` does (see [auto-pause and wake](#auto-pause--wake)). See [tool profiles](features.md#tool-profiles).
 
 **Core MCP tools:**
 
@@ -741,9 +741,18 @@ kiro-cli's V3 engine asks **Trust this workspace?** before its TUI starts: in a 
 
 ### UI and engine pinning (`kiro_ui`, `kiro_engine_status`)
 
-`kiro_ui` picks how a kiro instance is launched: `legacy` (the default) runs kiro's legacy UI on its v1 agent engine (`--legacy-ui --agent-engine=v1`), `tui` its terminal UI on the v2 engine (`--tui --agent-engine=v2`). Both are pinned on every launch, so a kiro-cli default or saved setting cannot move an instance to another engine — its conversation would not come along. When the installed kiro-cli can no longer run what an instance is pinned to, AgEnD refuses to start it and says why rather than letting kiro pick (#1109). `kiro_ui: v3` is refused by validation until kiro's v3 interface can run unattended (#849).
+`kiro_ui` picks how a kiro instance is launched: `legacy` runs kiro's legacy UI on its v1 agent engine (`--legacy-ui --agent-engine=v1`), `tui` its terminal UI on the v2 engine (`--tui --agent-engine=v2`). A new kiro instance is written with `tui` by whatever creates it (#2598). An existing entry that sets no `kiro_ui` stays `legacy` until it is moved with `migrate_kiro_instance`; AgEnD never guesses it. Both are pinned on every launch, so a kiro-cli default or saved setting cannot move an instance to another engine — its conversation would not come along. When the installed kiro-cli can no longer run what an instance is pinned to, AgEnD refuses to start it and says why rather than letting kiro pick (#1109). `kiro_ui: v3` is refused by validation until kiro's v3 interface can run unattended (#849).
 
-`kiro_engine_status` (a read-only tool every profile except `minimal` has) shows, for each kiro instance and ClassicBot channel, its `kiro_ui`, the engine flags its next launch would use or why kiro-cli would refuse it, its recorded launches (kiro-cli and AgEnD versions per change), its V3 session and its credential profile. It reads what AgEnD recorded at the last launch and never runs kiro-cli itself.
+`kiro_engine_status` (a read-only tool every profile except `minimal` has) shows, for each kiro instance and ClassicBot channel, its `kiro_ui`, the engine flags its next launch would use or why kiro-cli would refuse it, its recorded launches (kiro-cli and AgEnD versions per change), its V3 session and its credential profile. It reads what AgEnD recorded at the last launch and never runs kiro-cli itself. It also shows `engine_floor` (see below).
+
+**Moving from classic to the TUI (`migrate_kiro_instance`, #2598).** kiro-cli 3.0 drops the classic engine. Setting `kiro_ui: tui` by hand would start the instance on an empty TUI conversation. `migrate_kiro_instance` (coordinator and full tool sets) moves one fleet instance and carries its conversation:
+- It posts a **Move it / Cancel** prompt in General, and nothing changes until a fleet admin confirms it there.
+- On the confirm, AgEnD sets `kiro_ui: tui`, arms the instance's classic conversation as its TUI conversation and restarts a running instance. The first TUI launch resumes that conversation once, which makes kiro copy the whole history into its session files, and records it as the instance's own.
+- The outcome is posted in General and in the instance's topic.
+- An instance with no classic conversation on record is refused unless `start_fresh: true` is given.
+- ClassicBot channels are not moved by it yet.
+
+The move is one-way. Once an instance has run on the TUI, AgEnD refuses to launch it on classic again (`engine_floor: "tui"`), because that would resume the frozen classic copy and lose everything done since. A TUI launch never uses kiro's plain `--resume`, which takes the directory's newest conversation from either engine. Without its own conversation on record (an older kiro-cli), a TUI launch starts fresh and says so.
 
 ## agend quickstart
 
@@ -1346,7 +1355,7 @@ Since then:
     - where at most 10% rewrote the cache, it is simulated as 1 hour;
     - where at least half did, the card recommends `backend_options.claude-code.prompt_cache_ttl: "1h"` instead of keep-warm. That opt-in passes `CLAUDE_CODE_PROMPT_CACHE_TTL` on the instance's next start; unset, the CLI chooses.
   - **`get_cache_report`:** agents read the same report. General, coordinators and full-profile instances see every instance; any other instance sees its own row.
-- **Fleet → Usage** (`/ui/fleet/usage`, 2.2.5, #2122): each agent's tokens, requests, delivered messages and API-equivalent at list price (not money spent), by agent, backend, model, credential profile or team, over today / 7 days / this month / all / custom days, with a daily trend, a calendar heatmap that tells idle days from days not collected, and a CSV of the same rows. Claude Code and Codex are measured (Codex's cache writes read "not reported"); the other CLIs are listed with the reason. Collected from fleet start and kept 400 days; agents read it with `get_usage_report`. The ◔ usage dialog links to it.
+- **Fleet → Usage** (`/ui/fleet/usage`, 2.2.5, #2122): each agent's tokens, requests, delivered messages and API-equivalent at list price (not money spent), by agent, backend, model, credential profile or team, over today / 7 days / this month / all / custom days, with a daily trend, a calendar heatmap that tells idle days from days not collected, and a CSV of the same rows. Claude Code, Codex, Grok, Muse, OpenCode and Antigravity are measured (Codex's and Muse's cache writes read "not reported"; Muse is not priced); Kiro, which records no token counts, is estimated from text size and marked "estimated"; the other CLIs are listed with the reason. Collected from fleet start and kept 400 days; agents read it with `get_usage_report`. The ◔ usage dialog links to it.
 - **New agent** (2.2.5, #2074): a button at the end of the sidebar's list opens the Create agent dialog. With the sidebar collapsed, a **+** beside ☰ does the same; on a phone it is in the menu drawer. Only a session that may create agents sees it.
 - **Filtering the sidebar** (2.2.5, #1936): the instance you have open stays on top under **Current**, matching or not.
 - **Names that open an instance** (2.2.5, #1990): in a chat's cross-instance status lines the other instance's name opens its chat, and in a prompt card the instance's name opens its View. An agent's or a person's message never gets such a link.

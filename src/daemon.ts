@@ -1,3 +1,4 @@
+import { dashboardAccessOf } from "./dashboard-permissions.js";
 import type { RecoveryLive } from "./working-recovery.js";
 import type { PaneContextSource } from "./pane-context-cache.js";
 import type { WorkingStateObservation, WorkingStateReason } from "./working-state-journal.js";
@@ -2093,6 +2094,9 @@ export class Daemon extends EventEmitter {
     private backendOutage?: BackendOutageView,
   ) {
     super();
+    // The live process owns its adopted configuration. Fleet defaults may be re-resolved in place after a save;
+    // sharing that object would activate cold changes before the normal restart/apply boundary.
+    this.config = structuredClone(config);
     if (!rootLogger) throw new Error("Daemon requires a shared root logger");
     this.runtimeIdentity ??= {
       kind: "fleet-topic",
@@ -2661,6 +2665,7 @@ export class Daemon extends EventEmitter {
         this.config.backend ?? "claude-code",
         this.config.working_directory,
         this.credentialProfileStore(),
+        () => this.backend?.transcriptLaunch?.() ?? null,
       ));
       const transcriptMonitor = this.transcriptMonitor;
       const transcriptFence = this.launchFenceEpoch;
@@ -6896,6 +6901,8 @@ export class Daemon extends EventEmitter {
     if (Number.isInteger(update.board_cards_at_once) && (update.board_cards_at_once as number) >= 1) this.config.board_cards_at_once = update.board_cards_at_once as number;
     else if (update.board_cards_at_once === null) delete this.config.board_cards_at_once;
     // The fleet reads it at each tool call; kept current here for the next spawn's tool menu.
+    if (typeof update.office_access === "boolean") this.config.office_access = update.office_access;
+    else if (update.office_access === null) delete this.config.office_access;
     if (update.dashboard && typeof update.dashboard === "object" && !dashboardAccessProblem(update.dashboard)) this.config.dashboard = update.dashboard as InstanceConfig["dashboard"];
     else if (update.dashboard === null) delete this.config.dashboard;
     if (["trace", "debug", "info", "warn", "error"].includes(String(update.log_level))) {
@@ -10775,7 +10782,7 @@ export class Daemon extends EventEmitter {
       onWarning: (warning) => {
         if (warning.problem === "fleet_dir_fallback") {
           this.logger.warn({ field: warning.field, path: warning.path, legacyPath: warning.legacyPath },
-            `${warning.field} file: ref is not under the instance's working directory (${warning.path}); read ${warning.legacyPath} from the fleet directory instead — make the path absolute or move the file. The fallback is removed in 2.2.`);
+            `${warning.field} file: ref is not under the instance's working directory (${warning.path}); read ${warning.legacyPath} from the fleet directory instead — make the path absolute or move the file. A later release will remove this fallback.`);
           const key = `${warning.field}:${warning.path}`;
           if (!this.promptFileFallbackNoticed.has(key)) {
             this.promptFileFallbackNoticed.add(key);
@@ -10866,7 +10873,7 @@ export class Daemon extends EventEmitter {
     mcpEnv.AGEND_TOOL_SET = toolSet;
     // The dashboard features the person switched off: out of the tool menu from this start (the fleet refuses them
     // at once, whatever the menu still shows).
-    const dashboardOff = dashboardFeaturesOff(this.config.dashboard);
+    const dashboardOff = dashboardFeaturesOff(dashboardAccessOf(this.config));
     if (dashboardOff.length) mcpEnv.AGEND_DASHBOARD_OFF = dashboardOff.join(",");
     if (this.config.display_name) mcpEnv.AGEND_DISPLAY_NAME = this.config.display_name;
     if (this.config.description) mcpEnv.AGEND_DESCRIPTION = this.config.description;
@@ -11274,7 +11281,7 @@ export class Daemon extends EventEmitter {
           "Giving up on resuming after repeated startup failures — starting fresh. "
           + "The previous conversation is NOT continued; its context is lost to this session.",
         );
-        this.emit("context_lost", this.name, "resume_repeatedly_failed");
+        this.emit("context_lost", this.name, "resume_repeatedly_failed", failures);
       }
       this.setSessionAside(proven ? "cli_reported_no_conversation" : "resume_failed_repeatedly");
       this.skipResume = true;

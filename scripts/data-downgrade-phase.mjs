@@ -88,6 +88,49 @@ function recoveryRows() {
     ].map(([table, key]) => [table, db.prepare(`SELECT * FROM ${table} ORDER BY ${key}`).all()]));
   } finally { db.close(); }
 }
+// #2122 (Fable #2604 P1): the usage ledger and its daily rollup. A published reader keeps a totals array only with
+// exactly 7 entries and writes back what it revived; the totals this version writes must survive that round trip.
+const usageLedgerPath = join(scratch, 'cache-ledger.json'), usageDaysPath = join(scratch, 'usage-days.json');
+const hasUsageRollup = existsSync(join(packageRoot, 'dist', 'usage-rollup.js'));
+if (phase === 'create') {
+  const { addTurn, emptyLedger } = await load('cache-ledger.js');
+  const { emptyDays, foldHours } = await load('usage-rollup.js');
+  const hour = Date.UTC(2026, 0, 5, 9), ledger = emptyLedger(), days = emptyDays();
+  const file = { kind: 'codex', ino: 1, offset: 0 };
+  const turn = (t, model) => ({ t, model, prompt: 10_000, uncached: 2000, read: 8000, write5m: 0, write1h: 0, write: 0, output: 900, reasoning: 600 });
+  addTurn(ledger, file, turn(hour + 60_000, 'gpt-5.6-sol'), 0, 'unrecorded');
+  addTurn(ledger, file, turn(hour + 3 * 3_600_000, 'gpt-5.6-sol'), 0, 'unrecorded');
+  // #2122 §10: a Kiro estimate. An older reader knows no `kiro:` source: it keeps the totals and reads them as unknown.
+  addTurn(ledger, { kind: 'kiro', ino: 0, offset: 0 }, { ...turn(hour + 120_000, 'claude-sonnet-4.6'), write: null, reasoning: 0 }, 0, 'default');
+  foldHours(days, ledger, hour + 3_600_000, 'UTC');                          // the first hour also in the rollup
+  checked('the usage ledger and rollup keep 7 totals, reasoning beside them', () => {
+    for (const h of Object.values(ledger.hours)) for (const t of [...Object.values(h.m), ...Object.values(h.src).flatMap(Object.values)]) assert.equal(t.length, 7);
+    for (const row of days.rows) for (const t of Object.values(row.m)) assert.equal(t.length, 7);
+    assert.ok(Object.values(ledger.hours).every(h => h.rs) && days.rows.filter(r => r.be === 'codex').every(r => r.r));
+  });
+  writeFileSync(usageLedgerPath, JSON.stringify(ledger)); writeFileSync(usageDaysPath, JSON.stringify(days));
+  state.usage = { hours: Object.fromEntries(Object.entries(ledger.hours).map(([k, h]) => [k, { m: h.m, src: { 'codex:unrecorded': h.src['codex:unrecorded'] } }])), rows: days.rows.map(r => r.m) };
+} else if (phase === 'old' && hasUsageRollup) {
+  const { reviveLedger } = await load('cache-ledger.js');
+  const { reviveDays } = await load('usage-rollup.js');
+  checked('the old reader keeps every usage total and writes them back', () => {
+    const ledger = reviveLedger(JSON.parse(readFileSync(usageLedgerPath, 'utf8')));
+    const days = reviveDays(JSON.parse(readFileSync(usageDaysPath, 'utf8')));
+    assert.deepEqual(Object.fromEntries(Object.entries(ledger.hours).map(([k, h]) => [k, { m: { ...h.m }, src: { 'codex:unrecorded': { ...h.src['codex:unrecorded'] } } }])), state.usage.hours);
+    assert.deepEqual(days.rows.map(r => ({ ...r.m })).filter(m => Object.keys(m).length), state.usage.rows.filter(m => Object.keys(m).length));
+    // As it does after a catch-up (cache-service save, recordCoverage): what it revived is what goes back to disk.
+    writeFileSync(usageLedgerPath, JSON.stringify(ledger)); writeFileSync(usageDaysPath, JSON.stringify(days));
+  });
+} else if (phase === 'return') {
+  const { reviveLedger } = await load('cache-ledger.js');
+  const { reviveDays } = await load('usage-rollup.js');
+  checked('back on the new version, every usage total is there', () => {
+    const ledger = reviveLedger(JSON.parse(readFileSync(usageLedgerPath, 'utf8')));
+    const days = reviveDays(JSON.parse(readFileSync(usageDaysPath, 'utf8')));
+    assert.deepEqual(Object.fromEntries(Object.entries(ledger.hours).map(([k, h]) => [k, { m: { ...h.m }, src: { 'codex:unrecorded': { ...h.src['codex:unrecorded'] } } }])), state.usage.hours);
+    assert.deepEqual(days.rows.map(r => ({ ...r.m })).filter(m => Object.keys(m).length), state.usage.rows.filter(m => Object.keys(m).length));
+  });
+}
 if (phase === 'create') {
   checked('working journal has populated current and prior snapshots before downgrade', () => {
     const snapshot = { version: 1, reason: 'before_stop', observedAt: 10, lastActivityAt: 9,
@@ -196,6 +239,10 @@ if (phase === 'create') {
   assert.equal(validateFleetConfig(notices).valid, true);
   writeFileSync(join(scratch, 'notice-fleet.yaml'), yaml.dump(notices));
   checks.push('DM notice config producer writes downgrade-safe boolean fields');
+  const { normalizeOfficeStorage } = await load('dashboard-permissions.js');
+  const office = { defaults: { dashboard: { office: true } }, instances: { officeAgent: { working_directory: scratch, dashboard: { office: false } } } };
+  normalizeOfficeStorage(office);
+  writeFileSync(join(scratch, 'office-fleet.yaml'), yaml.dump(office));
   writeFileSync(statePath, JSON.stringify(state));
 } else if (phase === 'old') {
   checked('old recovery keeps begun work fenced and requeues only unbegun claims', () => {
@@ -238,6 +285,12 @@ if (phase === 'create') {
     assert.ok(events.listActivity().some(row => row.event === 'new-activity'));
     const reaction = events.pendingReactions('scratch'); assert.ok(reaction); events.markReactionsConsumed('scratch', reaction.maxId);
     events.insert('scratch', 'old-event', { sentinel: 43 });
+  });
+  checked('Office switches validate in the published old package outside the closed dashboard map', () => {
+    const path = join(scratch, 'office-fleet.yaml'), raw = loadRawFleetConfig(path), old = loadFleetConfig(path);
+    assert.equal(validateFleetConfig(raw).valid, true);
+    assert.equal(old.defaults.office_access, true); assert.equal(old.instances.officeAgent.office_access, false);
+    writeFileSync(path, yaml.dump(old));
   });
   checked('DM notice config validates in the published old package and survives its normalized rewrite', () => {
     const path = join(scratch, 'notice-fleet.yaml');
@@ -284,6 +337,12 @@ if (phase === 'create') {
   writeFileSync(statePath, JSON.stringify(state));
 } else {
   const { loginNoticeMode, tipNoticeMode } = await load('notice-delivery.js');
+  checked('Office on/off switches survive the published old config round trip', () => {
+    const config = loadFleetConfig(join(scratch, 'office-fleet.yaml'));
+    assert.equal(validateFleetConfig(config).valid, true);
+    assert.equal(config.defaults.office_access, true); assert.equal(config.instances.officeAgent.office_access, false);
+    assert.equal(config.defaults.dashboard?.office, undefined); assert.equal(config.instances.officeAgent.dashboard?.office, undefined);
+  });
   checked('DM notice preferences survive the published old config round trip', () => {
     const config = loadFleetConfig(join(scratch, 'notice-fleet.yaml'));
     assert.equal(validateFleetConfig(config).valid, true);

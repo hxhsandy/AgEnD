@@ -1,3 +1,4 @@
+import { hasLegacyOffice, normalizeOfficeStorage } from "./dashboard-permissions.js";
 import { loginNoticeMode, tipNoticeMode, normalizeNoticeDelivery, setNoticeMode } from "./notice-delivery.js";
 import { DEFAULT_REPLY_TRIGGERS } from "./reply-triggers.js";
 import { WorkingRecoveryCoordinator, WORKING_RECOVERY_KIND, buildWorkingRecoveryPrompt, type RecoveryCause } from "./working-recovery.js";
@@ -32,7 +33,8 @@ import type { CpuProfile } from "./cpu-profile.js";
 import { existsSync, readFileSync, mkdirSync, writeFileSync, unlinkSync, rmSync, readdirSync, renameSync, copyFileSync, chmodSync, statSync, accessSync, realpathSync, lstatSync, constants as fsConstants, type Dirent, openSync, closeSync, fsyncSync } from "node:fs";
 import { atomicWriteFileSync } from "./atomic-write.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { freemem, totalmem, cpus, homedir } from "node:os";
+import { freemem, totalmem, homedir } from "node:os";
+import { effectiveCpuCount } from "./cpu-quota.js";
 import { access } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { Worker } from "node:worker_threads";
@@ -42,6 +44,7 @@ import { join, dirname, basename, delimiter, isAbsolute, relative, resolve as re
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { getAgendHome, ensureWorkspaceGit } from "./paths.js";
+import { applyKiroMigration, kiroMigrationPrompt, planKiroMigration, type KiroMigrateDeps, type KiroMigrationPlan } from "./kiro-migrate.js";
 import { fleetLabel } from "./fleet-label.js";
 import {
   beginFullRestartProgress as persistFullRestartProgress,
@@ -84,7 +87,7 @@ import {
   type DeliveryStatus, type GuildEmoji, type GuildEmojiGroup, type ResolvedStatusEmojis, type StatusEmojiKey,
 } from "./status-emojis.js";
 import { isProbeableRouteTarget, type RouteTarget } from "./fleet-context.js";
-import { getEffectiveInstanceDefaults, loadFleetConfig, loadRawFleetConfig, DEFAULT_COST_GUARD, DEFAULT_DAILY_SUMMARY, DEFAULT_INSTANCE_CONFIG } from "./config.js";
+import { getEffectiveInstanceDefaults, loadFleetConfig, loadRawFleetConfig, DEFAULT_COST_GUARD, DEFAULT_DAILY_SUMMARY, DEFAULT_INSTANCE_CONFIG, autoGeneralInstanceConfig } from "./config.js";
 import { EventLog } from "./event-log.js";
 import { binaryProbe } from "./binary-probe.js";
 import { AVAILABILITY_STALE_MS, BackendAvailabilityStore, hostAvailabilityProbes, type AvailabilityProbes, type BackendAvailability } from "./backend-availability.js";
@@ -246,7 +249,7 @@ import { discordGeneralChannelId } from "./discord-general.js";
 import { parseEnvText } from "./env-file.js";
 import { isDisallowedIntentsError, isRejectedTokenError } from "./discord-permissions.js";
 import { filterUsageProviders, formatDiscordUsageActivity, getUsageSnapshot, handleUsageRequest, isUsagePath, usageProviderIdForBackend } from "./usage/usage-api.js";
-import { LOGIN_FLOWS, LOGIN_BACKEND_ALIASES, type LoginFlow, type AuthCheckResult } from "./login-flows.js";
+import { LOGIN_FLOWS, checkAuthStatus, LOGIN_BACKEND_ALIASES, type LoginFlow, type AuthCheckResult } from "./login-flows.js";
 import { LoginSession } from "./login-manager.js";
 import { runOnLoginShell } from "./login-shell.js";
 import { tightenInstanceDirs } from "./private-dir.js";
@@ -266,6 +269,10 @@ import { admitProfileLogin, LoginController, LOGIN_TOKEN_RESEND_PREFIX, POST_LOG
 import { WebBackendLogins, dashboardSignInSupported, type SignInTarget } from "./web-backend-login.js";
 import { runBeforeDeadline } from "./deadline.js";
 import { LoginWindowLock } from "./login-window-lock.js";
+import { BrowserBackendSignIns } from "./browser-backend-signins.js";
+import { createStructuredSignInTransport } from "./structured-signin-transport.js";
+import { ONBOARDING_BACKENDS, readPendingBackendSignIns } from "./backend-signin-pending.js";
+import { structuredSignInSupported } from "./structured-signin.js";
 import { handleSettingsRequest, type RawConfigPatch } from "./settings-api.js";
 import { setLocale, detectLocale, getLocale, t } from "./locale.js";
 import { recentChatContext } from "./log-tail.js";
@@ -389,6 +396,7 @@ type ReconcileObserver = (
   status: ApplyTargetStatus,
   error?: string,
 ) => void;
+import { kiroHome } from "./backend/kiro-kas-store.js";
 import { CHAT_PROFILE_LOGIN_BACKENDS, credentialHomeSpec, credentialProfileHome, credentialProfileLogin, credentialProfileLoginCommand, credentialProfileStoreHome, credentialSwitchCarriesConversation, credentialSwitchStartsFresh, instanceCredentialProfile } from "./backend/credential-profile.js";
 import { carryClaudeConversation, type CarryResult } from "./backend/claude-carry.js";
 import { mergeBackendOptions, profileKey, profileName, profileOf, type ClassicProfile } from "./classic-bindings.js";
@@ -889,6 +897,10 @@ const OOM_RETRY_CALLBACK_PREFIX = "oom-retry:";
 const NEEDS_PAUSE_TTL_MS = 10_000;
 const HANG_CALLBACK_PREFIX = "hang:";
 const CLEAR_CONFIRM_CALLBACK_PREFIX = "clear-confirm:";
+/** #2598 B2: a kiro classic → TUI move's Confirm in General. "kiro-migrate:" (13) + 32 hex + ":confirm" (8) = 53 bytes. */
+const KIRO_MIGRATE_CALLBACK_PREFIX = "kiro-migrate:";
+/** Long enough for an admin to read the prompt; the move is judged again on the click. */
+const KIRO_MIGRATE_TIMEOUT_MS = 10 * 60_000;
 /**
  * The prompts the web dashboard also offers: the ones about an instance's own health, which a dashboard
  * user — holding the full-fleet web credential — may answer exactly as a fleet admin on the platform may.
@@ -986,6 +998,7 @@ export const CLI_ENV_PROBE_DEADLINE_MS = 16_000;
  * started ten CLIs together, saturated the CPU, and healthy starts then missed
  * their startup budget — which used to cost the user their conversation. Cores
  * bound how many can actually make progress; memory bounds how many fit.
+ * `cores` is what this process may use (cpuset and cgroup quota, #749), not the host's count.
  */
 export function deriveSpawnConcurrency(freeMemMB: number, cores: number): number {
   const byMemory = Math.floor(freeMemMB / 300);
@@ -1325,6 +1338,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
   private pendingBackendSelects = new Map<string, PendingBackendSelect>();
   /** nonce → pending button prompt (hang restart, interactive assist, clean-exit restart). */
   private pendingNonceButtons = new Map<string, NonceButtonEntry>();
+  /** #2598 B2: the kiro moves waiting on a fleet admin's Confirm in General, by prompt nonce. */
+  private pendingKiroMigrations = new Map<string, KiroMigrationPlan>();
   /** #1386 "Needs you": the list, its live chat messages and Acknowledge. Started with the fleet (finishStartup). */
   private needsYou: NeedsYouHub | null = null;
   /** When the fleet first saw an instance crashed, for its "Needs you" age; cleared when it is not. */
@@ -2064,6 +2079,71 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     }
     // No platform confirmation was reachable. Host inspection is still required.
     this.logger.info({ id: view.id }, "Settings change requires local `agend settings confirm <id>`");
+  }
+
+  private kiroMigrateDeps(): KiroMigrateDeps {
+    return {
+      agendHome: getAgendHome(),
+      fleetConfig: () => this.fleetConfig,
+      saveFleetConfig: () => this.saveFleetConfig(),
+      status: name => this.getInstanceStatus(name),
+      restart: name => this.restartSingleInstance(name, { explicit: true }),
+    };
+  }
+
+  /**
+   * #2598 B2, migrate_kiro_instance: judge the move, then ask in General for a fleet admin's Confirm. Nothing changes
+   * here; the move runs on the Confirm (handleKiroMigrateCallback), judged again then.
+   */
+  async requestKiroMigration(name: string, startFresh: boolean): Promise<{ ok: true; text: string; classic_conversation: string | null } | { ok: false; error: string }> {
+    const judged = planKiroMigration(this.kiroMigrateDeps(), name, startFresh);
+    if (!judged.ok) return judged;
+    const general = this.findGeneralInstance();
+    const adapterId = general ? this.getInstanceAdapterId(general) : undefined;
+    const adapter = general ? this.getAdapterForInstance(general) : undefined;
+    const chatId = general ? this.getGroupIdForInstance(general) : undefined;
+    const topic = general ? String(this.fleetConfig?.instances[general]?.topic_id ?? "") : "";
+    if (!general || !adapterId || !adapter || !chatId) return { ok: false, error: t("kiro_migrate.no_general") };
+    const { plan } = judged;
+    try {
+      const nonce = await this.postNonceButtonPromptOrThrow({
+        prefix: KIRO_MIGRATE_CALLBACK_PREFIX, alertType: "clear_confirm", instanceName: name, adapter, adapterId, chatId,
+        ...(topic ? { threadId: topic } : {}),
+        message: kiroMigrationPrompt(plan, this.getInstanceStatus(name) === "running"),
+        choices: [{ action: "confirm", label: t("kiro_migrate.confirm_button") }, { action: "cancel", label: t("kiro_migrate.cancel_button") }],
+        expiredText: t("kiro_migrate.expired", name),
+        timeoutMs: KIRO_MIGRATE_TIMEOUT_MS,
+      });
+      this.pendingKiroMigrations.set(nonce, plan);
+      const expiry = setTimeout(() => this.pendingKiroMigrations.delete(nonce), KIRO_MIGRATE_TIMEOUT_MS + 60_000);
+      expiry.unref?.();
+    } catch (err) {
+      return { ok: false, error: `${t("kiro_migrate.no_general")} (${(err as Error).message})` };
+    }
+    return { ok: true, text: t("kiro_migrate.requested"), classic_conversation: plan.classicId };
+  }
+
+  /** A fleet admin's Confirm or Cancel on a kiro move. Any fleet admin (the default nonce authorization), in General. */
+  private async handleKiroMigrateCallback(data: AdapterCallbackData, adapterId: string, adapter?: ChannelAdapter): Promise<boolean> {
+    const claimed = this.consumeNonceCallback(KIRO_MIGRATE_CALLBACK_PREFIX, /^kiro-migrate:([0-9a-f]{32}):(confirm|cancel)$/, data, adapterId, adapter);
+    if (claimed === null) return false;
+    if (claimed === "consumed") return true;
+    const { entry, action } = claimed;
+    const nonce = data.callbackData.slice(KIRO_MIGRATE_CALLBACK_PREFIX.length, KIRO_MIGRATE_CALLBACK_PREFIX.length + 32);
+    const plan = this.pendingKiroMigrations.get(nonce);
+    this.pendingKiroMigrations.delete(nonce);
+    const messageId = entry.messageId ?? data.messageId;
+    if (action === "cancel" || !plan) {
+      await this.retireNonceButtons(entry, messageId, t(plan ? "kiro_migrate.cancelled" : "kiro_migrate.expired", entry.instanceName));
+      return true;
+    }
+    this.eventLog?.insert(plan.name, "kiro_migrate", { classicId: plan.classicId, userId: data.userId });
+    await this.retireNonceButtons(entry, messageId, t("kiro_migrate.applying", plan.name));
+    const outcome = await applyKiroMigration(this.kiroMigrateDeps(), plan);
+    this.logger.info({ name: plan.name, ok: outcome.ok, classicId: plan.classicId }, "kiro classic → TUI move");
+    this.notifyFleetError(outcome.text);
+    if (outcome.ok) this.notifyInstanceTopic(plan.name, outcome.text);
+    return true;
   }
 
   private async handleSettingsChangeCallback(data: AdapterCallbackData, adapterId: string, adapter?: ChannelAdapter): Promise<boolean> {
@@ -2884,7 +2964,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
   private spawnConcurrency(): number {
     const explicit = this.fleetConfig?.defaults?.startup?.concurrency;
     if (explicit != null) return Math.max(1, Math.min(20, explicit));
-    return deriveSpawnConcurrency(Math.round(freemem() / (1024 * 1024)), cpus().length);
+    return deriveSpawnConcurrency(Math.round(freemem() / (1024 * 1024)), effectiveCpuCount());
   }
 
   /** #1685: "elevated" or "critical" while host memory pressure slows or holds new agents; otherwise null (an
@@ -7822,7 +7902,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
   }
 
   private async startAllWithinDeadline(configPath: string, deadline: StartupMemoryDeadline): Promise<void> {
-    this.loginWindow.reopen();                          // a stopAll → startAll restart must accept login windows again
+    if (!this.structuredLoginCleanupFailed) this.loginWindow.reopen();                          // a stopAll → startAll restart must accept login windows again
     this.loginController?.reopen();
     const startupStartedAt = Date.now();
     FleetManager.signalTarget = this;
@@ -8103,12 +8183,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       mkdirSync(generalDir, { recursive: true, mode: 0o700 });
       const backendName = fleet.defaults.backend ?? "claude-code";
       this.ensureGeneralInstructions(generalDir, backendName, name);
-      fleet.instances[name] = {
-        ...DEFAULT_INSTANCE_CONFIG,
-        working_directory: generalDir,
-        general_topic: true,
-        channel_id: need.adapterId,
-      };
+      fleet.instances[name] = autoGeneralInstanceConfig(fleet.defaults, generalDir, need.adapterId);   // #2598: its kiro_ui is the fleet's
       generalsCreated = true;
     }
     if (generalsCreated) this.saveFleetConfig();
@@ -12204,7 +12279,16 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
 
     if (!this.savedFleetConfigSnapshot) this.savedFleetConfigSnapshot = structuredClone(this.fleetConfig);
     normalizeNoticeDelivery(this.fleetConfig);
+    normalizeOfficeStorage(this.fleetConfig);
     explicitPatches = explicitPatches.flatMap(patch => {
+      const path = patch.path;
+      if (path.at(-2) === "dashboard" && path.at(-1) === "office" && !patch.remove) {
+        return [{ ...patch, path: [...path.slice(0, -2), "office_access"] }, { path, remove: true }];
+      }
+      if (path.at(-1) === "dashboard" && patch.value && typeof patch.value === "object" && Object.hasOwn(patch.value, "office")) {
+        const { office, ...dashboard } = patch.value as Record<string, unknown>;
+        return [{ ...patch, value: dashboard }, { path: [...path.slice(0, -1), "office_access"], value: office, remove: office === null }];
+      }
       if (patch.path.join(".") === "web.notify_login" && patch.value === "dm") return [{ ...patch, value: true }, { path: ["web", "notice_delivery", "login"], value: "dm" }];
       if (patch.path.join(".") === "defaults.tips" && patch.value === "dm") return [{ ...patch, value: true }, { path: ["web", "notice_delivery", "tips"], value: "dm" }];
       return [patch];
@@ -12285,11 +12369,41 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     });
 
     this.rawFleetConfig = loadRawFleetConfig(this.configPath);
+    // The instance map is defaults-expanded. A defaults edit changes that view even when it writes no instance
+    // leaves. Re-resolve from the committed YAML so inherited values cannot become stale overrides on the next save.
+    // Keep the FleetConfig object itself: Settings and other request contexts hold it.
+    const resolvedInstances = loadFleetConfig(this.configPath).instances;
+    for (const [name, resolved] of Object.entries(resolvedInstances)) {
+      const current = this.fleetConfig.instances[name];
+      if (!current) { this.fleetConfig.instances[name] = resolved; continue; }
+      // Lifecycle rollback fences hold these object identities across save. Refresh their values, not their owner.
+      for (const key of Object.keys(current)) if (!Object.hasOwn(resolved, key)) delete (current as unknown as Record<string, unknown>)[key];
+      Object.assign(current, resolved);
+    }
     this.savedFleetConfigSnapshot = structuredClone(this.fleetConfig);
+    this.refreshSavedDashboardPermissions();
     this.logger.info(
       { path: this.configPath, strippedDefaults: redundantPaths.length },
       "Saved fleet config (lossless patch)",
     );
+  }
+
+  /** A permission tightening is effective when its save returns, independently of the later apply job or IPC. */
+  private refreshSavedDashboardPermissions(): void {
+    if (!this.fleetConfig) return;
+    const classicNames = new Set(this.classicChannels?.getAll().map(ch => ch.instanceName) ?? []);
+    for (const [name, daemon] of this.daemons) {
+      const next = this.fleetConfig.instances[name] ?? (classicNames.has(name) ? getEffectiveInstanceDefaults(this.fleetConfig.defaults) : undefined);
+      const previous = daemon.getConfigSnapshot?.();
+      if (!next || !previous) continue;
+      if (isDeepStrictEqual(previous.dashboard, next.dashboard) && previous.office_access === next.office_access) continue;
+      // Only permissions are adopted here. Cold fields retain the live daemon's old snapshot, so reconcile still
+      // detects that they require a restart. MCP menus also watch the raw file; this updates the next spawn's env.
+      daemon.applyConfigUpdate({ dashboard: next.dashboard ?? null, office_access: next.office_access ?? null });
+      if (taskBoardSwitchedOn(previous.dashboard, next.dashboard)) {
+        this.admitTaskBoardNotice(name, TASK_BOARD_ON_NOTICE, `task-board-on:${name}:${Date.now()}`);
+      }
+    }
   }
 
   /** Why the config written to `candidate` must not replace fleet.yaml, or null: it does not load, or it adds errors. */
@@ -12331,7 +12445,24 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     }
   }
 
+  private migrateOfficeStorage(): void {
+    if (!this.fleetConfig || !this.configPath || !hasLegacyOffice(this.rawFleetConfig) || !validateFleetConfig(this.rawFleetConfig).valid) return;
+    try {
+      this.writeFleetConfigBackup(readFileSync(this.configPath, "utf8"));
+      const patches: RawConfigPatch[] = [];
+      const raw = this.rawFleetConfig as any;
+      for (const [path, item] of [[ ["defaults"], raw.defaults ], ...Object.entries(raw.instances ?? {}).map(([name, value]) => [["instances", name], value])] as Array<[string[], any]>) {
+        if (!item?.dashboard || !Object.hasOwn(item.dashboard, "office")) continue;
+        patches.push({ path: [...path, "dashboard", "office"], remove: true });
+        if (!Object.hasOwn(item, "office_access") && typeof item.dashboard.office === "boolean") patches.push({ path: [...path, "office_access"], value: item.dashboard.office });
+      }
+      this.saveFleetConfig(patches);
+      this.logger.info("Stored Office access outside dashboard for downgrade compatibility");
+    } catch (err) { this.logger.warn({ err }, "Could not migrate Office access; keeping the original file"); }
+  }
+
   private slimFleetConfigAtStartup(): void {
+    this.migrateOfficeStorage();
     this.migrateNoticeDeliveryStorage();
     const redundantPaths = collectRedundantInstanceDefaultPaths(this.rawFleetConfig);
     if (redundantPaths.length === 0) return;
@@ -14310,6 +14441,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     if (await this.handleTipUnlock(data, adapterId, adapter)) return true;
     if (await this.handleLoginBackendSelect(data, adapterId, adapter)) return true;
     if (await this.handleSettingsChangeCallback(data, adapterId, adapter)) return true;
+    if (await this.handleKiroMigrateCallback(data, adapterId, adapter)) return true;
     if (await this.handleDashboardCallback(data, adapterId, adapter)) return true;
     if (await this.handleClassicApproval(data, adapterId, adapter)) return true;
     if (this.handleRetiredPromptButton(data, adapterId, adapter)) return true;
@@ -14420,6 +14552,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     const fleet = Object.entries(this.fleetConfig?.instances ?? {}).map(([name, cfg]) => ({
       name, backend: this.backendNameOf(name), workingDirectory: cfg.working_directory, ledgerPath: join(this.getInstanceDir(name), "cache-ledger.json"),
       claudeConfigDir: this.claudeConfigDirOf(name), profile: this.usageProfileOf(name, this.backendNameOf(name)),
+      kiroDbPath: this.kiroDbPathOf(name, this.backendNameOf(name)),
     }));
     const taken = new Set(fleet.map(i => i.name));
     const classic = (this.classicChannels?.getAll() ?? []).filter(ch => !taken.has(ch.instanceName)).map(ch => ({
@@ -14429,6 +14562,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       ledgerPath: join(this.getInstanceDir(ch.instanceName), "cache-ledger.json"),
       claudeConfigDir: this.claudeConfigDirOf(ch.instanceName),
       profile: this.usageProfileOf(ch.instanceName, this.classicChannels?.getBackendByInstance(ch.instanceName, this.fleetConfig?.defaults?.backend) ?? this.fleetConfig?.defaults?.backend ?? "claude-code"),
+      kiroDbPath: this.kiroDbPathOf(ch.instanceName, this.classicChannels?.getBackendByInstance(ch.instanceName, this.fleetConfig?.defaults?.backend) ?? this.fleetConfig?.defaults?.backend ?? "claude-code"),
     }));
     return [...fleet, ...new Map(classic.map(c => [c.name, c])).values()];
   }
@@ -14448,7 +14582,15 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
   private usageProfileOf(name: string, backend: string): string | undefined {
     if (backend === "claude-code") return this.credentialProfileOf(name, "claude-code") ?? "default";
     if (backend === "codex") return "unrecorded";
+    if (backend === "kiro-cli") return this.credentialProfileOf(name, "kiro-cli") ?? "default";
+    if (backend === "grok" || backend === "muse" || backend === "opencode" || backend === "antigravity") return "default";
     return undefined;
+  }
+  /** #2122 §10: a Kiro instance with a credential profile writes its classic store in that profile's home. */
+  private kiroDbPathOf(name: string, backend: string): string | undefined {
+    if (backend !== "kiro-cli") return undefined;
+    const profile = this.credentialProfileOf(name, "kiro-cli");
+    return profile ? join(credentialProfileStoreHome(getAgendHome(), "kiro-cli", profile), "data.sqlite3") : undefined;
   }
   /** #2122: the fleet's day boundary zone — defaults.scheduler.default_timezone, else this host's. */
   usageZone(): string {
@@ -14489,6 +14631,19 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       rolloutsUnreadable: root => sharedRolloutIndex(root).unreadable,
       metaPath: join(this.dataDir, "cache-codex-rollouts.json"),
       zone: () => this.usageZone(),
+      // #2122 §10: Kiro's shared classic store (XDG_DATA_HOME, as kiro-cli resolves it) and its KIRO_HOME.
+      kiroDbPath: () => join(process.env.XDG_DATA_HOME?.trim() || join(homedir(), ".local", "share"), "kiro-cli", "data.sqlite3"),
+      kiroHome: () => kiroHome(),
+      // #2122 §10 step 3: grok keeps its sessions under ~/.grok (grok.ts reads them there too).
+      grokSessionsDir: () => join(homedir(), ".grok", "sessions"),
+      // #2122 §10 step 4: muse keeps sessions under $XDG_DATA_HOME/muse (else ~/.local/share/muse), as muse.ts reads them.
+      // #2122 §10 step 5: OpenCode's database, under XDG_DATA_HOME as opencode resolves it.
+      // #2122 §10 step 6: agy's conversations, under ~/.gemini as the antigravity backend reads its settings.
+      antigravityDir: () => join(homedir(), ".gemini", "antigravity-cli", "conversations"),
+      // The version AgEnD's CLI probe last recorded for agy: its cache file, whatever its age (never runs agy).
+      antigravityVersion: () => this.lastRecordedCliVersion("antigravity"),
+      opencodeDbPath: () => join(process.env.XDG_DATA_HOME?.trim() || join(homedir(), ".local", "share"), "opencode", "opencode.db"),
+      museSessionsDir: () => join(process.env.XDG_DATA_HOME?.trim() || join(homedir(), ".local", "share"), "muse", "sessions"),
       log: (level, msg, extra) => this.logger[level](extra ?? {}, msg),
     });
   }
@@ -14602,6 +14757,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         return this.deliveryOutbox.acknowledge(deliveryId, by);
       },
       tasks: () => this.needsYouTaskItems(),
+      backendSignIns: () => this.needsYouBackendSignIns(),
       taskAction: action => this.taskActionFromChat(action),
       settings: () => ({
         liveMessage: this.fleetConfig?.needs_you?.live_message !== false,
@@ -16790,6 +16946,50 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     return this.loginController;
   }
 
+  private browserBackendSignInsInstance: BrowserBackendSignIns | null = null;
+  private structuredLoginCleanupFailed = false;
+  private readonly pendingBackendSince = new Map<string, number>();
+
+  private browserSignInOwnerCurrent(owner: object): boolean {
+    const record = owner as SessionRecord;
+    return !this.shuttingDown && typeof record.handle === "string" && this.webSessions?.findByHandle(record.handle) === owner
+      && this.isLocalAdminSession(record.handle);
+  }
+  /** #2599: default-account controls share the exact writer reservation with chat/profile/install. */
+  get browserBackendSignIns(): BrowserBackendSignIns {
+    return this.browserBackendSignInsInstance ??= new BrowserBackendSignIns({
+      dataDir: this.dataDir, lock: this.loginWindow,
+      current: owner => this.browserSignInOwnerCurrent(owner),
+      installed: async () => ONBOARDING_BACKENDS.filter(backend => this.isCliInstalled(backend)),
+      checkAuth: backend => checkAuthStatus(LOGIN_FLOWS[backend]!.authCheck!),
+      checkConsoleAuth: () => checkAuthStatus(LOGIN_FLOWS.antigravity!.authCheck!),
+      transport: () => createStructuredSignInTransport(),
+      changed: (event, owner, launched) => {
+        try { this.eventLog?.insert("login", "browser_backend_signin", event); } catch { /* safe metadata only */ }
+        broadcastSseEvent(this.sseClients, "backend_login", {}, err => this.logger.debug({ err }, "backend_login event failed"));
+        this.needsYou?.poke();
+        if (!this.browserSignInOwnerCurrent(owner)) return;
+        if (event.phase === "starting") {
+          const record = owner as SessionRecord;
+          this.notifyFleetError(t("login.web_dashboard_notice", event.backend, record.label, record.handle.slice(0, 8)));
+        }
+        if (event.phase === "done") {
+          void this.backendAvailability.refresh([event.backend], { force: true }).catch(() => {});
+          if (launched) void this.recoverBackendInstances(event.backend, undefined, null).catch(() => this.logger.warn({ backend: event.backend }, "Post sign-in recovery failed"));
+        }
+      },
+    });
+  }
+
+  private needsYouBackendSignIns(): import("./needs-you.js").BackendSignInInput[] {
+    const pending = readPendingBackendSignIns(this.dataDir).pending;
+    for (const backend of this.pendingBackendSince?.keys() ?? []) if (!pending.includes(backend as typeof pending[number])) this.pendingBackendSince.delete(backend);
+    return pending.map(backend => {
+      if (!this.pendingBackendSince.has(backend)) this.pendingBackendSince.set(backend, Date.now());
+      return { backend, since: this.pendingBackendSince.get(backend)!, browser: structuredSignInSupported(backend) };
+    });
+  }
+
   /** #2233: sign-ins started from the web dashboard (local admin sessions), on the same controller as chat's. */
   private webBackendLoginsInstance: WebBackendLogins | null = null;
   get webBackendLogins(): WebBackendLogins {
@@ -17173,6 +17373,10 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     // "cancelled" is the detail both legacy onDone handlers keep quiet about —
     // a stopping fleet must not announce "login failed — fleet shutdown".
     await Promise.all([
+      bounded(this.browserBackendSignInsInstance?.close().then(confirmed => {
+        if (confirmed) this.browserBackendSignInsInstance = null;
+        else { this.structuredLoginCleanupFailed = true; this.logger.error("Structured login cleanup failed; sign-in admission remains closed until the host is restarted."); }
+      }), "browser-controls"),
       bounded(this.loginController?.shutdown(), "web-login"),
       bounded(this.activeInstall?.session.cancel("cancelled"), "install"),
     ]);
@@ -17188,6 +17392,12 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       this.installHandoff.cancelled = true;
       this.installHandoff = null;
       return t("login.cancelled", backend);
+    }
+    const browserLogin = this.browserBackendSignInsInstance, browserBackend = browserLogin?.activeBackend;
+    if (browserLogin && browserBackend) {
+      const confirmed = await browserLogin.close();
+      if (confirmed) this.browserBackendSignInsInstance = null;
+      return confirmed ? t("login.cancelled", browserBackend) : t("login.browser_cleanup_failed");
     }
     if (this.loginController?.isActive()) return this.loginController.cancel();
     return t("login.no_session");
@@ -18733,6 +18943,17 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
       if (typeof env?.probedAt === "number" && Date.now() - env.probedAt < CLI_ENV_TTL_MS) return env;
     } catch { /* missing / stale / corrupt */ }
     return null;
+  }
+
+  /**
+   * #2122 §10: the version the CLI probe last recorded for a backend — its cache file read whatever its age (the usage
+   * reader's version gate needs the last known version, not a fresh one); null when none was recorded. Never a probe.
+   */
+  private lastRecordedCliVersion(backend: string): string | null {
+    try {
+      const v = (JSON.parse(readFileSync(this.cliEnvPath(backend), "utf-8")) as { version?: unknown }).version;
+      return typeof v === "string" && v.trim() ? v.trim() : null;
+    } catch { return null; }
   }
 
   /** Return cached CLI versions immediately. Refresh is started after /sysinfo is sent. */
@@ -21083,6 +21304,7 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
       // mark every row done and tell the user "changes applied".
       return { rejected: why };
     }
+    this.migrateOfficeStorage();
     this.migrateNoticeDeliveryStorage();
 
     if (canvasWorkerEnabled(oldConfig?.web) !== this.canvasWorkerEnabled()) {

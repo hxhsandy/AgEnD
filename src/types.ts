@@ -159,8 +159,9 @@ export interface InstanceConfig {
   backend?: string;
   /**
    * Kiro CLI interface/engine profile. Only used when backend is "kiro-cli".
-   * "legacy" preserves AgEnD's current --legacy-ui launch; "tui" uses Kiro's
-   * default UI; "v3" opts into the experimental next-generation agent.
+   * "legacy" is kiro's classic UI/v1 engine (the value when unset); "tui" its
+   * TUI/v2 engine, which new instances are written with (#2598,
+   * newInstanceKiroUi); "v3" the next-generation agent (refused by validation).
    */
   kiro_ui?: "legacy" | "tui" | "v3";
   /**
@@ -190,12 +191,14 @@ export interface InstanceConfig {
   /**
    * Which dashboard features this instance may use, on top of its `tool_set` (dashboard-permissions.ts): `appearance`
    * (its own look: theme, pictures, widgets, ambient, effects, mod proposals), `task_board` (the `task` tool),
-   * `web_settings` (Settings → Web appearance for the person) and `office` (its character in the Office view: office_view,
-   * office_set — #2578). `false` switches one off; unset allows, except `office`: off unless set true. `defaults.dashboard`
+   * `web_settings` (Settings → Web appearance for the person). `false` switches one off; unset allows. Office uses
+   * the separate `office_access` switch (off unless true). `defaults.dashboard`
    * sets it for every instance and merges key by key with an instance's own. The fleet reads it at each tool call; the
    * daemon keeps it current, and an agent's tool menu follows from its next start.
    */
   dashboard?: import("./dashboard-permissions.js").DashboardAccess;
+  /** Office tools: off unless true; inherits defaults.office_access. Stored outside the legacy closed dashboard map. */
+  office_access?: boolean;
   /**
    * Detect a human-channel turn that ended without a delivered reply and ask
    * the agent to send one bounded recovery reply. Only capable backends use
