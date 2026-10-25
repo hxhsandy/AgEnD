@@ -14,6 +14,17 @@
  * the walkable graph moved on the pack, which itself never changes) — their shape checked by the page's own module
  * (fleet-office-pack.js checkLayoutOverrides), and, for a pack the host keeps, put on it (applyOverrides: a seat inside
  * its area, as many seats as the pack's, furniture the pack has) before a write is accepted.
+ *
+ * #2665: an item's night place (`overrides.furnitureNight`) is what the page reads and sends, but on disk it is kept
+ * beside the offices, never inside them —
+ *
+ *   { version: 1, rev, offices: [ … overrides without furnitureNight … ], furnitureNight: { "<office id>": { "<item>": [x, y] } } }
+ *
+ * — so a rollback stays readable: an older host checks each office's overrides strictly (an unknown key drops that
+ * office), but reads the file's other keys past version/rev/offices without looking. There every office keeps its name,
+ * members and the rest of its layout, and only the night places are left out (an older host's save drops them). Read
+ * back here, an office's night places are put on its overrides and checked with them; ones that no longer check (a
+ * pack that dropped the item: on a write) are left out, the office kept.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -136,6 +147,23 @@ export function checkOffices(raw: unknown, packOf?: OverridePack): OfficeCheck {
 }
 
 type State = { rev: number; offices: Office[] } | "unreadable";
+type NightPlaces = NonNullable<LayoutOverrides["furnitureNight"]>;
+/** #2665: what goes on disk — the offices without their night places, and those beside them by office id (none: no key). */
+function onDisk(offices: Office[]): { offices: Office[]; furnitureNight?: Record<string, NightPlaces> } {
+  const night: Record<string, NightPlaces> = {};
+  const plain = offices.map(o => {
+    if (!o.overrides?.furnitureNight) return o;
+    const { furnitureNight, ...rest } = o.overrides;
+    night[o.id] = furnitureNight;
+    return { ...o, overrides: rest };
+  });
+  return Object.keys(night).length ? { offices: plain, furnitureNight: night } : { offices: plain };
+}
+/** #2665: a stored office with its night places (kept beside it on disk) back on its overrides. */
+function withNight(raw: unknown, night: unknown): unknown {
+  if (!isObj(raw) || !isObj(night) || typeof raw.id !== "string" || !Object.prototype.hasOwnProperty.call(night, raw.id) || !isObj(raw.overrides)) return raw;
+  return { ...raw, overrides: { ...raw.overrides, furnitureNight: night[raw.id] } };
+}
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
 export class OfficeStore {
@@ -150,12 +178,15 @@ export class OfficeStore {
     try { body = readFileSync(this.path, "utf8"); }
     catch (err) { return (this.state = (err as NodeJS.ErrnoException).code === "ENOENT" ? { rev: 0, offices: [] } : "unreadable"); }
     try {
-      const doc = JSON.parse(body) as { version?: unknown; rev?: unknown; offices?: unknown };
+      const doc = JSON.parse(body) as { version?: unknown; rev?: unknown; offices?: unknown; furnitureNight?: unknown };
       if (doc.version !== 1 || !Number.isSafeInteger(doc.rev) || !Array.isArray(doc.offices)) return (this.state = "unreadable");
       const offices: Office[] = [], ids = new Set<string>();
+      const read = (raw: unknown): Office | null => {
+        try { return office(raw, "office"); } catch (err) { if (!(err instanceof Refused)) throw err; return null; }
+      };
       for (const raw of doc.offices.slice(0, OFFICE_LIMITS.offices)) {
-        try { const o = office(raw, "office"); if (!ids.has(o.id)) { ids.add(o.id); offices.push(o); } }
-        catch (err) { if (!(err instanceof Refused)) throw err; }
+        const o = read(withNight(raw, doc.furnitureNight)) ?? read(raw);                // night places that do not check: left out
+        if (o && !ids.has(o.id)) { ids.add(o.id); offices.push(o); }
       }
       return (this.state = { rev: doc.rev as number, offices });
     } catch { return (this.state = "unreadable"); }
@@ -179,7 +210,7 @@ export class OfficeStore {
     const checked = checkOffices(raw, this.packOf);
     if (!checked.ok) return checked;
     const rev = s.rev + 1;
-    try { atomicWriteFileSync(this.path, JSON.stringify({ version: 1, rev, offices: checked.offices }, null, 2) + "\n", { mode: 0o600 }); }
+    try { atomicWriteFileSync(this.path, JSON.stringify({ version: 1, rev, ...onDisk(checked.offices) }, null, 2) + "\n", { mode: 0o600 }); }
     catch (err) { return { ok: false, status: 503, error: "offices_write_failed", detail: (err as Error).message }; }
     this.state = { rev, offices: checked.offices };
     return { ok: true, rev, offices: clone(checked.offices) };

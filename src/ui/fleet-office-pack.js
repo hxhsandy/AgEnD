@@ -102,6 +102,7 @@
 //   { "pack": "cozy",                                 the pack they were made on (on another pack they are ignored)
 //     "seats": { "desks": [[120, 220], …] },          an area's seats: as many as the pack's, each inside the area's rect
 //     "furniture": { "rack": [1000, 150] },           an item's (x, y)
+//     "furnitureNight": { "elder": [300, 420] },      an item's night place (#2665: an item with a "night" only)
 //     "door": [640, 700],
 //     "waypoints": [{ "id": "hall", "x": 640, "y": 600 }, …], "edges": [["hall", "east"], …] }
 //                                                     the walkable graph, replaced whole (edges need waypoints)
@@ -109,7 +110,10 @@
 // Every coordinate is on the same 1280×720 logical canvas, in the same ranges as the pack's. checkLayoutOverrides is
 // the shape (the host checks it on every PUT /ui/offices); applyOverrides puts them on a checked pack, refusing a
 // seat outside its area, an area or furniture the pack does not have, or a seat count that differs (the host checks
-// that too, for a pack it keeps).
+// that too, for a pack it keeps). A night place goes on the item's `night` (its x, y), so at bedtime (nightFurniture)
+// it is the office's, else the pack's night x/y, else the item's (moved) day place. The host keeps `furnitureNight`
+// beside the offices on disk, never inside them: an older host's stricter check would drop the office (#2665,
+// web-office-store.ts).
 
 export const LOGICAL = { w: 1280, h: 720 };
 /** The people's depth: furniture below it is drawn under them, the rest over them. */
@@ -341,7 +345,7 @@ const OV_LIMIT = { areas: LIMIT.areas, seats: LIMIT.seats, furniture: LIMIT.furn
 export function checkLayoutOverrides(x) {
   try {
     obj(x, "overrides");
-    keys(x, ["pack", "seats", "furniture", "door", "waypoints", "edges"], "overrides");
+    keys(x, ["pack", "seats", "furniture", "furnitureNight", "door", "waypoints", "edges"], "overrides");
     if (typeof x.pack !== "string" || !ID.test(x.pack)) throw new Refused("overrides.pack", "1–40 letters, digits, _ or -");
     const out = { pack: x.pack };
     if (x.seats !== undefined) {
@@ -364,6 +368,16 @@ export function checkLayoutOverrides(x) {
         if (!nameOk(id)) throw new Refused(`overrides.furniture.${id}`, "an item's id");
         const q = point(p, `overrides.furniture.${id}`);
         out.furniture[id] = [q.x, q.y];
+      }
+    }
+    if (x.furnitureNight !== undefined) {
+      obj(x.furnitureNight, "overrides.furnitureNight");
+      if (Object.keys(x.furnitureNight).length > OV_LIMIT.furniture) throw new Refused("overrides.furnitureNight", `at most ${OV_LIMIT.furniture}`);
+      out.furnitureNight = {};
+      for (const [id, p] of Object.entries(x.furnitureNight)) {
+        if (!nameOk(id)) throw new Refused(`overrides.furnitureNight.${id}`, "an item's id");
+        const q = point(p, `overrides.furnitureNight.${id}`);
+        out.furnitureNight[id] = [q.x, q.y];
       }
     }
     if (x.door !== undefined) { const q = point(x.door, "overrides.door"); out.door = [q.x, q.y]; }
@@ -413,7 +427,13 @@ export function applyOverrides(pack, ov) {
     }
     const fids = new Set(pack.furniture.map((f) => f.id));
     for (const id of Object.keys(ov.furniture || {})) if (!fids.has(id)) throw new Refused(`overrides.furniture.${id}`, "an item the pack has");
-    const furniture = pack.furniture.map((f) => { const q = own(ov.furniture, f.id); return q ? { ...f, x: q[0], y: q[1] } : f; });
+    const nids = new Set(pack.furniture.filter((f) => f.night).map((f) => f.id));
+    for (const id of Object.keys(ov.furnitureNight || {})) if (!nids.has(id)) throw new Refused(`overrides.furnitureNight.${id}`, "an item with a night the pack has");
+    const furniture = pack.furniture.map((f) => {
+      const q = own(ov.furniture, f.id), n = own(ov.furnitureNight, f.id);
+      if (!q && !n) return f;
+      return { ...f, ...(q ? { x: q[0], y: q[1] } : {}), ...(n ? { night: { ...f.night, x: n[0], y: n[1] } } : {}) };
+    });
     const door = ov.door ? { x: ov.door[0], y: ov.door[1] } : pack.door;
     const graph = ov.waypoints ? { waypoints: ov.waypoints.map((w) => ({ ...w })), edges: (ov.edges || []).map((e) => [e[0], e[1]]) } : { waypoints: pack.waypoints, edges: pack.edges };
     return { ok: true, pack: { ...pack, areas, furniture, door, ...graph } };
@@ -421,6 +441,20 @@ export function applyOverrides(pack, ov) {
     if (err instanceof Refused) return { ok: false, error: err.message };
     throw err;
   }
+}
+
+/**
+ * #2665: overrides with only the night places `pack` can take (an item it has, with a `night`): a pack changed since
+ * (an item dropped, or its night) drops that entry, never the rest of the layout. applyOverrides itself stays strict
+ * (a write naming an item the pack lacks is refused, as for `furniture`).
+ */
+export function fitNight(pack, ov) {
+  if (!ov || !ov.furnitureNight || ov.pack !== pack.id) return ov;
+  const ok = new Set(pack.furniture.filter((f) => f.night).map((f) => f.id));
+  const kept = Object.entries(ov.furnitureNight).filter(([id]) => ok.has(id));
+  if (kept.length === Object.keys(ov.furnitureNight).length) return ov;
+  const { furnitureNight: _gone, ...rest } = ov;
+  return kept.length ? { ...rest, furnitureNight: Object.fromEntries(kept) } : rest;
 }
 
 /**
@@ -436,6 +470,12 @@ export function overridesBetween(pack, edited) {
   }
   const at = new Map(pack.furniture.map((f) => [f.id, f]));
   for (const f of edited.furniture) { const o = at.get(f.id); if (o && (o.x !== f.x || o.y !== f.y)) (ov.furniture ||= {})[f.id] = [f.x, f.y]; }
+  // #2665: a night place that differs from the pack's (its own x/y, or in place: null); in place again is no entry.
+  for (const f of edited.furniture) {
+    const o = at.get(f.id);
+    if (!o || !o.night || !f.night || f.night.x === null || f.night.y === null) continue;
+    if (o.night.x !== f.night.x || o.night.y !== f.night.y) (ov.furnitureNight ||= {})[f.id] = [f.night.x, f.night.y];
+  }
   if (pack.door.x !== edited.door.x || pack.door.y !== edited.door.y) ov.door = [edited.door.x, edited.door.y];
   if (!same(pack.waypoints, edited.waypoints) || !same(pack.edges, edited.edges)) {
     ov.waypoints = edited.waypoints.map((w) => ({ id: w.id, x: w.x, y: w.y }));

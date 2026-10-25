@@ -18,6 +18,8 @@ export interface LayoutOverrides {
   pack: string;
   seats?: Record<string, Array<[number, number]>>;
   furniture?: Record<string, [number, number]>;
+  /** #2665: an item's night place (an item with a `night` only). */
+  furnitureNight?: Record<string, [number, number]>;
   door?: [number, number];
   waypoints?: Array<{ id: string; x: number; y: number }>;
   edges?: Array<[string, string]>;
@@ -35,6 +37,7 @@ export function packImages(pack: CheckedPack): string[];
 export function packStrips(pack: CheckedPack): Array<{ at: string; strip: PackStrip }>;
 export function checkLayoutOverrides(x: unknown): { ok: true; overrides: LayoutOverrides } | { ok: false; error: string };
 export function applyOverrides(pack: CheckedPack, ov: LayoutOverrides | null | undefined): { ok: true; pack: CheckedPack } | { ok: false; error: string };
+export function fitNight<T extends LayoutOverrides | null | undefined>(pack: CheckedPack, ov: T): T;
 export function overridesBetween(pack: CheckedPack, edited: CheckedPack): LayoutOverrides | null;
 export function poseStrip(set: Record<string, PackStrip> | null | undefined, pose: string, heading?: { dx: number; dy: number } | null): { strip: PackStrip; mirror: boolean } | null;
 export function walkStrip(f: { walk?: Record<string, PackStrip> | null; walking?: boolean; heading?: { dx: number; dy: number } | null } | null | undefined): { strip: PackStrip; mirror: boolean } | null;

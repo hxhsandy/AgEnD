@@ -1846,6 +1846,10 @@ html.oo-immersive .p-fleet > .panel-body { z-index: 50; }
 .ol-seat > circle { fill: var(--ok); }
 .ol-furniture > rect { fill: var(--warn); }
 .ol-door > rect { fill: var(--danger); }
+/* #2665: an item's night place — a moon on a faint disc, a thin dashed line to its day place. */
+.ol-night > circle { fill: var(--surface); fill-opacity: 0.85; }
+.ol-night > .ol-moon { fill: var(--warn); stroke: none; pointer-events: none; }
+.ol-night-line { stroke: var(--warn); stroke-width: 1.5; stroke-dasharray: 4 3; stroke-opacity: 0.8; pointer-events: none; }
 .ol-waypoint > circle { fill: var(--focus); }
 .ol-handle.on > circle, .ol-handle.on > rect, .ol-handle:focus-visible > circle, .ol-handle:focus-visible > rect { stroke: var(--focus); stroke-width: 4; }
 .ol-bar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 8; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); padding: var(--s-2);
