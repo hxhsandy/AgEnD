@@ -1,4 +1,4 @@
 ---
 section: Fixed
 ---
-- **私訊通知設定可相容於 stable 降版及 Mac 自動還原版本（#2580）。** 設定頁改將私訊路由存入 `web.notice_delivery`，`web.notify_login` 和 `defaults.tips` 保持 boolean。舊版改送原頻道，保留偏好供之後升版恢復。新 fleet 仍預設登入通知私訊；短暫使用的字串格式會保留備份後轉換。降版 CI 新增以已發布舊版 validator 和設定重寫驗證產生的 YAML。
+- **2.3.2 beta 存下的私訊通知設定仍可載入（#2580）。** `web.notify_login` 或 `defaults.tips` 的 `"dm"` 值，以及任何 `web.notice_delivery` 鍵，都會接受並發出警告，視為開啟、發在頻道。啟動、重新載入與設定頁儲存時改寫成一般 boolean 並保留 `.bak`，任何舊版都能讀取。

@@ -1,4 +1,4 @@
 ---
 section: Fixed
 ---
-- **DM notice preferences remain compatible with stable and Mac restore versions (#2580).** Settings now stores DM routing in `web.notice_delivery`, keeping `web.notify_login` and `defaults.tips` boolean. Older releases post to the original topics and retain the preference for a later upgrade. New fleets still choose DM sign-in notices; the short-lived string form is converted with a backup. Downgrade CI now checks the generated YAML against the published old validator and its config rewrite.
+- **A DM notice setting saved by a 2.3.2 beta still loads (#2580).** A `"dm"` value for `web.notify_login` or `defaults.tips`, or any `web.notice_delivery` key, is accepted with a warning and read as on, posted in the topic. Startup, reload and Settings saves rewrite it as a plain boolean and keep a `.bak`, so every older release reads the file.

@@ -1,4 +1,4 @@
 ---
-section: Added
+section: Changed
 ---
-- **Send web sign-in notices and daily tips privately (#2580).** Choose `"dm"` for `web.notify_login` or `defaults.tips`, or use the three-way Settings controls. Failed DMs and missing accounts fall back to the original topic; existing fleets keep their current behavior. New fleets default sign-in notices to DM, while tips remain on in General. Public-link and guest notices go to the responsible admin, never the guest.
+- **Sign-in notices and daily tips stay in the topic, never by DM (#2580).** The DM choice tried in the 2.3.2 betas is withdrawn: a Telegram bot cannot DM someone who has not started it. `web.notify_login` and `defaults.tips` are Topic or Off in Settings, and new fleets no longer opt sign-in notices into DM. Sign-in codes, guest codes and public-link delivery stay private.
