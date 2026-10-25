@@ -74,8 +74,8 @@ export function assignSeats(pack, wants, prev = new Map()) {
 
 /**
  * The zones layout for `nodes` (buildOrgView's) on a pack: everyone but the missing at their seat. The same shape as
- * the desks layout (rooms → desks with a seat), in logical units, plus `mode: "zones"`, the pack's areas and graph, the
- * seats given (`seats`, the next call's `prev`), `crowd` and `over` (the areas over capacity).
+ * the desks layout (rooms → desks with a seat), in logical units, plus `mode: "zones"`, the pack's areas and graph (and
+ * its `straight`, #2634), the seats given (`seats`, the next call's `prev`), `crowd` and `over` (the areas over capacity).
  */
 export function zonesLayout(pack, nodes, prev = new Map(), { night = false } = {}) {
   // At night (#2568) the idle go to bed: the area asleep people go to while it has a free seat; the rest doze where they are.
@@ -89,7 +89,7 @@ export function zonesLayout(pack, nodes, prev = new Map(), { night = false } = {
     return { key: `zone/${n.name}`, node: n, x: s.x - 24, y: s.y - 52, w: 48, h: 66, seat: { x: s.x, y: s.y }, wp: null, area: s.area, slot: s.slot, night: sleepers.has(n.name) };
   });
   return { mode: "zones", rooms: [{ key: "\u0000zones", name: null, lobby: false, x: 0, y: 0, w: LOGICAL.w, h: LOGICAL.h, desks }], areas: pack.areas,
-    waypoints: pack.waypoints || [], edges: pack.edges || [], door: pack.door, width: LOGICAL.w, height: LOGICAL.h, seats, crowd, over };
+    waypoints: pack.waypoints || [], edges: pack.edges || [], straight: pack.straight === true, door: pack.door, width: LOGICAL.w, height: LOGICAL.h, seats, crowd, over };
 }
 
 // ── Walking ──
@@ -107,6 +107,16 @@ export function headingAt(pts, t) {
     left -= l;
   }
   return null;
+}
+/**
+ * #2634: a polyline with each diagonal leg made an L — across first, then up or down — so a character set's three
+ * walking strips always fit; legs already across or up/down are kept, and no point repeats (no zero-length leg).
+ */
+export function straighten(pts) {
+  const out = [];
+  const add = (x, y) => { const l = out[out.length - 1]; if (!l || l.x !== x || l.y !== y) out.push({ x, y }); };
+  for (const p of pts) { const l = out[out.length - 1]; if (l && l.x !== p.x && l.y !== p.y) add(p.x, l.y); add(p.x, p.y); }
+  return out;
 }
 // ── Night (#2568) ──
 
@@ -249,8 +259,8 @@ export function createMail({ max = MAIL.MAX } = {}) {
 
 /**
  * Where each character is. `sync(targets, now, graph, still)`: targets name → { x, y }; someone new is already there;
- * someone whose target moved walks from where they are now along the graph (routeVia) — or is there at once when
- * `still` (reduced motion); someone gone is forgotten. `at(name, now)` → { x, y, walking } and, while walking, `heading`: the
+ * someone whose target moved walks from where they are now along the graph (routeVia; each diagonal leg an L when the
+ * graph is `straight`, #2634) — or is there at once when `still` (reduced motion); someone gone is forgotten. `at(name, now)` → { x, y, walking } and, while walking, `heading`: the
  * current step's { dx, dy }, which picks a pack's walkDown / walkUp / walkSide strip; `moving(now)`.
  */
 export function createWalkers() {
@@ -269,7 +279,8 @@ export function createWalkers() {
         const w = by.get(name);
         if (!w || still) { if (!w || w.to.x !== to.x || w.to.y !== to.y) by.set(name, { pts: null, to }); continue; }
         if (w.to.x === to.x && w.to.y === to.y) continue;
-        const here = posAt(w, now), pts = routeVia(graph, { x: here.x, y: here.y }, { x: to.x, y: to.y });
+        const here = posAt(w, now), via = routeVia(graph, { x: here.x, y: here.y }, { x: to.x, y: to.y });
+        const pts = graph.straight ? straighten(via) : via;   // #2634: timed along the longer way
         by.set(name, { pts, start: now, ms: Math.max(1, pathLength(pts) / WALK.SPEED), to });
       }
     },

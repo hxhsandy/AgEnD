@@ -315,6 +315,8 @@ A pack may add a `foreground` (a 16:9 PNG over the whole scene, zones packs only
 and items in the air, below name tags, bubbles and "+N" — door frames, pillars, table fronts that hide whoever walks
 behind them. A furniture item's `depth` may be `"y"`: drawn among the people by base y (whoever stands lower is in
 front). Numeric depths keep their meaning (under 1000 under the people, 1000 and up over them).
+A pack may set `"straight": true` (#2634): each diagonal leg of a walk becomes an L (across, then up or down), so the
+three walking strips always fit; lay its graph out with horizontal and vertical edges and the corners land on the aisles.
 
 **Live traffic** (**Live** switch, on by default; **Key** in the toolbar explains it, as a strip above the canvas): a line for each message between instances.
 Colour by kind — task (delegate_task) purple, send/query/update teal, report pink, broadcast orange; between teams
