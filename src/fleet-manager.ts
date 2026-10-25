@@ -249,7 +249,7 @@ import { discordGeneralChannelId } from "./discord-general.js";
 import { parseEnvText } from "./env-file.js";
 import { isDisallowedIntentsError, isRejectedTokenError } from "./discord-permissions.js";
 import { filterUsageProviders, formatDiscordUsageActivity, getUsageSnapshot, handleUsageRequest, isUsagePath, usageProviderIdForBackend } from "./usage/usage-api.js";
-import { LOGIN_FLOWS, LOGIN_BACKEND_ALIASES, type LoginFlow, type AuthCheckResult } from "./login-flows.js";
+import { LOGIN_FLOWS, checkAuthStatus, LOGIN_BACKEND_ALIASES, type LoginFlow, type AuthCheckResult } from "./login-flows.js";
 import { LoginSession } from "./login-manager.js";
 import { runOnLoginShell } from "./login-shell.js";
 import { tightenInstanceDirs } from "./private-dir.js";
@@ -269,6 +269,10 @@ import { admitProfileLogin, LoginController, LOGIN_TOKEN_RESEND_PREFIX, POST_LOG
 import { WebBackendLogins, dashboardSignInSupported, type SignInTarget } from "./web-backend-login.js";
 import { runBeforeDeadline } from "./deadline.js";
 import { LoginWindowLock } from "./login-window-lock.js";
+import { BrowserBackendSignIns } from "./browser-backend-signins.js";
+import { createStructuredSignInTransport } from "./structured-signin-transport.js";
+import { ONBOARDING_BACKENDS, readPendingBackendSignIns } from "./backend-signin-pending.js";
+import { structuredSignInSupported } from "./structured-signin.js";
 import { handleSettingsRequest, type RawConfigPatch } from "./settings-api.js";
 import { setLocale, detectLocale, getLocale, t } from "./locale.js";
 import { recentChatContext } from "./log-tail.js";
@@ -7898,7 +7902,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
   }
 
   private async startAllWithinDeadline(configPath: string, deadline: StartupMemoryDeadline): Promise<void> {
-    this.loginWindow.reopen();                          // a stopAll → startAll restart must accept login windows again
+    if (!this.structuredLoginCleanupFailed) this.loginWindow.reopen();                          // a stopAll → startAll restart must accept login windows again
     this.loginController?.reopen();
     const startupStartedAt = Date.now();
     FleetManager.signalTarget = this;
@@ -14758,6 +14762,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         return this.deliveryOutbox.acknowledge(deliveryId, by);
       },
       tasks: () => this.needsYouTaskItems(),
+      backendSignIns: () => this.needsYouBackendSignIns(),
       taskAction: action => this.taskActionFromChat(action),
       settings: () => ({
         liveMessage: this.fleetConfig?.needs_you?.live_message !== false,
@@ -16946,6 +16951,49 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     return this.loginController;
   }
 
+  private browserBackendSignInsInstance: BrowserBackendSignIns | null = null;
+  private structuredLoginCleanupFailed = false;
+  private readonly pendingBackendSince = new Map<string, number>();
+
+  private browserSignInOwnerCurrent(owner: object): boolean {
+    const record = owner as SessionRecord;
+    return !this.shuttingDown && typeof record.handle === "string" && this.webSessions?.findByHandle(record.handle) === owner
+      && this.isLocalAdminSession(record.handle);
+  }
+  /** #2599: default-account controls share the exact writer reservation with chat/profile/install. */
+  get browserBackendSignIns(): BrowserBackendSignIns {
+    return this.browserBackendSignInsInstance ??= new BrowserBackendSignIns({
+      dataDir: this.dataDir, lock: this.loginWindow,
+      current: owner => this.browserSignInOwnerCurrent(owner),
+      installed: async () => ONBOARDING_BACKENDS.filter(backend => this.isCliInstalled(backend)),
+      checkAuth: backend => checkAuthStatus(LOGIN_FLOWS[backend]!.authCheck!),
+      transport: () => createStructuredSignInTransport(),
+      changed: (event, owner, launched) => {
+        try { this.eventLog?.insert("login", "browser_backend_signin", event); } catch { /* safe metadata only */ }
+        broadcastSseEvent(this.sseClients, "backend_login", {}, err => this.logger.debug({ err }, "backend_login event failed"));
+        this.needsYou?.poke();
+        if (!this.browserSignInOwnerCurrent(owner)) return;
+        if (event.phase === "starting") {
+          const record = owner as SessionRecord;
+          this.notifyFleetError(t("login.web_dashboard_notice", event.backend, record.label, record.handle.slice(0, 8)));
+        }
+        if (event.phase === "done") {
+          void this.backendAvailability.refresh([event.backend], { force: true }).catch(() => {});
+          if (launched) void this.recoverBackendInstances(event.backend, undefined, null).catch(() => this.logger.warn({ backend: event.backend }, "Post sign-in recovery failed"));
+        }
+      },
+    });
+  }
+
+  private needsYouBackendSignIns(): import("./needs-you.js").BackendSignInInput[] {
+    const pending = readPendingBackendSignIns(this.dataDir).pending;
+    for (const backend of this.pendingBackendSince?.keys() ?? []) if (!pending.includes(backend as typeof pending[number])) this.pendingBackendSince.delete(backend);
+    return pending.map(backend => {
+      if (!this.pendingBackendSince.has(backend)) this.pendingBackendSince.set(backend, Date.now());
+      return { backend, since: this.pendingBackendSince.get(backend)!, browser: structuredSignInSupported(backend) };
+    });
+  }
+
   /** #2233: sign-ins started from the web dashboard (local admin sessions), on the same controller as chat's. */
   private webBackendLoginsInstance: WebBackendLogins | null = null;
   get webBackendLogins(): WebBackendLogins {
@@ -17329,6 +17377,10 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     // "cancelled" is the detail both legacy onDone handlers keep quiet about —
     // a stopping fleet must not announce "login failed — fleet shutdown".
     await Promise.all([
+      bounded(this.browserBackendSignInsInstance?.close().then(confirmed => {
+        if (confirmed) this.browserBackendSignInsInstance = null;
+        else { this.structuredLoginCleanupFailed = true; this.logger.error("Structured login cleanup failed; sign-in admission remains closed until the host is restarted."); }
+      }), "browser-controls"),
       bounded(this.loginController?.shutdown(), "web-login"),
       bounded(this.activeInstall?.session.cancel("cancelled"), "install"),
     ]);
@@ -17344,6 +17396,12 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       this.installHandoff.cancelled = true;
       this.installHandoff = null;
       return t("login.cancelled", backend);
+    }
+    const browserLogin = this.browserBackendSignInsInstance, browserBackend = browserLogin?.activeBackend;
+    if (browserLogin && browserBackend) {
+      const confirmed = await browserLogin.close();
+      if (confirmed) this.browserBackendSignInsInstance = null;
+      return confirmed ? t("login.cancelled", browserBackend) : t("login.browser_cleanup_failed");
     }
     if (this.loginController?.isActive()) return this.loginController.cancel();
     return t("login.no_session");
