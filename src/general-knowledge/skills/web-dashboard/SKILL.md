@@ -278,7 +278,11 @@ in each (whole teams or single instances; none = everyone) and its style, and up
 artist's pictures: `manifest.json` plus PNGs, format v1, kept in `web-office-skins/` in the AgEnD home; the host
 checks every rule — PNG only, each strip exactly frames·w × h, a 16:9 background, size caps — and never changes a
 pack; a strip may give its displayed size, `dw`/`dh`, apart from its pictures' size, and a character may walk four
-ways with `walkDown`, `walkUp` and `walkSide`, the side one mirrored for left). **Style** (per browser for the whole fleet, per office for a stored one): **Desks**,
+ways with `walkDown`, `walkUp` and `walkSide`, the side one mirrored for left). #2692: an agent with **Office skin
+packs** on (`office_pack_access`, Dashboard access) can check, upload, replace, delete and restore packs itself (one
+previous version kept per pack); **Agents changing packs** under the packs names those agents, sets whether their changes
+**Need my yes** (the default) or **Apply at once**, and approves or rejects the waiting ones (also from the notice's
+buttons in General); every change is logged and told in General. **Style** (per browser for the whole fleet, per office for a stored one): **Desks**,
 **Studio** (one scene — Work, Lounge, Help desk, Nap corner — where each instance walks to the area for its state),
 **Cozy** (#2631: the same in a warm pixel-art office drawn as one picture; its notice board says a skin pack can
 restyle it; the default for a browser that has not picked a style and for a new office — a saved office keeps its
