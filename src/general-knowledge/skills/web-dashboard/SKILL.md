@@ -288,7 +288,10 @@ Cozy or a pack,
 waypoints (or Tab to one and use the arrow keys, Shift for 10), add or remove waypoints and join or unjoin
 corridors; an item that sleeps at bedtime (a pack's `night`) has a night handle too ("Item {id} (night)": its night
 picture faint, a moon, a line to its day place; on the day place while it sleeps in place) — drag it to give the item
-its own night place, **Back to the pack's night place** undoes it (#2665); **Save layout** keeps the moves as that
+its own night place, **Back to the pack's night place** undoes it (#2665); a selected seat has **Reserved for** (the
+office's members, several allowed) and **Lend when away** (#2691) — whoever it is for sits there first when they come
+to its area, nobody else does unless it is lent while they are all away (a borrower moves off when one comes), and a
+reserved seat's handle is ringed; a pack can reserve seats as well; **Save layout** keeps the moves as that
 office's overrides (the pack stays as uploaded), **Reset** goes back to the pack's own. On a screen ≥1200 px its controls sit in the right-hand panel (the canvas whole for the
 handles); narrower, or in fullscreen, they are the bar along the canvas's bottom. Esc is Cancel. While either editor
 is docked the page beside it works, Ctrl+K search included; leaving the page with unsaved changes asks first

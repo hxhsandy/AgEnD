@@ -276,7 +276,10 @@ Cozy or a pack,
 waypoints (or Tab to one and use the arrow keys, Shift for 10), add or remove waypoints and join or unjoin
 corridors; an item that sleeps at bedtime (a pack's `night`) has a night handle too ("Item {id} (night)": its night
 picture faint, a moon, a line to its day place; on the day place while it sleeps in place) — drag it to give the item
-its own night place, **Back to the pack's night place** undoes it (#2665); **Save layout** keeps the moves as that
+its own night place, **Back to the pack's night place** undoes it (#2665); a selected seat has **Reserved for** (the
+office's members, several allowed) and **Lend when away** (#2691) — whoever it is for sits there first when they come
+to its area, nobody else does unless it is lent while they are all away (a borrower moves off when one comes), and a
+reserved seat's handle is ringed; a pack can reserve seats as well; **Save layout** keeps the moves as that
 office's overrides (the pack stays as uploaded), **Reset** goes back to the pack's own. While it is open the office picker and Edit offices wait (**Cancel** closes it); if someone
 saved the offices meanwhile, Save says so and keeps your layout — Save again puts it on the current list. A crowded area packs extra people into a tighter grid, then shows "+N" in its corner; there
 only calls and work get bubbles (a few at most) and name tags show on hover or focus. **Hide paused and stopped**

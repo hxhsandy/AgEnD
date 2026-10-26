@@ -42,33 +42,62 @@ export function overflowSpots(area, need = 0) {
  * slot }). Someone still in the same area keeps their slot; the others take the first free seat, in the area's order,
  * then an overflow spot (slot -1, -2, …). No two share one. Whoever finds neither is counted in `crowd` (area → n).
  * Returns { seats: Map name → { area, slot, x, y }, crowd: Map }.
+ *
+ * #2691: a seat may be reserved (its `for`). Whoever it is for, wanting its area, takes a free seat reserved for them
+ * before anything else (the one they sat on last time, else their first in the area's order) — owners are seated
+ * before anyone keeps a slot, so a borrower on an owner's seat moves off when the owner comes. Everyone else keeps
+ * their slot or takes the first free seat not reserved for someone else: a plain one, else a reserved one that says
+ * `lend` (one no owner of it took). A reserved seat not lent, none of whose owners wants the area, is unavailable:
+ * the area's overflow spots and `over` count without it. Seats without `for` work as before.
  */
 export function assignSeats(pack, wants, prev = new Map()) {
-  const seats = new Map(), crowd = new Map(), taken = new Map(), spill = new Map(), demand = new Map();
+  const seats = new Map(), crowd = new Map(), taken = new Map(), spill = new Map(), demand = new Map(), wanting = new Map();
   const areaOf = (a) => own(pack.areas, a);
-  for (const w of wants) demand.set(w.area, (demand.get(w.area) || 0) + 1);
+  for (const w of wants) {
+    demand.set(w.area, (demand.get(w.area) || 0) + 1);
+    if (!wanting.has(w.area)) wanting.set(w.area, new Set());
+    wanting.get(w.area).add(w.name);
+  }
+  const mine = (s, name) => !!s.for && s.for.includes(name);
+  const lent = (s) => !!s.for && s.lend === true;
+  // The seats someone wanting the area may end up on: plain, lent, or reserved for someone who wants it.
+  const usable = (area) => areaOf(area).seats.filter((s) => !s.for || s.lend === true || s.for.some((n) => wanting.get(area).has(n))).length;
   const spotsOf = (area) => {
-    if (!spill.has(area)) spill.set(area, overflowSpots(areaOf(area), Math.max(0, (demand.get(area) || 0) - areaOf(area).seats.length)));
+    if (!spill.has(area)) spill.set(area, overflowSpots(areaOf(area), Math.max(0, (demand.get(area) || 0) - usable(area))));
     return spill.get(area);
   };
   const pos = (area, slot) => (slot >= 0 ? areaOf(area).seats[slot] : spotsOf(area)[-slot - 1]);
   const usedIn = (area) => { if (!taken.has(area)) taken.set(area, new Set()); return taken.get(area); };
   const give = (name, area, slot) => { const p = pos(area, slot); usedIn(area).add(slot); seats.set(name, { area, slot, x: p.x, y: p.y }); };
+  const free = (w) => !seats.has(w.name) && !!areaOf(w.area);
+  // Owners first: their own seat from last time, then their first free one.
+  for (const w of wants) {
+    const p = prev.get(w.name), s = p && p.area === w.area && p.slot >= 0 && areaOf(w.area) ? areaOf(w.area).seats[p.slot] : null;
+    if (s && mine(s, w.name) && !usedIn(w.area).has(p.slot)) give(w.name, w.area, p.slot);
+  }
+  for (const w of wants) {
+    if (!free(w)) continue;
+    const used = usedIn(w.area), slot = areaOf(w.area).seats.findIndex((s, i) => mine(s, w.name) && !used.has(i));
+    if (slot >= 0) give(w.name, w.area, slot);
+  }
   for (const w of wants) {
     const p = prev.get(w.name);
-    if (!p || p.area !== w.area || !areaOf(w.area) || !pos(w.area, p.slot) || usedIn(w.area).has(p.slot)) continue;
+    if (!free(w) || !p || p.area !== w.area || !pos(w.area, p.slot) || usedIn(w.area).has(p.slot)) continue;
+    const s = p.slot >= 0 ? areaOf(w.area).seats[p.slot] : null;
+    if (s && s.for && !lent(s)) continue;                       // reserved for someone else (theirs would be taken above)
     give(w.name, w.area, p.slot);
   }
   for (const w of wants) {
-    if (seats.has(w.name) || !areaOf(w.area)) continue;
+    if (!free(w)) continue;
     const used = usedIn(w.area), area = areaOf(w.area);
-    let slot = area.seats.findIndex((_, i) => !used.has(i));
+    let slot = area.seats.findIndex((s, i) => !s.for && !used.has(i));
+    if (slot < 0) slot = area.seats.findIndex((s, i) => lent(s) && !used.has(i));
     if (slot < 0) { const j = spotsOf(w.area).findIndex((_, i) => !used.has(-i - 1)); slot = j < 0 ? null : -j - 1; }
     if (slot === null) crowd.set(w.area, (crowd.get(w.area) || 0) + 1);
     else give(w.name, w.area, slot);
   }
-  // Over capacity: more people want the area than it has seats (their bubbles and tags are thinned, fleet-office.js).
-  const over = new Set([...demand].filter(([a, n]) => areaOf(a) && n > areaOf(a).seats.length).map(([a]) => a));
+  // Over capacity: more people want the area than it has seats for them (their bubbles and tags are thinned, fleet-office.js).
+  const over = new Set([...demand].filter(([a, n]) => areaOf(a) && n > usable(a)).map(([a]) => a));
   return { seats, crowd, over };
 }
 
@@ -79,9 +108,17 @@ export function assignSeats(pack, wants, prev = new Map()) {
  */
 export function zonesLayout(pack, nodes, prev = new Map(), { night = false } = {}) {
   // At night (#2568) the idle go to bed: the area asleep people go to while it has a free seat; the rest doze where they are.
-  const bed = zoneOf(pack, "paused"), beds = (own(pack.areas, bed)?.seats || []).length, sleepers = new Set(), inBed = new Set();
-  let used = nodes.filter((n) => n.state !== "idle" && zoneOf(pack, n.state) === bed).length;
-  if (night) for (const n of nodes) if (n.state === "idle") { sleepers.add(n.name); if (used < beds) { used++; inBed.add(n.name); } }
+  const bed = zoneOf(pack, "paused"), bedSeats = own(pack.areas, bed)?.seats || [], sleepers = new Set(), inBed = new Set();
+  const awake = nodes.filter((n) => n.state !== "idle" && zoneOf(pack, n.state) === bed);
+  let used = awake.length;
+  if (night) {
+    // #2691: a bed reserved for people none of whom may come there, and not lent, is no bed; whoever has a bed of
+    // their own there goes to bed first.
+    const idle = nodes.filter((n) => n.state === "idle"), coming = new Set([...awake, ...idle].map((n) => n.name));
+    const beds = bedSeats.filter((s) => !s.for || s.lend === true || s.for.some((m) => coming.has(m))).length;
+    const hasBed = (n) => bedSeats.some((s) => s.for && s.for.includes(n.name));
+    for (const n of [...idle.filter(hasBed), ...idle.filter((n) => !hasBed(n))]) { sleepers.add(n.name); if (used < beds) { used++; inBed.add(n.name); } }
+  }
   const wants = nodes.filter((n) => n.state !== "missing").map((n) => ({ name: n.name, area: inBed.has(n.name) ? bed : zoneOf(pack, n.state) }));
   const { seats, crowd, over } = assignSeats(pack, wants, prev);
   const desks = nodes.filter((n) => seats.has(n.name)).map((n) => {
