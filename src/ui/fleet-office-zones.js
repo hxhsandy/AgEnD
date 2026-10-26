@@ -109,18 +109,32 @@ export function assignSeats(pack, wants, prev = new Map()) {
 export function zonesLayout(pack, nodes, prev = new Map(), { night = false } = {}) {
   // At night (#2568) the idle go to bed: the area asleep people go to while it has a free seat; the rest doze where they are.
   const bed = zoneOf(pack, "paused"), bedSeats = own(pack.areas, bed)?.seats || [], sleepers = new Set(), inBed = new Set();
-  const awake = nodes.filter((n) => n.state !== "idle" && zoneOf(pack, n.state) === bed);
-  let used = awake.length;
+  const wantsOf = (beds) => nodes.filter((n) => n.state !== "missing").map((n) => ({ name: n.name, area: beds.has(n.name) ? bed : zoneOf(pack, n.state) }));
+  let placed = assignSeats(pack, wantsOf(inBed), prev);
   if (night) {
-    // #2691: a bed reserved for people none of whom may come there, and not lent, is no bed; whoever has a bed of
-    // their own there goes to bed first.
-    const idle = nodes.filter((n) => n.state === "idle"), coming = new Set([...awake, ...idle].map((n) => n.name));
-    const beds = bedSeats.filter((s) => !s.for || s.lend === true || s.for.some((m) => coming.has(m))).length;
+    // #2691 review: who goes to bed is decided by the seat assignment itself (assignSeats' reservation rules), one
+    // sleeper at a time — whoever has a bed of their own there first, then the rest in the fleet's order. A sleeper
+    // goes to bed only if it gives them a bed (never an overflow spot) without taking one from anyone already in one
+    // (the awake first, then the sleepers admitted before), unless it is a bed reserved for them: an owner comes first,
+    // as by day. Everyone else dozes where they are.
+    const inABed = (r) => new Set([...r.seats].filter(([, s]) => s.area === bed && s.slot >= 0).map(([name]) => name));
+    const idle = nodes.filter((n) => n.state === "idle");
     const hasBed = (n) => bedSeats.some((s) => s.for && s.for.includes(n.name));
-    for (const n of [...idle.filter(hasBed), ...idle.filter((n) => !hasBed(n))]) { sleepers.add(n.name); if (used < beds) { used++; inBed.add(n.name); } }
+    for (const n of idle) sleepers.add(n.name);
+    for (const n of [...idle.filter(hasBed), ...idle.filter((n) => !hasBed(n))]) {
+      const trial = assignSeats(pack, wantsOf(new Set([...inBed, n.name])), prev), s = trial.seats.get(n.name);
+      if (!s || s.area !== bed || s.slot < 0) {
+        if (!hasBed(n)) break;                                  // no bed free for anyone without one: none for the rest either
+        continue;
+      }
+      const before = inABed(placed), after = inABed(trial);
+      const theirs = !!bedSeats[s.slot].for && bedSeats[s.slot].for.includes(n.name);
+      if (!theirs && [...before].some((m) => !after.has(m))) continue;
+      inBed.add(n.name);
+      placed = trial;
+    }
   }
-  const wants = nodes.filter((n) => n.state !== "missing").map((n) => ({ name: n.name, area: inBed.has(n.name) ? bed : zoneOf(pack, n.state) }));
-  const { seats, crowd, over } = assignSeats(pack, wants, prev);
+  const { seats, crowd, over } = placed;
   const desks = nodes.filter((n) => seats.has(n.name)).map((n) => {
     const s = seats.get(n.name);
     return { key: `zone/${n.name}`, node: n, x: s.x - 24, y: s.y - 52, w: 48, h: 66, seat: { x: s.x, y: s.y }, wp: null, area: s.area, slot: s.slot, night: sleepers.has(n.name) };

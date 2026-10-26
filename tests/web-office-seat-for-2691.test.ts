@@ -135,6 +135,39 @@ describe("assignSeats with reserved seats", () => {
     const L2 = Z.zonesLayout(pk, [node("early", "idle"), node("mid", "idle")], new Map(), { night: true });
     expect(Object.fromEntries([...L2.seats].map(([n, s]: any) => [n, `${s.area}:${s.slot}`]))).toEqual({ early: "nap:1", mid: "lounge:2" });
   });
+  // #2693 review (Prism P2): who goes to bed is what the seat assignment gives, not a count of people and beds.
+  describe("bedtime goes by the beds actually given", () => {
+    const napPack = (nap: unknown[]) => {
+      const m = MANIFEST();
+      return PK.checkSkinPack({ ...m, areas: { ...m.areas, nap: { rect: [0, 400, 600, 320], seats: nap } },
+        stateZones: { working: "desks", idle: "lounge", paused: "nap" } }).pack;
+    };
+    const node = (name: string, state: string) => ({ name, state, i: { name } });
+    const at = (pk: any, nodes: any[]) => Object.fromEntries([...Z.zonesLayout(pk, nodes, new Map(), { night: true }).seats].map(([n, s]: any) => [n, `${s.area}:${s.slot}`]));
+    it("a paused outsider does not keep an idle owner out of their only bed (it stayed empty)", () => {
+      const where = at(napPack([{ x: 100, y: 500, for: ["owner"] }]), [node("paused", "paused"), node("owner", "idle")]);
+      expect(where.owner).toBe("nap:0");
+      expect(where.paused).toMatch(/^nap:-\d+$/);                      // the bed is not theirs: an overflow spot, as by day
+    });
+    it("two beds for one owner are one bed: another sleeper dozes in the lounge, not in the nap area's overflow", () => {
+      const where = at(napPack([{ x: 100, y: 500, for: ["owner"] }, { x: 300, y: 500, for: ["owner"] }]), [node("owner", "idle"), node("other", "idle")]);
+      expect(where).toEqual({ owner: "nap:0", other: "lounge:2" });
+    });
+    it("the awake keep their beds: a sleeper takes only a bed left free, else dozes where they are", () => {
+      const pk = napPack([[100, 500]]);
+      expect(at(pk, [node("tired", "idle"), node("paused", "paused")])).toEqual({ paused: "nap:0", tired: "lounge:2" });
+      // A sleeper who held the bed last time keeps it only when nobody awake needs it.
+      const prev = new Map([["tired", { area: "nap", slot: 0 }]]);
+      const L = Z.zonesLayout(pk, [node("tired", "idle"), node("paused", "paused")], prev, { night: true });
+      expect(Object.fromEntries([...L.seats].map(([n, s]: any) => [n, `${s.area}:${s.slot}`]))).toEqual({ paused: "nap:0", tired: "lounge:2" });
+      expect(at(pk, [node("tired", "idle"), node("dozy", "idle")])).toEqual({ tired: "nap:0", dozy: "lounge:2" });
+    });
+    it("an owner takes their lent bed back from someone awake on it, as by day", () => {
+      const where = at(napPack([{ x: 100, y: 500, for: ["owner"], lend: true }]), [node("borrower", "paused"), node("owner", "idle")]);
+      expect(where.owner).toBe("nap:0");
+      expect(where.borrower).toMatch(/^nap:-\d+$/);
+    });
+  });
 });
 
 describe("the office's own reservations (overrides.seatFor)", () => {
@@ -170,6 +203,13 @@ describe("the office's own reservations (overrides.seatFor)", () => {
     expect(PK.fitSeatFor(base, { pack: "sofapack", seatFor: { attic: { 0: { for: ["c"], lend: false } } } })).toEqual({ pack: "sofapack" });
     expect(PK.fitSeatFor(base, { pack: "other", seatFor: { attic: {} } })).toEqual({ pack: "other", seatFor: { attic: {} } });
     expect(PK.applyOverrides(base, PK.fitSeatFor(base, ov)).ok).toBe(true);
+    // #2693 review (Prism P3): an area gone with no slots under it is dropped too (0 of 0 kept), the rest kept.
+    const empty = { pack: "sofapack", door: [10, 10], seatFor: { removed: {} } };
+    expect(PK.checkLayoutOverrides(empty).ok).toBe(true);
+    expect(PK.fitSeatFor(base, empty)).toEqual({ pack: "sofapack", door: [10, 10] });
+    expect(PK.applyOverrides(base, PK.fitSeatFor(base, empty)).ok).toBe(true);
+    expect(PK.fitSeatFor(base, { pack: "sofapack", seatFor: { removed: {}, lounge: { 1: { for: ["a"], lend: false } } } }))
+      .toEqual({ pack: "sofapack", seatFor: { lounge: { 1: { for: ["a"], lend: false } } } });
   });
 });
 

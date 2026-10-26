@@ -529,7 +529,8 @@ export function fitSeatFor(pack, ov) {
   for (const [area, slots] of Object.entries(ov.seatFor)) {
     const a = own(pack.areas, area);
     const ok = Object.entries(slots).filter(([slot]) => a && !!a.seats[Number(slot)]);
-    if (ok.length !== Object.keys(slots).length) dropped = true;
+    // An area the pack no longer has is dropped even with no slots under it (`{}`: 0 kept of 0, yet applyOverrides refuses it).
+    if (!a || ok.length !== Object.keys(slots).length) dropped = true;
     if (ok.length) kept[area] = Object.fromEntries(ok);
   }
   if (!dropped) return ov;
