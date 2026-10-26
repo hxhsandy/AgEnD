@@ -407,7 +407,9 @@ export function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false
     }
     // A furniture item's own name (#2574: an NPC drawn as furniture), tagged like a person; none on a tile too small to read.
     // #2698: an item hiding its people carries their tags too, in one row at its tag point (its own first; each keeps
-    // its place in the row while another's tag is left out), and their bubbles, over its picture.
+    // its place in the row while another's tag is left out), and their bubbles, over its picture. The tags drawn are
+    // kept on the scene (`heldTags`): hitPart hits each person on theirs, past the picture's edge too (#2699 review).
+    const held = [];
     for (const f of furniture) {
       const on = people.filter((q) => live.hidden.get(q.look.name) === f.id);
       if (!on.length) {
@@ -423,9 +425,12 @@ export function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false
         if (q) speakers.push({ look: q.look, x: r.x + 10, y: top, area: q.d.area });
         if (q ? !tagged(q) : tagsOff) continue;
         sk.drawTag(ctx, r.x, f.y, r.look, env);
-        tags.push(tagBox(ctx, r.x, f.y, r.look.label));
+        const box = tagBox(ctx, r.x, f.y, r.look.label);
+        tags.push(box);
+        if (q) held.push({ name: q.look.name, id: f.id, box });
       }
     }
+    p.heldTags = held;
   } else {
     for (const d of p.desks) { const look = p.looks.get(d.key); sk.drawCharacter(ctx, d, actPosed(p, look), ms, env); speakers.push({ look, x: d.x + 58, y: d.y + 12 }); }
     blit(p.layers.front);
@@ -459,12 +464,18 @@ export function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false
  */
 export function hitPart(p, x, y, t) {
   if (!p.zones) return deskAt(p.L, x, y);
-  // #2698: someone an item hides is hit on it (its picture and their tag row; several share its width, left to right
-  // in the row's order), after everyone drawn as themselves.
+  // #2698: someone an item hides is hit on it, after everyone drawn as themselves: on their tag as drawPart last drew
+  // it (the row can run past the picture: a long label, long names), else on its picture and the tag row under it
+  // (several share its width, left to right in the row's order).
   const { hidden } = furnitureAt(p, t);
   const d = personAt(hidden.size ? p.all.filter((dk) => !dk.node || !hidden.has(dk.node.name)) : p.all, x, y, (dk) => p.walkers.at(dk.node.name, t),
     (dk, at) => (p.skin.charBox && p.looks.get(dk.key) ? p.skin.charBox(p.looks.get(dk.key), at) : null));
   if (d || !hidden.size) return d;
+  for (const h of [...(p.heldTags || [])].reverse()) {
+    const b = h.box;
+    if (hidden.get(h.name) !== h.id || x < b.x || x >= b.x + b.w || y < b.y || y >= b.y + b.h) continue;
+    return p.all.find((dk) => dk.node && dk.node.name === h.name) || null;
+  }
   const sk = p.skin.pack, drawn = strollFurniture(p.night ? nightFurniture(sk.furniture) : sk.furniture, (k) => p.walkers.at(k, t));
   for (const f of [...drawn].reverse()) {
     if (!f.sprite || ![...hidden.values()].includes(f.id)) continue;

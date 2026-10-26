@@ -151,6 +151,59 @@ describe("hides in the scene", () => {
   });
 });
 
+describe("hides: hit on the tags as drawn (#2699 review)", () => {
+  /** quill and atlas asleep on one bed with a long label and long names: a tag row wider than the picture. */
+  function crowd() {
+    const LONG = "The long four-poster bed by the window";   // under the 40-character cap, wider than a tag
+    const c = PK.checkSkinPack(pack([{ ...BED, label: LONG, activeFor: ["quill", "atlas"], hides: true }])).pack;
+    const srcs = ["bed.png", "bed_on.png", "idle.png", "work.png", "sleep.png", "walk.png"];
+    const drawn: any[] = [];
+    const skin = { ...K.spriteSkin(c, new Map(srcs.map((s) => [s, { src: s, width: 1 }]))),
+      drawCharacter: (ctx: any, d: any, look: any) => { drawn.push(["person", look.name]); },
+      drawFurniture: () => {}, drawBubble: () => {},
+      drawTag: (ctx: any, x: number, y: number, look: any) => { drawn.push(["tag", look.label, x, y]); } };
+    const nodes = ["quill", "atlas"].map((name) => ({ name, state: "paused", i: { name } }));
+    const L = Z.zonesLayout(c, nodes);
+    const label = (n: string) => (n === "quill" ? "Quill the Midnight Scribe" : "Atlas of the Northern Maps");
+    const looks = new Map(L.rooms[0].desks.map((d: any) => [d.key, { name: d.node.name, label: label(d.node.name), state: "paused", pose: "paused", free: true }]));
+    const part = F.partOf(L, looks, skin, true, Z.createWalkers(), { frame: () => [], size: () => 0 });
+    const ctx = new Proxy({ measureText: (t: string) => ({ width: t.length * 6 }) } as any, { get(o, k) { if (k in o) return o[k]; return () => {}; }, set(o, k, v) { o[k] = v; return true; } });
+    const env = { pal: { bg: "#000", surface: "#111", border: "#222", text: "#fff", focus: "#0ff" }, mode: "dark", labels: { areas: {} } };
+    const draw = (tagsOff = false) => { drawn.length = 0; F.drawPart(ctx, part, 1, 0, 0, 5000, false, null, env, tagsOff); return [...drawn]; };
+    const hit = (x: number, y: number) => F.hitPart(part, x, y, 5000)?.node.name ?? null;
+    return { c, ctx, draw, hit, label, LONG };
+  }
+  it("each person's tag selects that person, across its whole width and past the picture's edge", () => {
+    const s = crowd();
+    const d = s.draw();
+    expect(d.filter((x) => x[0] === "person")).toEqual([]);                  // both drawn as the bed
+    const tags = d.filter((x) => x[0] === "tag");
+    expect(tags.map((x) => x[1])).toEqual([s.LONG, s.label("quill"), s.label("atlas")]);
+    const pic = PK.stripBox(s.c.furniture[0].activeSprite, 900, 420);
+    for (const name of ["quill", "atlas"]) {
+      const [, text, x, y] = tags.find((t) => t[1] === s.label(name));
+      const b = K.tagBox(s.ctx, x, y, text);
+      for (const px of [b.x + 1, x, b.x + b.w - 2]) for (const py of [b.y + 1, b.y + b.h - 2]) expect([name, px, py, s.hit(px, py)]).toEqual([name, px, py, name]);
+    }
+    // Quill's tag is the one under the picture's centre; Atlas's runs past its right edge.
+    expect(tags.find((t) => t[1] === s.label("quill"))[2]).toBe(900);
+    expect(K.tagBox(s.ctx, tags[2][2], 420, tags[2][1]).x + 10).toBeGreaterThan(pic.x + pic.w);
+    // The picture keeps its left-to-right regions; the item's own label names nobody.
+    expect([s.hit(pic.x + 1, pic.y + 1), s.hit(pic.x + pic.w - 2, pic.y + 1)]).toEqual(["quill", "atlas"]);
+    const own = K.tagBox(s.ctx, tags[0][2], 420, tags[0][1]);
+    expect(s.hit(own.x + 2, own.y + 2)).toBeNull();
+  });
+  it("a tag left out is not hit: with the tags off only the picture is", () => {
+    const s = crowd();
+    const tags = s.draw().filter((x) => x[0] === "tag");
+    const [, text, x, y] = tags[2];
+    const b = K.tagBox(s.ctx, x, y, text), past = b.x + b.w - 2;
+    expect(s.hit(past, b.y + 2)).toBe("atlas");
+    expect(s.draw(true).filter((t) => t[0] === "tag")).toEqual([]);
+    expect(s.hit(past, b.y + 2)).toBeNull();
+  });
+});
+
 describe("defaults", () => {
   it("without the keys: active as the state changes, the person drawn and hit at their seat, the scene's own active set", () => {
     const s = scene([BED]);
