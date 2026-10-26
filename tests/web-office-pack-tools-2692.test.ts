@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { LayoutOverrides } from "../src/ui/fleet-office-pack.js";
 
 vi.mock("node:child_process", async importOriginal => {
   const real = await importOriginal<typeof import("node:child_process")>();
@@ -310,7 +311,7 @@ describe("the offices' layout overrides against the new pack", () => {
   // upload breaking one used to drop the office's whole layout.
   describe("seat reservations (seatFor)", () => {
     const RES = { pack: "snug", door: [600, 710], seats: { lounge: [[780, 280]] },
-      seatFor: { desks: { 0: { for: ["alpha"], lend: false }, 1: { for: ["beta"], lend: true } }, lounge: { 0: { for: ["gamma"], lend: false } } } };
+      seatFor: { desks: { 0: { for: ["alpha"], lend: false }, 1: { for: ["beta"], lend: true } }, lounge: { 0: { for: ["gamma"], lend: false } } } } satisfies LayoutOverrides;   // tuples, as fitSeatFor takes them
     /** v1 without its lounge (everyone's default the desks). */
     const NO_LOUNGE = () => { const m: any = MANIFEST(); delete m.areas.lounge; m.stateZones = { working: "desks", default: "desks" }; return { manifest: m, files: PICTURES(5) }; };
     const setUp = async (overrides: unknown) => {
