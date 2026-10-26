@@ -222,13 +222,14 @@ export class OfficeStore {
   }
   /**
    * Replace every stored office (PUT /ui/offices). `expectedRev`: the rev the page last read — another change since is a
-   * 409, so two editors never overwrite each other unseen. On disk first, then in memory.
+   * 409, so two editors never overwrite each other unseen. On disk first, then in memory. `packOf` (#2692): the packs to
+   * check the overrides against in place of the kept ones (a pack about to replace one; or none, to put back as it was).
    */
-  replace(raw: unknown, expectedRev?: number): OfficeWrite {
+  replace(raw: unknown, expectedRev?: number, opts: { packOf?: OverridePack } = {}): OfficeWrite {
     const s = this.load();
     if (s === "unreadable") return { ok: false, status: 503, error: "offices_unreadable" };
     if (expectedRev !== undefined && expectedRev !== s.rev) return { ok: false, status: 409, error: "offices_changed", detail: `now at rev ${s.rev}` };
-    const checked = checkOffices(raw, this.packOf);
+    const checked = checkOffices(raw, opts.packOf ?? this.packOf);
     if (!checked.ok) return checked;
     const rev = s.rev + 1;
     try { atomicWriteFileSync(this.path, JSON.stringify({ version: 1, rev, ...onDisk(checked.offices) }, null, 2) + "\n", { mode: 0o600 }); }
