@@ -64,6 +64,11 @@ export class UnsupportedCliError extends Error {
   }
 }
 
+/** A retained conversation cannot be selected safely. Stop without retry; this is not a CLI/engine incompatibility. */
+export class ResumeBlockedError extends UnsupportedCliError {
+  constructor(message: string, readonly remedy: string) { super(message); this.name = "ResumeBlockedError"; }
+}
+
 /** See CliBackend.agentSwitch. */
 export interface BackendAgentSwitch {
   agent: string;
@@ -627,6 +632,9 @@ export interface CliBackend {
    * phrasing AgEnD always used. Must match only the CLI's own message.
    */
   resumeMissingPattern?(): RegExp;
+
+  /** A retained session is positively present but blocked (for example duplicate-store ambiguity). Never abandon it. */
+  resumeBlockedPattern?(): RegExp;
 
   /**
    * #1217: a dialog the CLI shows in answer to its quit command that must not

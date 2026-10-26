@@ -42,7 +42,7 @@ import { IpcServer } from "./channel/ipc-bridge.js";
 import { daemonBudgetMs } from "./channel/ipc-timeouts.js";
 import { MessageBus } from "./channel/message-bus.js";
 import type { CliBackend, CliBackendConfig, ErrorPattern, InputBox, InputDraft, InputUnavailableTransient, InstanceState, InstanceStateSnapshot, RuntimeDialog, StartupDialog, SteerComposerMode } from "./backend/types.js";
-import { shellQuote, UnsupportedCliError } from "./backend/types.js";
+import { shellQuote, UnsupportedCliError, ResumeBlockedError } from "./backend/types.js";
 import type { ChannelAdapter, InboundMessage } from "./channel/types.js";
 import { getTmuxSession } from "./config.js";
 import { routeToolCall } from "./channel/tool-router.js";
@@ -3705,6 +3705,11 @@ export class Daemon extends EventEmitter {
   private stopOnUnsupportedCliRespawn(err: unknown): boolean {
     if (!(err instanceof UnsupportedCliError)) return false;
     this.healthCheckPaused = true;
+    if (err instanceof ResumeBlockedError) {
+      this.logger.error({ reason: err.message }, "Not respawning: retained session needs store repair");
+      this.emitSupervisionEnded(err.message, err.remedy, undefined, "resume_blocked");
+      return true;
+    }
     this.logger.error({ reason: err.message }, "Not respawning: the installed CLI cannot run this instance as configured");
     this.emitSupervisionEnded(err.message, "Install a CLI version that supports this instance's configuration, then start it again.", undefined, "cli_unsupported");
     return true;
@@ -3723,7 +3728,7 @@ export class Daemon extends EventEmitter {
    * `crash_loop` already had this treatment; this is the same bridge for the other
    * four, carrying a human-readable cause and the operator's next step.
    */
-  private emitSupervisionEnded(reason: string, remedy: string, exitCode?: number, cause?: "cli_unsupported" | "session_oom" | "oom_unclear"): void {
+  private emitSupervisionEnded(reason: string, remedy: string, exitCode?: number, cause?: "cli_unsupported" | "session_oom" | "oom_unclear" | "resume_blocked"): void {
     this.publishWorkingState("supervision_ended");
     this.emit("supervision_ended", {
       name: this.name,
@@ -11414,6 +11419,15 @@ export class Daemon extends EventEmitter {
       if (attemptedResume) {
       let paneText: string | undefined;
       try { paneText = await this.tmux?.capturePaneWithHistory(50); } catch { /* pane may be gone */ }
+      if (paneText && this.backend.resumeBlockedPattern?.().test(paneText)) {
+        // #2598: a duplicate id proves the conversation exists. The generic retry escape hatch must not
+        // abandon that pin or turn a store-selection error into a fresh conversation, even after many retries.
+        await this.killProcessTree("SIGTERM", "spawn: retained session is blocked");
+        this.startupAdmission?.();
+        await this.tmux!.killWindow();
+        this.startupAdmission?.();
+        throw new ResumeBlockedError(t("inst.kiro_resume_ambiguous"), t("inst.kiro_resume_ambiguous_remedy"));
+      }
       const proven = this.paneSaysNoConversation(paneText);
       if (!proven) {
         const failures = this.bumpUnprovenResumeFailures();
