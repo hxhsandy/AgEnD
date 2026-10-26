@@ -22,7 +22,8 @@ import {
 import { readKiroLedger, kiroHasNoLaunchRecord } from "./kiro-engine-ledger.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, unlinkSync, statSync } from "node:fs";
-import { type BackendAgentSwitch, type BackendLaunchWarning, type CliBackend, type CliBackendConfig, type ErrorPattern, type StartupDialog, type RuntimeDialog, type RemoteCardOption, type RemoteInputCard, type RemoteQuestionCard, type SteerComposerMode, UnsupportedCliError, ResumeBlockedError, resolveBinary, shellQuote, validateEffort, validateModel, warnIfModelMismatch } from "./types.js";
+import { type BackendAgentSwitch, type BackendLaunchWarning, type BackendSessionProof, type CliBackend, type CliBackendConfig, type ErrorPattern, type StartupDialog, type RuntimeDialog, type RemoteCardOption, type RemoteInputCard, type RemoteQuestionCard, type SteerComposerMode, UnsupportedCliError, ResumeBlockedError, resolveBinary, shellQuote, validateEffort, validateModel, warnIfModelMismatch } from "./types.js";
+import { KIRO_SESSION_ID_COMMAND, kiroTitleCommand } from "../kiro-session-proof.js";
 import { PIE_CLASS } from "../tui-glyphs.js";
 import { KIRO_EXPIRED_LOGIN_SCREEN } from "../login-flows.js";
 import { t } from "../locale.js";
@@ -151,6 +152,61 @@ export function readKiroSteerComposer(pane: string): SteerComposerMode | null {
 export function readKiroComposerText(pane: string): string | null {
   const c = readKiroComposer(pane);
   return c?.mode === "text" ? c.text : null;
+}
+
+/**
+ * #2683: the composer as a one-line housekeeping command (`/session-id`, `/title …`) sees it: `""` when it is
+ * positively empty (the idle placeholder, nothing else), the typed text of a single-row draft, or null for anything
+ * else (busy, another mode, wrapped text, no composer). A typed slash command opens kiro's command menu below the box
+ * (live 2.34.0, tui and V3; tests/fixtures/kiro-session-id-2681):
+ *
+ *   `› /session-id`
+ *   `/session-id    Print the current session ID`
+ *   `──────…`
+ *   ` esc to cancel · ↵ to select`
+ *
+ * and its `›` row is read past that menu. Enter there runs the highlighted entry, the command itself.
+ */
+export function readKiroCommandComposer(pane: string): string | null {
+  const rows = pane.split("\n").map(row => row.replace(/\s+$/, ""));
+  let i = rows.length - 1;
+  while (i >= 0 && (rows[i] === "" || /^[ \t]{20,}\S/.test(rows[i]!))) i--;
+  if (i >= 2 && /^ esc to cancel · .*↵ to select$/.test(rows[i]!) && /^─{20,}$/.test(rows[i - 1]!)) {
+    let r = i - 2, entries = 0;
+    while (r >= 0 && entries < 12 && /^\/[\w-]+ {2,}\S/.test(rows[r]!)) { r--; entries++; }
+    const row = rows[r];
+    return entries > 0 && row !== undefined && /^›[ \t]+\/\S/.test(row) ? row.replace(/^›[ \t]+/, "") : null;
+  }
+  const at = findKiroComposerRow(rows);
+  if (!at || at.continued > 0) return null;
+  const c = readKiroComposer(pane);
+  return c?.mode === "idle" ? "" : c?.mode === "text" ? c.text : null;
+}
+
+/**
+ * #2683: kiro's own answer to `/session-id`, where only that answer is painted: the alert at the bottom of the chat,
+ * on the rows right above the footer (the divider within 8 rows above the composer, and the trust banner's divider
+ * above that one when it is shown). Live 2.34.0, tui and V3 (tests/fixtures/kiro-session-id-2681):
+ *
+ *   `• Session ID: <id>`
+ *   `  Resume with: kiro-cli --resume-id <id>`      (the same id)
+ *
+ * or `• Session ID: none` alone. It is a transient alert (10 s), not a turn. The same lines anywhere else (a quoted
+ * user row is `  › …`, an answer scrolls up) are not read; an agent answer that ends with them would sit in the same
+ * place, which is why the daemon also requires that the alert was not there before it typed the command. Null when no
+ * such alert is shown.
+ */
+export function readKiroSessionIdAlert(pane: string): string | null {
+  const rows = pane.split("\n").map(row => row.replace(/\s+$/, ""));
+  const at = findKiroComposerRow(rows);
+  if (!at) return null;
+  let d = at.index - 1;
+  while (d >= 0 && at.index - d <= 8 && !/^─{20,}$/.test(rows[d]!)) d--;
+  if (d < 0 || !/^─{20,}$/.test(rows[d]!)) return null;
+  if (d >= 2 && /^ \S/.test(rows[d - 1]!) && /^─{20,}$/.test(rows[d - 2]!)) d -= 2;   // ` Trust All Tools active …`
+  if (rows[d - 1] === "• Session ID: none") return "none";
+  const id = /^ {2}Resume with: kiro-cli --resume-id ([A-Za-z0-9][A-Za-z0-9_.-]{0,199})$/.exec(rows[d - 1] ?? "")?.[1];
+  return id !== undefined && id !== "none" && rows[d - 2] === `• Session ID: ${id}` ? id : null;
 }
 
 /**
@@ -2284,6 +2340,23 @@ export class KiroBackend implements CliBackend {
     const built = this.builtLaunch, plan = this.activePlan;
     if (!built) return null;
     return { engine: built.engine, sessionId: plan?.mode === "resume" && plan.id ? plan.id : null };
+  }
+
+  /**
+   * M-2025: `/session-id` and `/title` exist on tui and V3 only. Legacy keeps
+   * the tmux window name and the sqlite lookup.
+   */
+  sessionProof(): BackendSessionProof | null {
+    const ui = this.activeUi;
+    if (ui !== "tui" && ui !== "v3") return null;
+    const pinned = this.transcriptLaunch()?.sessionId ?? null;
+    return {
+      pinned,
+      sessionIdCommand: KIRO_SESSION_ID_COMMAND,
+      titleCommand: this.activeInstance ? kiroTitleCommand(this.activeInstance) : null,
+      readComposer: readKiroCommandComposer,
+      readSessionIdAlert: readKiroSessionIdAlert,
+    };
   }
 
   getSessionId(): string | null {

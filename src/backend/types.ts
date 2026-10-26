@@ -87,6 +87,22 @@ export interface BackendAgentSwitch {
 /** A launch-time warning; see BackendAgentSwitch.confirm for `quiet`. */
 export interface BackendLaunchWarning { message: string; quiet?: boolean }
 
+/** See CliBackend.sessionProof. */
+export interface BackendSessionProof {
+  /** The conversation this launch resumed by id, or null on a fresh start. */
+  pinned: string | null;
+  sessionIdCommand: string;
+  /** `/title <instance name>`, or null when the name cannot be sent. */
+  titleCommand: string | null;
+  /**
+   * #2683: the composer as a one-line command sees it: `""` when positively empty, the typed text of a one-row draft,
+   * or null when it cannot be read (busy, another mode, no composer). Only `""` admits a command.
+   */
+  readComposer(pane: string): string | null;
+  /** #2683: the id in kiro's `/session-id` alert (`"none"` included), only where that alert is painted; else null. */
+  readSessionIdAlert(pane: string): string | null;
+}
+
 export interface CliBackendConfig {
   workingDirectory: string;
   instanceDir: string;
@@ -831,6 +847,11 @@ export interface CliBackend {
    * and calls `confirm` once the layout shows `agent` (returns warnings to surface). Null: nothing to check.
    */
   agentSwitch?(): BackendAgentSwitch | null;
+  /**
+   * Optional (M-2025): after a tui/V3 launch, type `/session-id` (compare with `pinned`)
+   * and `/title` into a positively empty composer. Null on engines that have no these commands.
+   */
+  sessionProof?(): BackendSessionProof | null;
   /** Optional: where this launch's instructions live, when not the backend's usual file (kiro's agent, #906). */
   instructionsSource?(): string | null;
   /** Optional: the instance is being deleted or replaced — forget per-instance state kept outside its directory. */
