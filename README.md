@@ -130,6 +130,8 @@ agend start                     # 3. Launch your fleet 🎉 (skip if quickstart 
 
 Open Telegram or Discord, send a message to your bot, and start working from your phone. Or open the web dashboard at `http://localhost:19280/`. To sign in, run `agend web --code` on this machine, or send `/web` to your bot.
 
+Or in Docker: give [AgEnD in Docker](docs/docker.md) to an agent (General, or Claude Code on your machine). It is a runbook: the agent sets AgEnD up in a container for you and maintains it.
+
 > **Discord?** `agend quickstart` supports Discord too — it's built in, no extra install needed. See [Discord setup guide](docs/features.md#discord-adapter).
 
 ## How It Works
@@ -199,6 +201,7 @@ graph LR
 - [Features](docs/features.md) — detailed feature documentation
 - [CLI Reference](docs/cli.md) — all commands and options
 - [Configuration](docs/configuration.md) — fleet.yaml complete reference
+- [AgEnD in Docker](docs/docker.md) — a runbook an agent follows to set up and maintain AgEnD in Docker
 - [Security](docs/SECURITY.md) — trust model and hardening
 - [Development Setup](docs/development.md) — working on AgEnD itself
 
