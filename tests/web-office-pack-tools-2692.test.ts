@@ -27,7 +27,7 @@ vi.mock("node:child_process", async importOriginal => {
     execFile: refuse("execFile"), execFileSync: refuse("execFileSync"), fork: refuse("fork") };
 });
 
-const { OfficePackTools, OfficePackBatchLimiter, OfficePackUploads, overrideConflicts, dropConflicts, OFFICE_PACK_TOOL_LIMITS } = await import("../src/web-office-pack-tools.js");
+const { OfficePackTools, OfficePackBatchLimiter, OfficePackUploads, overrideConflicts, dropConflicts, dropsText, OFFICE_PACK_TOOL_LIMITS } = await import("../src/web-office-pack-tools.js");
 const { readPackSources, encodePackBatch, sendPackBatchInParts, sendPackSources } = await import("../src/web-office-pack-read.js");
 const { OfficeSkinStore, checkSkinUpload, PREVIOUS_FILE } = await import("../src/web-office-skins.js");
 const { OfficeStore } = await import("../src/web-office-store.js");
@@ -304,6 +304,32 @@ describe("the offices' layout overrides against the new pack", () => {
     expect(now.find(o => o.id === "den")!.overrides).toEqual(DEN);
     // And the offices save again (PUT /ui/offices checks every office against the kept pack).
     expect(offices.replace(now, offices.rev())).toMatchObject({ ok: true });
+  });
+});
+
+describe("the notice names what a change drops", () => {
+  it("an admin approving from General sees each office and its entries; the applied notice too", async () => {
+    const { t, offices, notices } = tools({ approval: "apply" });
+    await send(t, "office_pack_upload", [SOURCE()]);
+    putOffices(offices);
+    t.setApproval("approve", "admin");
+    const v2 = SOURCE({ desks: 3, rack: false, seed: 9 });
+    const r = await send(t, "office_pack_upload", [v2], { drop_invalid_overrides: true }) as any;
+    expect(r.pending.drops.map((d: any) => d.entry)).toEqual(["seats.desks", "furniture.rack", "furnitureNight.rack"]);
+    expect(notices.at(-1)!.text).toContain("and dropping 3 layout override(s) that no longer fit — Ops: seats.desks, furniture.rack, furnitureNight.rack.");
+    const yes = t.decide(r.pending.id, "approve", "admin");
+    expect(yes).toMatchObject({ ok: true, text: expect.stringContaining("— Ops: seats.desks, furniture.rack, furnitureNight.rack") });
+  });
+
+  it("several offices, grouped; past the first six entries, the rest are counted", () => {
+    const c = (office: string, name: string, entry: string) => ({ office, name, entry, rule: "x" });
+    const many = [c("ops", "Ops", "seats.desks"), c("ops", "Ops", "furniture.a"), c("den", "Den", "seats.lounge"), c("ops", "Ops", "furniture.b"),
+      c("den", "Den", "furniture.c"), c("lab", "Lab", "furnitureNight.d"), c("lab", "Lab", "furniture.e"), c("lab", "Lab", "furniture.f")];
+    expect(dropsText(many)).toBe("and dropping 8 layout override(s) that no longer fit — Ops: seats.desks, furniture.a, furniture.b; Den: seats.lounge, furniture.c; Lab: furnitureNight.d …and 2 more");
+    expect(dropsText(many.slice(0, 1))).toBe("and dropping 1 layout override(s) that no longer fit — Ops: seats.desks");
+    const zh = readFileSync(join(process.cwd(), "src/locale.ts"), "utf8");
+    expect(zh).toContain('"office_packs.drops": "並移除 {0} 項已不合用的版面調整——{1}"');
+    expect(zh).toContain('"office_packs.drops_more": "…另有 {0} 項"');
   });
 });
 

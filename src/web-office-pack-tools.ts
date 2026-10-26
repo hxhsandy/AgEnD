@@ -104,6 +104,23 @@ export function dropConflicts(offices: readonly Office[], conflicts: readonly Ov
     return Object.keys(ov).some(k => k !== "pack") ? { ...o, overrides: ov as LayoutOverrides } : bare;
   });
 }
+/** How many dropped entries a notice names; the rest are counted. */
+export const DROPS_SHOWN = 6;
+/**
+ * What a change drops, for its notice (an admin approving from General sees it): the count, then each office with its
+ * entries — "Ops: seats.desks, furniture.rack; Den: …" — the first DROPS_SHOWN entries, "…and N more" after them.
+ */
+export function dropsText(conflicts: readonly OverrideConflict[]): string {
+  const shown = conflicts.slice(0, DROPS_SHOWN), byOffice = new Map<string, { name: string; entries: string[] }>();
+  for (const c of shown) {
+    const g = byOffice.get(c.office) ?? { name: c.name || c.office, entries: [] };
+    if (!g.entries.includes(c.entry)) g.entries.push(c.entry);
+    byOffice.set(c.office, g);
+  }
+  const listed = [...byOffice.values()].map(g => `${g.name}: ${g.entries.join(", ")}`).join("; ");
+  const more = conflicts.length > DROPS_SHOWN ? ` ${t("office_packs.drops_more", conflicts.length - DROPS_SHOWN)}` : "";
+  return t("office_packs.drops", conflicts.length, listed + more);
+}
 const conflictText = (c: readonly OverrideConflict[]) => c.map(x => `office "${x.name}" (${x.office}): ${x.rule}`).join("; ");
 
 // ── The rate limit: batches and bytes ──
@@ -530,7 +547,7 @@ export class OfficePackTools {
         done();
         return { answer: { applied }, summary: t("office_packs.uploaded", applied.map(a => t("office_packs.upload_item", String(a.id), String(a.name), Number(Object.keys(change.items.find(c => c.record.id === a.id)!.record.files).length), mib(Number(a.bytes)))
           + (a.replaced ? ` ${t("office_packs.replaces", String(a.replaced).slice(0, 8))}` : "")
-          + (Array.isArray(a.dropped_overrides) ? ` ${t("office_packs.drops", a.dropped_overrides.length)}` : "")).join("; ")) };
+          + (Array.isArray(a.dropped_overrides) ? ` ${dropsText(a.dropped_overrides as OverrideConflict[])}` : "")).join("; ")) };
       }
       case "delete": {
         const r = this.recordOf(change.id) ?? this.deps.skins.records().previous.get(change.id)!;
@@ -562,7 +579,7 @@ export class OfficePackTools {
           replaced_version: r.replaced?.sha ?? null, previous_kept: !!r.replaced, ...(judged.drops.length ? { dropped_overrides: judged.drops } : {}), ...extra });
         this.deps.changed({ skins: r.rev, ...(wrote !== null ? { offices: wrote } : {}), changes: true });
         return { answer: { applied: { restored: change.id, version: now.sha, replaced: r.replaced?.sha ?? null, ...(judged.drops.length ? { dropped_overrides: judged.drops } : {}) } },
-          summary: t("office_packs.restore", change.id, now.sha.slice(0, 8)) };
+          summary: t("office_packs.restore", change.id, now.sha.slice(0, 8)) + (judged.drops.length ? ` ${dropsText(judged.drops)}` : "") };
       }
       case "style": {
         const list = this.deps.offices.list();
@@ -623,9 +640,9 @@ export function summaryOf(v: PackChangeView): string {
   const ids = v.packs.map(p => p.id).join(", ");
   switch (v.action) {
     case "upload": return t("office_packs.upload", v.packs.map(p => t("office_packs.upload_item", p.id, p.name, p.files ?? 0, mib(p.bytes ?? 0)) + (p.replaces ? ` ${t("office_packs.replaces", p.replaces.slice(0, 8))}` : "")).join("; ")
-      + (v.drops?.length ? ` ${t("office_packs.drops", v.drops.length)}` : ""));
+      + (v.drops?.length ? ` ${dropsText(v.drops)}` : ""));
     case "delete": return t(v.keep_previous ? "office_packs.delete_keep" : "office_packs.delete", ids);
-    case "restore": return t("office_packs.restore_pending", ids) + (v.drops?.length ? ` ${t("office_packs.drops", v.drops.length)}` : "");
+    case "restore": return t("office_packs.restore_pending", ids) + (v.drops?.length ? ` ${dropsText(v.drops)}` : "");
     case "style": return t("office_packs.style", v.office ?? "", v.style ?? "");
   }
 }
